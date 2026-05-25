@@ -747,7 +747,7 @@ namespace PDMLite
             else
             {
                 var sb = new StringBuilder();
-                foreach (var entry in history.Take(4))
+                foreach (var entry in history.Take(5))
                 {
                     string dateStr = "—";
                     if (DateTime.TryParse(entry.ChangedDate, out DateTime dt))
