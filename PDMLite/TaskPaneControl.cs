@@ -3,6 +3,7 @@ using SolidWorks.Interop.swconst;
 using System;
 using System.Collections.Generic;
 using System.Drawing;
+using System.Linq;
 using System.IO;
 using System.Text;
 using System.Windows.Forms;
@@ -746,7 +747,7 @@ namespace PDMLite
             else
             {
                 var sb = new StringBuilder();
-                foreach (var entry in history)
+                foreach (var entry in history.Take(4))
                 {
                     string dateStr = "—";
                     if (DateTime.TryParse(entry.ChangedDate, out DateTime dt))
