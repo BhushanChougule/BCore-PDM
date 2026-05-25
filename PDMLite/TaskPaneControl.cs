@@ -326,10 +326,10 @@ namespace PDMLite
                 Location = new Point(x, y),
                 AutoSize = false,
                 Width = w,
-                Height = S(300)
+                Height = S(240)
             };
             this.Controls.Add(_historyContent);
-            y += S(305);
+            y += S(245);
 
             // ── Pending Requests (Master only) ────────────────────────
             this.Controls.Add(Divider(x, y, w));
