@@ -1,0 +1,100 @@
+﻿using SolidWorks.Interop.sldworks;
+using SolidWorks.Interop.swconst;
+using System.IO;
+
+namespace PDMLite
+{
+    public static class ExportManager
+    {
+        public static void ExportAll(ModelDoc2 doc, string exportRoot, string stamp)
+        {
+            int docType = doc.GetType();
+
+            // ── Create subfolders ─────────────────────────────────────
+            string pdfFolder = Path.Combine(exportRoot, "PDF");
+            string stepFolder = Path.Combine(exportRoot, "STEP");
+            string dxfFolder = Path.Combine(exportRoot, "DXF");
+
+            Directory.CreateDirectory(pdfFolder);
+            Directory.CreateDirectory(stepFolder);
+            Directory.CreateDirectory(dxfFolder);
+
+            if (docType == (int)swDocumentTypes_e.swDocDRAWING)
+            {
+                // Drawing → PDF only (all sheets in one file)
+                ExportDrawingPdf(doc, Path.Combine(pdfFolder, stamp + ".pdf"));
+            }
+            else if (docType == (int)swDocumentTypes_e.swDocPART)
+            {
+                // Part → STEP + flat pattern DXF (sheet metal only)
+                ExportFile(doc, Path.Combine(stepFolder, stamp + ".step"));
+                ExportFlatPattern(doc, Path.Combine(dxfFolder,
+                    stamp + "_FLAT.dxf"));
+            }
+            else if (docType == (int)swDocumentTypes_e.swDocASSEMBLY)
+            {
+                // Assembly → STEP
+                ExportFile(doc, Path.Combine(stepFolder, stamp + ".step"));
+            }
+        }
+
+        // Universal export — SOLIDWORKS picks format from file extension
+        private static void ExportFile(ModelDoc2 doc, string outPath)
+        {
+            int errors = 0;
+            int warnings = 0;
+            doc.Extension.SaveAs(
+                outPath,
+                (int)swSaveAsVersion_e.swSaveAsCurrentVersion,
+                (int)swSaveAsOptions_e.swSaveAsOptions_Silent,
+                null,
+                ref errors,
+                ref warnings);
+        }
+        // Export drawing — all sheets to one PDF
+        private static void ExportDrawingPdf(ModelDoc2 doc, string outPath)
+        {
+            int errors = 0;
+            int warnings = 0;
+            doc.Extension.SaveAs(
+                outPath,
+                (int)swSaveAsVersion_e.swSaveAsCurrentVersion,
+                (int)swSaveAsOptions_e.swSaveAsOptions_Silent,
+                null,
+                ref errors,
+                ref warnings);
+        }
+        
+        // Sheet metal flat pattern DXF
+        private static void ExportFlatPattern(ModelDoc2 doc, string outPath)
+        {
+            try
+            {
+                object[] features = (object[])doc.FeatureManager.GetFeatures(true);
+                if (features == null) return;
+
+                bool hasSheetMetal = false;
+                foreach (object f in features)
+                {
+                    if (((Feature)f).GetTypeName2() == "SheetMetal")
+                    {
+                        hasSheetMetal = true;
+                        break;
+                    }
+                }
+
+                if (!hasSheetMetal) return;
+
+                int errors = 0, warnings = 0;
+                doc.Extension.SaveAs(
+                    outPath,
+                    (int)swSaveAsVersion_e.swSaveAsCurrentVersion,
+                    (int)swSaveAsOptions_e.swSaveAsOptions_Silent,
+                    null,
+                    ref errors,
+                    ref warnings);
+            }
+            catch { }
+        }
+    }
+}
