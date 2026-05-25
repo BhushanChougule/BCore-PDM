@@ -210,6 +210,8 @@ Core vault operations.
 
 DPI-aware UserControl. Scale: g.DpiX/96f. S(v) = v\*\_scale.
 
+Imports: requires using System.Linq (for history.Take(5)).
+
 Color palette:
 
 \- cBrand(65,120,175), cBrandDark(44,85,128), cGreen(60,140,95)
@@ -232,9 +234,13 @@ Sections (top to bottom):
 
 5\. Master Actions (Lock/Unlock/Release/New Revision/Rollback) - Masters only
 
-6\. File History timeline
+6\. File History timeline (shows last 5 entries, most recent first, using history.Take(5))
 
 7\. Pending Requests section (Masters only, at bottom)
+
+
+
+File History height: Height=S(300), y+=S(305) — sized for 5 entries. Adjust both if entry count changes.
 
 
 
@@ -398,7 +404,7 @@ GetNextRevision() in VaultManager.cs handles this
 
 \- Export archive/cleanup on release and rollback
 
-\- File History with timeline
+\- File History with timeline (last 5 entries, most recent first)
 
 \- Engineer lock/release notifications on file open
 
@@ -445,6 +451,14 @@ GetNextRevision() in VaultManager.cs handles this
 8\. Audit Report (export history to Excel)
 
 9\. Engineer PC rollout
+
+
+
+\## Development Workflow
+
+\- Always create a new branch and PR for each change
+
+\- Always update CLAUDE.md in the same PR when project structure or behaviour changes
 
 
 
