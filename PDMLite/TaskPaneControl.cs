@@ -326,10 +326,10 @@ namespace PDMLite
                 Location = new Point(x, y),
                 AutoSize = false,
                 Width = w,
-                Height = S(240)
+                Height = S(300)
             };
             this.Controls.Add(_historyContent);
-            y += S(245);
+            y += S(305);
 
             // ── Pending Requests (Master only) ────────────────────────
             this.Controls.Add(Divider(x, y, w));
@@ -747,7 +747,7 @@ namespace PDMLite
             else
             {
                 var sb = new StringBuilder();
-                foreach (var entry in history.Take(4))
+                foreach (var entry in history.Take(5))
                 {
                     string dateStr = "—";
                     if (DateTime.TryParse(entry.ChangedDate, out DateTime dt))
