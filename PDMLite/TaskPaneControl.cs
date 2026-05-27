@@ -23,7 +23,11 @@ namespace PDMLite
         private Button _btnUnlock;
         private Button _btnNewRev;
         private Button _btnRollback;
-        private Button _btnRequestRev;
+        private Button _btnReqUnlock;
+        private Button _btnReqRevision;
+        private Button _btnReqRelease;
+        private Button _btnUpdateDrawings;
+        private Button _btnMyRequests;
         private TextBox _searchBox;
         private Panel _resultsPanel;
         private Panel _requestsPanel;
@@ -263,26 +267,6 @@ namespace PDMLite
             _lockedVal = MakeInfoRowInCard(infoCard, "Locked By", fLabel, fValue, S(6), w - S(12), ref iy);
             y += S(92);
 
-            // ── Engineer: Request Revision button ─────────────────────
-            // Visible only to engineers when file is Released
-            _btnRequestRev = new Button
-            {
-                Text = "Request Revision",
-                Font = fBtn,
-                Width = w,
-                Height = S(24),
-                Location = new Point(x, y),
-                BackColor = Color.FromArgb(100, 130, 170),
-                ForeColor = Color.White,
-                FlatStyle = FlatStyle.Flat,
-                Cursor = Cursors.Hand,
-                Visible = false // shown dynamically in Refresh
-            };
-            _btnRequestRev.FlatAppearance.BorderSize = 0;
-            _btnRequestRev.Click += (s, e) => DoAction("requestrev");
-            this.Controls.Add(_btnRequestRev);
-            y += S(28);
-
             this.Controls.Add(Divider(x, y, w));
             y += S(10);
 
@@ -292,23 +276,35 @@ namespace PDMLite
             this.Controls.Add(masterLbl);
             y += S(20);
 
-            _btnLock = MakeActionButton("Lock File", cOrange, fBtn, x, w, ref y, isMaster);
-            _btnRelease = MakeActionButton("Release File", cGreen, fBtn, x, w, ref y, isMaster);
-            _btnUnlock = MakeActionButton("Unlock File", cPurple, fBtn, x, w, ref y, isMaster);
-            _btnNewRev = MakeActionButton("New Revision", cDark, fBtn, x, w, ref y, isMaster);
-            _btnRollback = MakeActionButton("Rollback Revision", cMaroon, fBtn, x, w, ref y, isMaster);
+            _btnLock    = MakeActionButton("Lock File",          cOrange, fBtn, x, w, ref y, isMaster);
+            _btnRelease = MakeActionButton("Release File",        cGreen,  fBtn, x, w, ref y, isMaster);
+            _btnUnlock  = MakeActionButton("Unlock File",         cPurple, fBtn, x, w, ref y, isMaster);
+            _btnNewRev  = MakeActionButton("New Revision",        cDark,   fBtn, x, w, ref y, isMaster);
+            _btnRollback = MakeActionButton("Rollback Revision",  cMaroon, fBtn, x, w, ref y, isMaster);
 
-            _btnLock.Click += (s, e) => DoAction("lock");
+            _btnLock.Click    += (s, e) => DoAction("lock");
             _btnRelease.Click += (s, e) => DoAction("release");
-            _btnUnlock.Click += (s, e) => DoAction("unlock");
-            _btnNewRev.Click += (s, e) => DoAction("newrev");
+            _btnUnlock.Click  += (s, e) => DoAction("unlock");
+            _btnNewRev.Click  += (s, e) => DoAction("newrev");
             _btnRollback.Click += (s, e) => DoAction("rollback");
 
-            _btnLock.Visible = isMaster;
-            _btnRelease.Visible = isMaster;
-            _btnUnlock.Visible = isMaster;
-            _btnNewRev.Visible = isMaster;
-            _btnRollback.Visible = isMaster;
+            // ── Engineer Actions (same y-position, shown for non-masters) ─
+            int engY = y - S(5 * 28); // start at same position as master buttons
+            Label engLbl = MakeSectionHeader("ENGINEER ACTIONS", fSection, x, engY - S(20), w);
+            engLbl.Visible = !isMaster;
+            this.Controls.Add(engLbl);
+
+            _btnReqUnlock     = MakeActionButton("Request Unlock",    cOrange, fBtn, x, w, ref engY, !isMaster);
+            _btnReqRevision   = MakeActionButton("Request Revision",  cDark,   fBtn, x, w, ref engY, !isMaster);
+            _btnReqRelease    = MakeActionButton("Request Release",   cGreen,  fBtn, x, w, ref engY, !isMaster);
+            _btnUpdateDrawings = MakeActionButton("Update Drawings",  cBrand,  fBtn, x, w, ref engY, !isMaster);
+            _btnMyRequests    = MakeActionButton("My Requests",       cPurple, fBtn, x, w, ref engY, !isMaster);
+
+            _btnReqUnlock.Click      += (s, e) => DoAction("requnlock");
+            _btnReqRevision.Click    += (s, e) => DoAction("requestrev");
+            _btnReqRelease.Click     += (s, e) => DoAction("reqrelease");
+            _btnUpdateDrawings.Click += (s, e) => DoAction("updatedrawings");
+            _btnMyRequests.Click     += (s, e) => DoAction("myrequests");
 
             y += S(4);
             this.Controls.Add(Divider(x, y, w));
@@ -707,7 +703,6 @@ namespace PDMLite
                 _revVal.Text = "—";
                 _lockedVal.Text = "—";
                 _historyContent.Text = "No history yet";
-                _btnRequestRev.Visible = false;
                 RefreshRequests();
                 return;
             }
@@ -734,9 +729,6 @@ namespace PDMLite
             _revVal.Text = string.IsNullOrEmpty(rev) ? "—" : "REV " + rev;
             _lockedVal.Text = lockInfo.IsLocked ? lockInfo.LockedBy : "Not Locked";
             _lockedVal.ForeColor = lockInfo.IsLocked ? cRed : cGreen;
-
-            // Show Request Revision button only for engineers on Released files
-            _btnRequestRev.Visible = !isMaster && status == "Released";
 
             // File History
             var history = DatabaseManager.GetFileHistory(filePath);
@@ -784,6 +776,10 @@ namespace PDMLite
             else if (action == "newrev") VaultManager.StartNewRevision(doc);
             else if (action == "rollback") VaultManager.RollbackRevision(doc);
             else if (action == "requestrev") VaultManager.RequestRevision(doc);
+            else if (action == "requnlock") VaultManager.RequestUnlock(doc);
+            else if (action == "reqrelease") VaultManager.RequestRelease(doc);
+            else if (action == "updatedrawings") VaultManager.OpenOrCreateDrawing(doc);
+            else if (action == "myrequests") { VaultManager.ViewMyRequests(); return; }
 
             Refresh(doc);
         }
