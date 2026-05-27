@@ -328,6 +328,9 @@ namespace PDMLite
                 var doc = LoadOrCreate();
                 foreach (var el in doc.Root.Element("Files").Elements("File"))
                 {
+                    string status = (string)el.Element("Status") ?? "";
+                    if (status != "Released") continue;
+
                     string partNo = ((string)el.Element("PartNumber") ?? "").ToLower();
                     string desc = ((string)el.Element("Description") ?? "").ToLower();
                     string fileName = ((string)el.Element("FileName") ?? "").ToLower();
