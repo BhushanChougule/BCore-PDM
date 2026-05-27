@@ -709,7 +709,7 @@ namespace PDMLite
 
             string filePath = doc.GetPathName();
             string fileName = Path.GetFileName(filePath);
-            string status = DatabaseManager.GetFileStatus(filePath);
+            string status = DatabaseManager.GetFileStatusByName(filePath);
             string partNo = PropertyValidator.GetProperty(doc, "PartNo");
             string rev = PropertyValidator.GetProperty(doc, "Revision");
             var lockInfo = DatabaseManager.GetLockInfo(filePath);

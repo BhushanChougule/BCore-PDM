@@ -456,6 +456,7 @@ namespace PDMLite
         public static List<HistoryEntry> GetFileHistory(string filePath)
         {
             var entries = new List<HistoryEntry>();
+            string fileName = System.IO.Path.GetFileName(filePath);
 
             lock (_lock)
             {
@@ -464,21 +465,55 @@ namespace PDMLite
                     .Element("RevisionHistory")
                     .Elements("Entry"))
                 {
-                    if ((string)el.Element("FilePath") == filePath)
+                    string entryPath = (string)el.Element("FilePath") ?? "";
+                    // Match by exact path first; fall back to filename so RELEASED
+                    // folder copies share history with their original WIP path
+                    bool match = string.Equals(entryPath, filePath,
+                                     StringComparison.OrdinalIgnoreCase)
+                              || string.Equals(
+                                     System.IO.Path.GetFileName(entryPath),
+                                     fileName,
+                                     StringComparison.OrdinalIgnoreCase);
+                    if (!match) continue;
+
+                    entries.Add(new HistoryEntry
                     {
-                        entries.Add(new HistoryEntry
-                        {
-                            Status = (string)el.Element("Status") ?? "",
-                            ChangedBy = (string)el.Element("ChangedBy") ?? "",
-                            ChangedDate = (string)el.Element("ChangedDate") ?? "",
-                            ChangeNote = (string)el.Element("ChangeNote") ?? ""
-                        });
-                    }
+                        Status = (string)el.Element("Status") ?? "",
+                        ChangedBy = (string)el.Element("ChangedBy") ?? "",
+                        ChangedDate = (string)el.Element("ChangedDate") ?? "",
+                        ChangeNote = (string)el.Element("ChangeNote") ?? ""
+                    });
                 }
             }
 
             entries.Reverse();
             return entries;
+        }
+
+        // Returns the canonical (WIP/source) status for a file.
+        // Falls back to filename match so RELEASED folder copies reflect correct status.
+        public static string GetFileStatusByName(string filePath)
+        {
+            string fileName = System.IO.Path.GetFileName(filePath);
+            lock (_lock)
+            {
+                var doc = LoadOrCreate();
+                // Exact path first
+                foreach (var el in doc.Root.Element("Files").Elements("File"))
+                {
+                    if (string.Equals((string)el.Element("FilePath"), filePath,
+                            StringComparison.OrdinalIgnoreCase))
+                        return (string)el.Element("Status") ?? "";
+                }
+                // Fallback: same filename, any path
+                foreach (var el in doc.Root.Element("Files").Elements("File"))
+                {
+                    if (string.Equals((string)el.Element("FileName"), fileName,
+                            StringComparison.OrdinalIgnoreCase))
+                        return (string)el.Element("Status") ?? "";
+                }
+            }
+            return "";
         }
     }
 }

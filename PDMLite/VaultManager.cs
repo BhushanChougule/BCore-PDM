@@ -253,10 +253,23 @@ namespace PDMLite
             SetReadOnly(Path.Combine(RelFolder,
                 Path.GetFileName(filePath)), true);
 
-            // ── Update database ───────────────────────────────────────────
+            // ── Update database — source path ─────────────────────────────
             DatabaseManager.LockFile(filePath, user);
             DatabaseManager.SetFileStatus(filePath, "Released", user,
                 "Released REV " + rev);
+
+            // ── Update database — RELEASED folder copy ────────────────────
+            // Ensures the copy in the RELEASED folder shows correct status
+            // and shares the same history via filename fallback in GetFileHistory
+            DatabaseManager.UpsertFile(new VaultFile
+            {
+                FilePath = releasedCopy,
+                FileName = Path.GetFileName(filePath),
+                PartNumber = partNo,
+                Status = "Released",
+                ModifiedBy = user,
+                ModifiedDate = DateTime.Now
+            });
 
             MessageBox.Show(
                 "File Released Successfully!\n\n" +
@@ -324,10 +337,15 @@ namespace PDMLite
             PropertyValidator.SetProperty(doc, "Revision", nextRev);
             doc.Save3((int)swSaveAsOptions_e.swSaveAsOptions_Silent, 0, 0);
 
-            // Reset to WIP
+            // Reset to WIP — source path and RELEASED copy
             DatabaseManager.UnlockFile(filePath);
             DatabaseManager.SetFileStatus(filePath, "WIP", user,
                 "New revision started: REV " + nextRev);
+
+            string relCopy = Path.Combine(RelFolder, Path.GetFileName(filePath));
+            if (File.Exists(relCopy))
+                DatabaseManager.SetFileStatus(relCopy, "WIP", user,
+                    "New revision started: REV " + nextRev);
 
             MessageBox.Show(
                 "Revision bumped to REV " + nextRev + ".\nFile is now back in WIP.",
