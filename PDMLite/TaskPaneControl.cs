@@ -770,7 +770,7 @@ namespace PDMLite
                         ForeColor = StatusColor(entry.Status),
                         Location = new Point(S(6), hy),
                         AutoSize = false,
-                        Width = w - S(14)
+                        Width = _historyPanel.Width - S(14)
                     });
                     hy += S(16);
 
@@ -781,7 +781,7 @@ namespace PDMLite
                         ForeColor = cTextGray,
                         Location = new Point(S(6), hy),
                         AutoSize = false,
-                        Width = w - S(14)
+                        Width = _historyPanel.Width - S(14)
                     });
                     hy += S(14);
 
@@ -794,7 +794,7 @@ namespace PDMLite
                             ForeColor = cTextLight,
                             Location = new Point(S(6), hy),
                             AutoSize = false,
-                            Width = w - S(14)
+                            Width = _historyPanel.Width - S(14)
                         });
                         hy += S(14);
                     }
@@ -803,7 +803,7 @@ namespace PDMLite
                     {
                         BackColor = cBorder,
                         Location = new Point(S(4), hy + S(2)),
-                        Width = w - S(16),
+                        Width = _historyPanel.Width - S(16),
                         Height = S(1)
                     });
                     hy += S(14);
