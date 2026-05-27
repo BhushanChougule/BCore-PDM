@@ -580,92 +580,211 @@ namespace PDMLite
         {
             string user = PDMLiteAddin.CurrentUser;
             string filePath = doc.GetPathName();
-            string fileName = System.IO.Path.GetFileName(filePath);
+            string fileName = Path.GetFileName(filePath);
             string partNo = PropertyValidator.GetProperty(doc, "PartNo");
             string rev = PropertyValidator.GetProperty(doc, "Revision");
 
-            // DPI-aware input dialog for note
-            string note = "";
+            string note = ShowNoteDialog("Request Revision",
+                "Describe the changes needed (optional):");
+            if (note == null) return;
+
+            DatabaseManager.AddRevisionRequest(filePath, user, note);
+            MessageBox.Show(
+                "Revision request submitted!\n\nFile    : " + fileName +
+                "\nPart No : " + partNo + "\nRev     : REV " + rev +
+                "\n\nThe Master will be notified.",
+                "BCore PDM — Request Submitted",
+                MessageBoxButtons.OK, MessageBoxIcon.Information);
+        }
+
+        // ── REQUEST UNLOCK — Engineer requests master to unlock a file ──
+        public static void RequestUnlock(ModelDoc2 doc)
+        {
+            string user = PDMLiteAddin.CurrentUser;
+            string filePath = doc.GetPathName();
+            string fileName = Path.GetFileName(filePath);
+            string note = ShowNoteDialog("Request Unlock",
+                "Reason for unlock request (optional):");
+            if (note == null) return;
+
+            DatabaseManager.AddUnlockRequest(filePath, user, note);
+            MessageBox.Show(
+                "Unlock request submitted!\n\nFile : " + fileName +
+                "\n\nThe Master will be notified.",
+                "BCore PDM — Request Submitted",
+                MessageBoxButtons.OK, MessageBoxIcon.Information);
+        }
+
+        // ── REQUEST RELEASE — Engineer requests master to release a file ─
+        public static void RequestRelease(ModelDoc2 doc)
+        {
+            string user = PDMLiteAddin.CurrentUser;
+            string filePath = doc.GetPathName();
+            string fileName = Path.GetFileName(filePath);
+            string partNo = PropertyValidator.GetProperty(doc, "PartNo");
+            string rev = PropertyValidator.GetProperty(doc, "Revision");
+            string note = ShowNoteDialog("Request Release",
+                "Notes for master (optional):");
+            if (note == null) return;
+
+            DatabaseManager.AddReleaseRequest(filePath, user, note);
+            MessageBox.Show(
+                "Release request submitted!\n\nFile    : " + fileName +
+                "\nPart No : " + partNo + "\nRev     : REV " + rev +
+                "\n\nThe Master will be notified.",
+                "BCore PDM — Request Submitted",
+                MessageBoxButtons.OK, MessageBoxIcon.Information);
+        }
+
+        // ── OPEN OR CREATE DRAWING for current part/assembly ──────────
+        public static void OpenOrCreateDrawing(ModelDoc2 doc)
+        {
+            string filePath = doc.GetPathName();
+            if (string.IsNullOrEmpty(filePath))
+            {
+                MessageBox.Show("Please save the file first.",
+                    "BCore PDM", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                return;
+            }
+
+            string dir = Path.GetDirectoryName(filePath);
+            string name = Path.GetFileNameWithoutExtension(filePath);
+
+            // Search same folder then WIP folder for matching drawing
+            string[] searchDirs = { dir, WipFolder };
+            foreach (string searchDir in searchDirs)
+            {
+                string candidate = Path.Combine(searchDir, name + ".slddrw");
+                if (File.Exists(candidate))
+                {
+                    int errs = 0, warnings = 0;
+                    PDMLiteAddin.SwApp.OpenDoc6(candidate,
+                        (int)swDocumentTypes_e.swDocDRAWING,
+                        (int)swOpenDocOptions_e.swOpenDocOptions_Silent,
+                        "", ref errs, ref warnings);
+                    return;
+                }
+            }
+
+            // No drawing found — prompt user
+            var result = MessageBox.Show(
+                "No drawing found for:\n" + name +
+                "\n\nWould you like to create a new drawing in SOLIDWORKS?",
+                "BCore PDM — Open Drawing",
+                MessageBoxButtons.YesNo, MessageBoxIcon.Question);
+
+            if (result == DialogResult.Yes)
+                PDMLiteAddin.SwApp.NewDocument(
+                    PDMLiteAddin.SwApp.GetUserPreferenceStringValue(
+                        (int)swUserPreferenceStringValue_e
+                            .swDefaultTemplateDrawing),
+                    0, 0, 0);
+        }
+
+        // ── VIEW MY REQUESTS — Engineer sees their submitted requests ──
+        public static void ViewMyRequests()
+        {
+            string user = PDMLiteAddin.CurrentUser;
+            var requests = DatabaseManager.GetRequestsByUser(user);
+
+            if (requests.Count == 0)
+            {
+                MessageBox.Show("You have no submitted requests.",
+                    "BCore PDM — My Requests",
+                    MessageBoxButtons.OK, MessageBoxIcon.Information);
+                return;
+            }
+
+            var sb = new System.Text.StringBuilder();
+            sb.AppendLine("Your Submitted Requests");
+            sb.AppendLine(new string('─', 40));
+            foreach (var req in requests)
+            {
+                sb.AppendLine($"● [{req.RequestType}]  {req.FileName}");
+                if (DateTime.TryParse(req.RequestDate, out DateTime dt))
+                    sb.AppendLine($"  Submitted: {dt:dd/MM/yy HH:mm}");
+                sb.AppendLine($"  Status: {req.Status}");
+                if (!string.IsNullOrEmpty(req.Note))
+                    sb.AppendLine($"  Note: {req.Note}");
+                sb.AppendLine();
+            }
+
+            MessageBox.Show(sb.ToString().TrimEnd(),
+                "BCore PDM — My Requests",
+                MessageBoxButtons.OK, MessageBoxIcon.Information);
+        }
+
+        // ── Shared note input dialog ──────────────────────────────────
+        // Returns null if user cancelled, otherwise the note text (may be empty)
+        private static string ShowNoteDialog(string title, string prompt)
+        {
+            string note = null;
             float scale = 1f;
             using (var tmpG = System.Drawing.Graphics.FromHwnd(IntPtr.Zero))
                 scale = tmpG.DpiX / 96f;
 
             int SC(float v) => (int)(v * scale);
-
-            Font fDlgLabel = new Font("Segoe UI", 4f * scale);
-            Font fDlgInput = new Font("Segoe UI", 4f * scale);
-            Font fDlgBtn = new Font("Segoe UI", 4.5f * scale, FontStyle.Bold);
-
             int dlgW = SC(280);
             int padX = SC(12);
             int innerW = dlgW - padX * 2;
 
+            Font fDlgLabel = new Font("Segoe UI", 4f * scale);
+            Font fDlgBtn = new Font("Segoe UI", 4.5f * scale, FontStyle.Bold);
+
             Form noteForm = new Form
             {
-                Text = "BCore PDM — Request Revision",
+                Text = "BCore PDM — " + title,
                 Width = dlgW,
                 Height = SC(185),
                 StartPosition = FormStartPosition.CenterScreen,
                 FormBorderStyle = FormBorderStyle.FixedDialog,
-                MaximizeBox = false,
-                MinimizeBox = false,
+                MaximizeBox = false, MinimizeBox = false,
                 BackColor = Color.FromArgb(245, 247, 250)
             };
 
-            // Header
             Panel dlgHeader = new Panel
             {
                 BackColor = Color.FromArgb(44, 85, 128),
                 Location = new Point(0, 0),
-                Width = dlgW,
-                Height = SC(26)
+                Width = dlgW, Height = SC(26)
             };
             dlgHeader.Controls.Add(new Label
             {
-                Text = "Request Revision",
+                Text = title,
                 Font = new Font("Segoe UI", 4.5f * scale, FontStyle.Bold),
                 ForeColor = Color.White,
                 Location = new Point(0, 0),
-                AutoSize = false,
-                Width = dlgW,
-                Height = SC(26),
+                AutoSize = false, Width = dlgW, Height = SC(26),
                 TextAlign = ContentAlignment.MiddleCenter
             });
             noteForm.Controls.Add(dlgHeader);
 
-            // Label
             noteForm.Controls.Add(new Label
             {
-                Text = "Describe the changes needed (optional):",
+                Text = prompt,
                 Font = fDlgLabel,
                 ForeColor = Color.FromArgb(60, 60, 60),
                 Location = new Point(padX, SC(34)),
-                AutoSize = false,
-                Width = innerW,
-                Height = SC(18)
+                AutoSize = false, Width = innerW, Height = SC(18)
             });
 
-            // TextBox — directly under label with small gap
             TextBox noteTb = new TextBox
             {
-                Font = fDlgInput,
+                Font = fDlgLabel,
                 Location = new Point(padX, SC(54)),
-                Width = innerW,
-                Height = SC(45),
+                Width = innerW, Height = SC(45),
                 Multiline = true,
                 BorderStyle = BorderStyle.FixedSingle,
                 BackColor = Color.White
             };
             noteForm.Controls.Add(noteTb);
 
-            // Buttons — directly under textbox with small gap
             Button noteOk = new Button
             {
-                Text = "Submit Request",
+                Text = "Submit",
                 Font = fDlgBtn,
                 Location = new Point(padX, SC(108)),
-                Width = SC(128),
-                Height = SC(28),
+                Width = SC(128), Height = SC(28),
                 BackColor = Color.FromArgb(44, 85, 128),
                 ForeColor = Color.White,
                 FlatStyle = FlatStyle.Flat
@@ -684,8 +803,7 @@ namespace PDMLite
                 Text = "Cancel",
                 Font = fDlgBtn,
                 Location = new Point(SC(148), SC(108)),
-                Width = SC(80),
-                Height = SC(28),
+                Width = SC(80), Height = SC(28),
                 BackColor = Color.FromArgb(220, 220, 220),
                 ForeColor = Color.FromArgb(60, 60, 60),
                 FlatStyle = FlatStyle.Flat
@@ -698,19 +816,7 @@ namespace PDMLite
             };
             noteForm.Controls.Add(noteCancel);
 
-            if (noteForm.ShowDialog() != DialogResult.OK) return;
-
-            DatabaseManager.AddRevisionRequest(filePath, user, note);
-
-            MessageBox.Show(
-                "Revision request submitted!\n\n" +
-                "File    : " + fileName + "\n" +
-                "Part No : " + partNo + "\n" +
-                "Rev     : REV " + rev + "\n\n" +
-                "The Master will be notified.",
-                "BCore PDM — Request Submitted",
-                MessageBoxButtons.OK,
-                MessageBoxIcon.Information);
+            return noteForm.ShowDialog() == DialogResult.OK ? note : null;
         }
 
         // ── APPROVE REQUEST — Master approves and starts new revision ─
