@@ -42,6 +42,7 @@ namespace PDMLite
         public string RequestDate { get; set; }
         public string Status { get; set; }
         public string Note { get; set; }
+        public string RequestType { get; set; } // "Unlock", "Revision", "Release"
     }
 
     public static class DatabaseManager
@@ -352,20 +353,19 @@ namespace PDMLite
         // ════════════════════════════════════════════════════════════════
         // Revision Requests
         // ════════════════════════════════════════════════════════════════
-        public static void AddRevisionRequest(string filePath,
-            string requestedBy, string note = "")
+        private static void AddRequest(string requestType, string filePath,
+            string requestedBy, string note)
         {
             lock (_lock)
             {
                 var doc = LoadOrCreate();
-
-                // Ensure RevisionRequests element exists
                 if (doc.Root.Element("RevisionRequests") == null)
                     doc.Root.Add(new XElement("RevisionRequests"));
 
                 doc.Root.Element("RevisionRequests").Add(
                     new XElement("Request",
                         new XElement("Id", DateTime.Now.Ticks.ToString()),
+                        new XElement("RequestType", requestType),
                         new XElement("FilePath", filePath),
                         new XElement("FileName", System.IO.Path.GetFileName(filePath)),
                         new XElement("RequestedBy", requestedBy),
@@ -377,6 +377,18 @@ namespace PDMLite
                 Save(doc);
             }
         }
+
+        public static void AddRevisionRequest(string filePath,
+            string requestedBy, string note = "") =>
+            AddRequest("Revision", filePath, requestedBy, note);
+
+        public static void AddUnlockRequest(string filePath,
+            string requestedBy, string note = "") =>
+            AddRequest("Unlock", filePath, requestedBy, note);
+
+        public static void AddReleaseRequest(string filePath,
+            string requestedBy, string note = "") =>
+            AddRequest("Release", filePath, requestedBy, note);
 
         public static List<RevisionRequest> GetPendingRequests()
         {
@@ -393,6 +405,7 @@ namespace PDMLite
                     requests.Add(new RevisionRequest
                     {
                         Id = (string)el.Element("Id") ?? "",
+                        RequestType = (string)el.Element("RequestType") ?? "Revision",
                         FilePath = (string)el.Element("FilePath") ?? "",
                         FileName = (string)el.Element("FileName") ?? "",
                         RequestedBy = (string)el.Element("RequestedBy") ?? "",
