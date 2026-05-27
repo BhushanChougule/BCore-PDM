@@ -29,8 +29,7 @@ namespace PDMLite
         private Button _btnMyRequests;
         private TextBox _searchBox;
         private Panel _resultsPanel;
-        private Panel _requestsPanel;
-        private Label _requestsHeader;
+        private Button _btnRequests;
         private Timer _searchTimer;
 
         private float _scale = 1f;
@@ -327,196 +326,45 @@ namespace PDMLite
             this.Controls.Add(Divider(x, y, w));
             y += S(10);
 
-            _requestsHeader = MakeSectionHeader("PENDING REQUESTS", fSection, x, y, w);
-            _requestsHeader.Visible = isMaster;
-            this.Controls.Add(_requestsHeader);
-            y += S(20);
-
-            _requestsPanel = new Panel
+            _btnRequests = new Button
             {
-                Location = new Point(x, y),
+                Text = "PENDING REQUESTS",
+                Font = fSection,
                 Width = w,
-                Height = 0,
-                BackColor = cBg,
+                Height = S(26),
+                Location = new Point(x, y),
+                BackColor = cBrandDark,
+                ForeColor = Color.White,
+                FlatStyle = FlatStyle.Flat,
+                Cursor = Cursors.Hand,
+                TextAlign = ContentAlignment.MiddleLeft,
+                Padding = new Padding(S(6), 0, 0, 0),
                 Visible = isMaster
             };
-            this.Controls.Add(_requestsPanel);
+            _btnRequests.FlatAppearance.BorderSize = 0;
+            _btnRequests.Click += (s, e) => OpenRequestsPopup();
+            this.Controls.Add(_btnRequests);
         }
 
-        // ── Refresh Pending Requests (Master only) ────────────────────
+        // ── Refresh Pending Requests button count (Master only) ──────
         private void RefreshRequests()
         {
-            if (_requestsPanel == null) return;
+            if (_btnRequests == null) return;
             bool isMaster = DatabaseManager.GetUserRole(
                 PDMLiteAddin.CurrentUser) == "Master";
             if (!isMaster) return;
 
-            _requestsPanel.Controls.Clear();
-            var requests = DatabaseManager.GetPendingRequests();
-
-            _requestsHeader.Text = requests.Count > 0
-                ? $"PENDING REQUESTS  ({requests.Count})"
+            var count = DatabaseManager.GetPendingRequests().Count;
+            _btnRequests.Text = count > 0
+                ? $"PENDING REQUESTS  ({count})"
                 : "PENDING REQUESTS";
+        }
 
-            if (requests.Count == 0)
-            {
-                _requestsPanel.Controls.Add(new Label
-                {
-                    Text = "No pending requests",
-                    Font = new Font("Segoe UI", 3.5f * _scale),
-                    ForeColor = cTextLight,
-                    Location = new Point(0, S(4)),
-                    AutoSize = false,
-                    Width = S(188),
-                    Height = S(18)
-                });
-                _requestsPanel.Height = S(24);
-                return;
-            }
-
-            int ry = 0;
-            int rw = S(188);
-            Font fReqBold = new Font("Segoe UI", 3.8f * _scale, FontStyle.Bold);
-            Font fReqSub = new Font("Segoe UI", 3.3f * _scale);
-            Font fReqBtn = new Font("Segoe UI", 3.5f * _scale, FontStyle.Bold);
-
-            foreach (var req in requests)
-            {
-                bool hasNote = !string.IsNullOrEmpty(req.Note);
-                int btnY = hasNote ? S(68) : S(56);
-                int cardHeight = hasNote ? S(96) : S(84);
-
-                Panel card = new Panel
-                {
-                    BackColor = cCard,
-                    Location = new Point(0, ry),
-                    Width = rw,
-                    Height = cardHeight,
-                    BorderStyle = BorderStyle.None
-                };
-
-                // Orange left bar
-                card.Controls.Add(new Panel
-                {
-                    BackColor = cOrange,
-                    Location = new Point(0, 0),
-                    Width = S(4),
-                    Height = cardHeight
-                });
-
-                // File name
-                card.Controls.Add(new Label
-                {
-                    Text = req.FileName,
-                    Font = fReqBold,
-                    ForeColor = cTextDark,
-                    Location = new Point(S(8), S(5)),
-                    AutoSize = false,
-                    Width = rw - S(12),
-                    Height = S(15),
-                    AutoEllipsis = true
-                });
-
-                // Requested by
-                card.Controls.Add(new Label
-                {
-                    Text = "By: " + req.RequestedBy,
-                    Font = fReqSub,
-                    ForeColor = cTextGray,
-                    Location = new Point(S(8), S(22)),
-                    AutoSize = true
-                });
-
-                // Date
-                string dateStr = "—";
-                if (DateTime.TryParse(req.RequestDate, out DateTime dt))
-                    dateStr = dt.ToString("dd/MM/yy HH:mm");
-                card.Controls.Add(new Label
-                {
-                    Text = dateStr,
-                    Font = fReqSub,
-                    ForeColor = cTextLight,
-                    Location = new Point(S(8), S(40)),
-                    AutoSize = true
-                });
-
-                // Note (only if exists)
-                if (hasNote)
-                {
-                    card.Controls.Add(new Label
-                    {
-                        Text = "Note: " + req.Note,
-                        Font = fReqSub,
-                        ForeColor = cTextGray,
-                        Location = new Point(S(8), S(48)),
-                        AutoSize = false,
-                        Width = rw - S(12),
-                        Height = S(13),
-                        AutoEllipsis = true
-                    });
-                }
-
-                // Approve button
-                RevisionRequest capturedReq = req;
-                Button btnApprove = new Button
-                {
-                    Text = "Approve",
-                    Font = fReqBtn,
-                    Width = S(72),
-                    Height = S(22),
-                    Location = new Point(S(8), btnY),
-                    BackColor = cGreen,
-                    ForeColor = Color.White,
-                    FlatStyle = FlatStyle.Flat,
-                    Cursor = Cursors.Hand
-                };
-                btnApprove.FlatAppearance.BorderSize = 0;
-                btnApprove.Click += (s, e) =>
-                {
-                    VaultManager.ApproveRequest(capturedReq);
-                    RefreshRequests();
-                    ModelDoc2 activeDoc = PDMLiteAddin.SwApp?.ActiveDoc as ModelDoc2;
-                    if (activeDoc != null) Refresh(activeDoc);
-                };
-                card.Controls.Add(btnApprove);
-
-                // Reject button
-                Button btnReject = new Button
-                {
-                    Text = "Reject",
-                    Font = fReqBtn,
-                    Width = S(62),
-                    Height = S(22),
-                    Location = new Point(S(84), btnY),
-                    BackColor = cRed,
-                    ForeColor = Color.White,
-                    FlatStyle = FlatStyle.Flat,
-                    Cursor = Cursors.Hand
-                };
-                btnReject.FlatAppearance.BorderSize = 0;
-                btnReject.Click += (s, e) =>
-                {
-                    VaultManager.RejectRequest(capturedReq);
-                    RefreshRequests();
-                    ModelDoc2 activeDoc = PDMLiteAddin.SwApp?.ActiveDoc as ModelDoc2;
-                    if (activeDoc != null) Refresh(activeDoc);
-                };
-                card.Controls.Add(btnReject);
-
-                // Bottom border
-                card.Controls.Add(new Panel
-                {
-                    BackColor = cBorder,
-                    Location = new Point(0, cardHeight - S(1)),
-                    Width = rw,
-                    Height = S(1)
-                });
-
-                _requestsPanel.Controls.Add(card);
-                ry += cardHeight + S(4);
-            }
-
-            _requestsPanel.Height = ry;
+        private void OpenRequestsPopup()
+        {
+            var form = new PendingRequestsForm(_scale);
+            form.ShowDialog(this);
+            RefreshRequests();
         }
 
         // ── Search ────────────────────────────────────────────────────
