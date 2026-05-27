@@ -5,7 +5,6 @@ using System.Collections.Generic;
 using System.Drawing;
 using System.Linq;
 using System.IO;
-using System.Text;
 using System.Windows.Forms;
 
 namespace PDMLite
@@ -17,7 +16,7 @@ namespace PDMLite
         private Label _partNoVal;
         private Label _revVal;
         private Label _lockedVal;
-        private Label _historyContent;
+        private Panel _historyPanel;
         private Button _btnLock;
         private Button _btnRelease;
         private Button _btnUnlock;
@@ -318,18 +317,17 @@ namespace PDMLite
             this.Controls.Add(MakeSectionHeader("FILE HISTORY", fSection, x, y, w));
             y += S(20);
 
-            _historyContent = new Label
+            _historyPanel = new Panel
             {
-                Text = "No history yet",
-                Font = fHistory,
-                ForeColor = cTextGray,
                 Location = new Point(x, y),
-                AutoSize = false,
                 Width = w,
-                Height = S(300)
+                Height = S(240),  // fixed height — shows ~4 entries, scrolls for more
+                AutoScroll = true,
+                BackColor = cBg,
+                BorderStyle = BorderStyle.FixedSingle
             };
-            this.Controls.Add(_historyContent);
-            y += S(305);
+            this.Controls.Add(_historyPanel);
+            y += S(244);
 
             // ── Pending Requests (Master only) ────────────────────────
             this.Controls.Add(Divider(x, y, w));
@@ -706,7 +704,7 @@ namespace PDMLite
                 _partNoVal.Text = "—";
                 _revVal.Text = "—";
                 _lockedVal.Text = "—";
-                _historyContent.Text = "No history yet";
+                _historyPanel.Controls.Clear();
                 _btnRequestRev.Visible = false;
                 RefreshRequests();
                 return;
@@ -739,26 +737,77 @@ namespace PDMLite
             _btnRequestRev.Visible = !isMaster && status == "Released";
 
             // File History
+            _historyPanel.Controls.Clear();
             var history = DatabaseManager.GetFileHistory(filePath);
+
+            Font fHist = new Font("Segoe UI", 3.5f * _scale);
+            Font fHistBold = new Font("Segoe UI", 3.5f * _scale, FontStyle.Bold);
+
             if (history.Count == 0)
             {
-                _historyContent.Text = "No history yet";
+                _historyPanel.Controls.Add(new Label
+                {
+                    Text = "No history yet",
+                    Font = fHist,
+                    ForeColor = cTextLight,
+                    Location = new Point(S(6), S(6)),
+                    AutoSize = true
+                });
             }
             else
             {
-                var sb = new StringBuilder();
-                foreach (var entry in history.Take(5))
+                int hy = S(4);
+                foreach (var entry in history)
                 {
                     string dateStr = "—";
                     if (DateTime.TryParse(entry.ChangedDate, out DateTime dt))
                         dateStr = dt.ToString("dd/MM/yy HH:mm");
-                    sb.AppendLine($"● {entry.Status}");
-                    sb.AppendLine($"  {dateStr}  {entry.ChangedBy}");
+
+                    _historyPanel.Controls.Add(new Label
+                    {
+                        Text = "● " + entry.Status,
+                        Font = fHistBold,
+                        ForeColor = StatusColor(entry.Status),
+                        Location = new Point(S(6), hy),
+                        AutoSize = false,
+                        Width = w - S(14)
+                    });
+                    hy += S(16);
+
+                    _historyPanel.Controls.Add(new Label
+                    {
+                        Text = "  " + dateStr + "   " + entry.ChangedBy,
+                        Font = fHist,
+                        ForeColor = cTextGray,
+                        Location = new Point(S(6), hy),
+                        AutoSize = false,
+                        Width = w - S(14)
+                    });
+                    hy += S(14);
+
                     if (!string.IsNullOrEmpty(entry.ChangeNote))
-                        sb.AppendLine($"  {entry.ChangeNote}");
-                    sb.AppendLine("  ─────────────");
+                    {
+                        _historyPanel.Controls.Add(new Label
+                        {
+                            Text = "  " + entry.ChangeNote,
+                            Font = fHist,
+                            ForeColor = cTextLight,
+                            Location = new Point(S(6), hy),
+                            AutoSize = false,
+                            Width = w - S(14)
+                        });
+                        hy += S(14);
+                    }
+
+                    _historyPanel.Controls.Add(new Panel
+                    {
+                        BackColor = cBorder,
+                        Location = new Point(S(4), hy + S(2)),
+                        Width = w - S(16),
+                        Height = S(1)
+                    });
+                    hy += S(14);
                 }
-                _historyContent.Text = sb.ToString().TrimEnd();
             }
 
             // Refresh pending requests for masters
