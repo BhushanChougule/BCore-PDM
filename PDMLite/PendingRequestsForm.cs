@@ -22,6 +22,7 @@ namespace PDMLite
         private readonly Color cGreen    = Color.FromArgb(60, 140, 95);
         private readonly Color cOrange   = Color.FromArgb(185, 115, 55);
         private readonly Color cPurple   = Color.FromArgb(105, 100, 165);
+        private readonly Color cDark     = Color.FromArgb(75, 80, 90);
         private readonly Color cRed      = Color.FromArgb(180, 75, 75);
 
         private Panel _unlockPanel;
