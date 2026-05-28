@@ -146,6 +146,8 @@ XML vault database at N:\\PDM-SolidWorks\\vault\\vault.xml
 
 Classes: VaultFile, LockInfo, HistoryEntry, RevisionRequest
 
+RevisionRequest.RequestType = "Unlock" | "Revision" | "Release"
+
 Methods:
 
 \- Initialize, UpsertFile, GetFileStatus, SetFileStatus
@@ -154,11 +156,13 @@ Methods:
 
 \- GetUserRole, AddUser
 
-\- SearchFiles(term) → searches PartNumber + Description + FileName
+\- SearchFiles(term) → searches PartNumber + Description + FileName (Released files only)
 
 \- GetFileHistory(filePath) → returns List<HistoryEntry> reversed (most recent first)
 
-\- AddRevisionRequest, GetPendingRequests, ResolveRequest
+\- AddRevisionRequest, AddUnlockRequest, AddReleaseRequest → all call private AddRequest(type,...)
+
+\- GetPendingRequests, GetRequestsByUser(user), ResolveRequest
 
 
 
@@ -176,11 +180,15 @@ Core vault operations.
 
 \- RollbackRevision(doc) → shows RollbackDialog → archives current → restores selected
 
-\- RequestRevision(doc) → Engineer requests, shows note dialog, logs to database
+\- RequestRevision(doc), RequestUnlock(doc), RequestRelease(doc) → Engineer requests with note dialog
 
 \- ApproveRequest(request) → Master approves, calls StartNewRevision
 
 \- RejectRequest(request) → Master rejects, marks as Rejected in database
+
+\- ViewMyRequests() → Engineer views their own requests (MessageBox)
+
+\- OpenOrCreateDrawing(doc) → searches for matching .slddrw, prompts to create if not found
 
 \- GetUnreleasedComponents(doc) → checks all assembly children are Released
 
@@ -230,23 +238,41 @@ Sections (top to bottom):
 
 3\. Active File card (filename, status, partNo, revision, lockedBy)
 
-4\. Request Revision button (engineers only, visible when status=Released)
+4\. Master Actions (Lock/Unlock/Release/New Revision/Rollback) — Masters only
 
-5\. Master Actions (Lock/Unlock/Release/New Revision/Rollback) - Masters only
+5\. Engineer Actions (Request Unlock/Revision/Release, Update Drawings, My Requests) — Engineers only, same y-position as Master Actions via engY = y - S(5\*28)
 
-6\. File History timeline (shows last 5 entries, most recent first, using history.Take(5))
+6\. File History — Panel (\_historyPanel) with individual labels per entry, Height=S(300), y+=S(305)
 
-7\. Pending Requests section (Masters only, at bottom)
+7\. PENDING REQUESTS button (Masters only) — shows count, opens PendingRequestsForm popup
 
 
 
-File History height: Height=S(300), y+=S(305) — sized for 5 entries. Adjust both if entry count changes.
+File History uses PopulateHistoryPanel(List<HistoryEntry>) helper. Each entry: status label (StatusColor), date+user label, optional note label, 1px Panel divider. All labels have explicit Height.
+
+No longer uses StringBuilder/AppendLine — individual labels prevent text overlap at small font sizes.
 
 
 
 Search results: file cards with status color bar, part number, Open in SOLIDWORKS button.
 
 Uses ActivateDoc3 if file already open, OpenDoc6 with correct type if not.
+
+
+
+\### PendingRequestsForm.cs
+
+DPI-aware Form (680×500 scaled). S(v)=v\*\_scale. Opened from PENDING REQUESTS button in task pane.
+
+\- Three scrollable columns: Unlock | Revision | Release (categorised by RevisionRequest.RequestType)
+
+\- Each column has a coloured header (orange/purple/green) and scrollable card list
+
+\- Card: filename, requested-by, date, optional note, Approve + Reject buttons
+
+\- Approve logic by type: Unlock→UnlockFile, Revision→ApproveRequest/StartNewRevision, Release→ReleaseFile
+
+\- Legacy requests with no RequestType default to Revision column
 
 
 
@@ -358,15 +384,15 @@ cleanup exports → set read-only → update DB
 
 
 
-\### Engineer Request Revision
+\### Engineer Requests (Unlock / Revision / Release)
 
-click Request Revision button (visible on Released files) →
+Engineer clicks action button (Request Unlock / Request Revision / Request Release) →
 
-show note dialog → log request to vault.xml RevisionRequests →
+show note dialog → log request to vault.xml RevisionRequests with RequestType →
 
-Master sees in Pending Requests section → Approve starts NewRevision →
+Master clicks PENDING REQUESTS button → PendingRequestsForm opens →
 
-Reject marks as Rejected
+Approve (by type: Unlock→UnlockFile, Revision→StartNewRevision, Release→ReleaseFile) or Reject
 
 
 
@@ -426,9 +452,11 @@ GetNextRevision() in VaultManager.cs handles this
 
 \- BCore PDM branding with BC icon
 
-\- Engineer Request Revision button (visible on Released files only)
+\- Engineer Actions section: Request Unlock, Request Revision, Request Release, Update Drawings, My Requests
 
-\- Master Pending Requests section with Approve/Reject
+\- Master Pending Requests popup (PendingRequestsForm) with 3-column Unlock/Revision/Release view
+
+\- File history rendered as individual labels (no text overlap), with StatusColor per entry
 
 
 
