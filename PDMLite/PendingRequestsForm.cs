@@ -80,7 +80,7 @@ namespace PDMLite
 
             // Column headers
             string[] types = { "UNLOCK", "REVISION", "RELEASE" };
-            Color[] colors = { cOrange, cPurple, cGreen };
+            Color[] colors = { cPurple, cDark, cGreen };
             Panel[] panels = new Panel[3];
             Label[] headers = new Label[3];
 
@@ -142,8 +142,8 @@ namespace PDMLite
             Font fBold  = new Font("Segoe UI", 3.8f * _scale, FontStyle.Bold);
             Font fSub   = new Font("Segoe UI", 3.3f * _scale);
             Font fBtn   = new Font("Segoe UI", 3.5f * _scale, FontStyle.Bold);
-            Color barColor = type == "Unlock"   ? cOrange
-                           : type == "REVISION" ? cPurple
+            Color barColor = type == "UNLOCK"   ? cPurple
+                           : type == "REVISION" ? cDark
                            : cGreen;
 
             if (requests.Count == 0)
@@ -236,7 +236,7 @@ namespace PDMLite
 
                 Button btnApprove = new Button
                 {
-                    Text = type == "Unlock" ? "Approve Unlock" : "Approve",
+                    Text = type == "UNLOCK" ? "Approve Unlock" : "Approve",
                     Font = fBtn,
                     Width = S(90),
                     Height = S(22),
@@ -249,9 +249,8 @@ namespace PDMLite
                 btnApprove.FlatAppearance.BorderSize = 0;
                 btnApprove.Click += (s, e) =>
                 {
-                    if (type == "Unlock")
+                    if (type == "UNLOCK")
                     {
-                        // Approve unlock: unlock the file
                         DatabaseManager.ResolveRequest(capturedReq.Id, "Approved");
                         VaultManager.UnlockFile(capturedReq.FilePath);
                     }

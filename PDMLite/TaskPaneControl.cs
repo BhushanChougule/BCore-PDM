@@ -315,13 +315,13 @@ namespace PDMLite
             {
                 Location = new Point(x, y),
                 Width = w,
-                Height = S(220),
+                Height = S(260),
                 BackColor = cBg,
                 BorderStyle = BorderStyle.FixedSingle,
                 AutoScroll = true
             };
             this.Controls.Add(_historyPanel);
-            y += S(226);
+            y += S(266);
 
             // ── Pending Requests (Master only) ────────────────────────
             this.Controls.Add(Divider(x, y, w));
@@ -345,6 +345,15 @@ namespace PDMLite
             _btnRequests.FlatAppearance.BorderSize = 0;
             _btnRequests.Click += (s, e) => OpenRequestsPopup();
             this.Controls.Add(_btnRequests);
+
+            // 1px sentinel — pins the AutoScroll virtual bottom to remove gap
+            this.Controls.Add(new Panel
+            {
+                BackColor = cBg,
+                Location = new Point(0, y + S(26) + S(2)),
+                Width = S(210),
+                Height = 1
+            });
         }
 
         // ── Refresh Pending Requests button count (Master only) ──────
