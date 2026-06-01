@@ -64,8 +64,8 @@ namespace PDMLite
             }},
             { "Revision", new[] {
                 "-- Select --",
-                "A","B","C","D","E","F",
-                "G","H","J","K","L","M"
+                "A","B","C","D","E","F","G","H","J","K","L","M",
+                "N","P","R","T","U","V","W","Y","Z"
             }}
         };
 
@@ -93,7 +93,7 @@ namespace PDMLite
             Font headerFont = new Font("Segoe UI", 12f, FontStyle.Bold);
             Font buttonFont = new Font("Segoe UI", 11f, FontStyle.Bold);
 
-            this.Text = "PDM Lite — Complete Required Properties";
+            this.Text = "BCore PDM — Complete Required Properties";
             this.StartPosition = FormStartPosition.CenterScreen;
             this.FormBorderStyle = FormBorderStyle.FixedDialog;
             this.MaximizeBox = false;

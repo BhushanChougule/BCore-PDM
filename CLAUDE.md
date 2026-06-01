@@ -136,7 +136,7 @@ WinForms dialog for missing properties. Fixed sizes (not DPI-scaled, form is sho
 
 \- Material1 and FinishType use ComboBox dropdowns
 
-\- Revision uses ComboBox (A through M)
+\- Revision uses ComboBox (full revision sequence A through Z, skipping I,O,Q,S,X)
 
 
 
