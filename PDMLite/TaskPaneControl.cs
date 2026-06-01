@@ -708,7 +708,7 @@ namespace PDMLite
         private void ShowAboutDialog()
         {
             int fw = S(320);
-            int fh = S(248);
+            int fh = S(260);
 
             using (var form = new Form())
             {
@@ -729,25 +729,27 @@ namespace PDMLite
                     Height    = S(5)
                 });
 
-                int y = S(18);
+                int y = S(16);
 
-                // ── "BCore PDM" — "BC" in cBrand, "ore PDM" in cTextDark, centered ──
-                Font fTitle = new Font("Segoe UI", 12f * _scale, FontStyle.Bold);
-                Size bcSz  = TextRenderer.MeasureText("BC",      fTitle, new Size(fw, S(36)), TextFormatFlags.NoPadding);
-                Size oreSz = TextRenderer.MeasureText("ore PDM", fTitle, new Size(fw, S(36)), TextFormatFlags.NoPadding);
-                int titleX = (fw - bcSz.Width - oreSz.Width) / 2;
-
-                form.Controls.Add(new Label {
-                    Text = "BC", Font = fTitle, ForeColor = cBrand,
-                    Location = new Point(titleX, y),
-                    AutoSize = false, Width = bcSz.Width + S(2), Height = S(30)
-                });
-                form.Controls.Add(new Label {
-                    Text = "ore PDM", Font = fTitle, ForeColor = cTextDark,
-                    Location = new Point(titleX + bcSz.Width, y),
-                    AutoSize = false, Width = oreSz.Width + S(4), Height = S(30)
-                });
-                y += S(34);
+                // ── "BCore PDM" — "BC" in cBrand, "ore PDM" in cTextDark ──
+                // Paint-based panel avoids Label padding causing gap/clipping issues
+                Font fTitle = new Font("Segoe UI", 10f * _scale, FontStyle.Bold);
+                var titlePanel = new Panel {
+                    Location  = new Point(0, y),
+                    Width     = fw,
+                    Height    = S(44),
+                    BackColor = Color.White
+                };
+                titlePanel.Paint += (s, pe) => {
+                    var bcSz  = TextRenderer.MeasureText(pe.Graphics, "BC",      fTitle, new Size(fw, S(44)), TextFormatFlags.NoPadding | TextFormatFlags.SingleLine);
+                    var oreSz = TextRenderer.MeasureText(pe.Graphics, "ore PDM", fTitle, new Size(fw, S(44)), TextFormatFlags.NoPadding | TextFormatFlags.SingleLine);
+                    int startX = (fw - bcSz.Width - oreSz.Width) / 2;
+                    int textY  = (titlePanel.Height - bcSz.Height) / 2;
+                    TextRenderer.DrawText(pe.Graphics, "BC",      fTitle, new Point(startX,              textY), cBrand,    TextFormatFlags.NoPadding | TextFormatFlags.SingleLine);
+                    TextRenderer.DrawText(pe.Graphics, "ore PDM", fTitle, new Point(startX + bcSz.Width, textY), cTextDark, TextFormatFlags.NoPadding | TextFormatFlags.SingleLine);
+                };
+                form.Controls.Add(titlePanel);
+                y += S(48);
 
                 // Divider
                 form.Controls.Add(new Panel {
