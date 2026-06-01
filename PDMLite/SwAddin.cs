@@ -63,11 +63,16 @@ namespace PDMLite
 
             int t = doc.GetType();
 
+            // NOTE: For a document that has never been saved, SOLIDWORKS fires
+            // FileSaveAsNotify2 (NOT the legacy FileSaveAsNotify). Returning a
+            // non-zero value from FileSaveAsNotify2 actually aborts the save —
+            // the legacy FileSaveAsNotify ignores the return value, which let
+            // new parts get saved even when properties were missing.
             if (t == (int)swDocumentTypes_e.swDocPART)
             {
                 DPartDocEvents_Event d = (DPartDocEvents_Event)doc;
                 d.FileSaveNotify += OnFileSaveNotify;
-                d.FileSaveAsNotify += OnFileSaveNotify;
+                d.FileSaveAsNotify2 += OnFileSaveAsNotify;
                 d.FileSavePostNotify += OnFileSavePost;
                 d.DestroyNotify += OnDocDestroy;
             }
@@ -75,7 +80,7 @@ namespace PDMLite
             {
                 DAssemblyDocEvents_Event d = (DAssemblyDocEvents_Event)doc;
                 d.FileSaveNotify += OnFileSaveNotify;
-                d.FileSaveAsNotify += OnFileSaveNotify;
+                d.FileSaveAsNotify2 += OnFileSaveAsNotify;
                 d.FileSavePostNotify += OnFileSavePost;
                 d.DestroyNotify += OnDocDestroy;
             }
@@ -83,7 +88,7 @@ namespace PDMLite
             {
                 DDrawingDocEvents_Event d = (DDrawingDocEvents_Event)doc;
                 d.FileSaveNotify += OnFileSaveNotify;
-                d.FileSaveAsNotify += OnFileSaveNotify;
+                d.FileSaveAsNotify2 += OnFileSaveAsNotify;
                 d.FileSavePostNotify += OnFileSavePost;
                 d.DestroyNotify += OnDocDestroy;
             }
@@ -127,6 +132,11 @@ namespace PDMLite
             _hookedDocs.Add(identifier);
         }
 
+        // ── Fires BEFORE a never-saved doc is saved (Save / Save As) ─────────
+        // FileSaveAsNotify2 honours the return value to abort the save, unlike
+        // the legacy FileSaveAsNotify. Reuses the same validation logic.
+        private int OnFileSaveAsNotify(string fileName) => OnFileSaveNotify(fileName);
+
         // ── Fires BEFORE the file is saved ───────────────────────────────────
         // Return 1 = CANCEL the save
         // Return 0 = ALLOW the save
@@ -166,8 +176,22 @@ namespace PDMLite
 
             if (isPart || isAsm)
             {
-                // Rule 3: All required properties must be filled
-                var validation = PropertyValidator.Validate(doc);
+                // Rule 3: All required properties must be filled.
+                // Fail-closed: if validation itself errors, block the save
+                // rather than let an unvalidated file slip through.
+                ValidationResult validation;
+                try
+                {
+                    validation = PropertyValidator.Validate(doc);
+                }
+                catch (Exception ex)
+                {
+                    Block("Could not verify required properties:\n\n" +
+                          ex.Message + "\n\n" +
+                          "Save blocked to protect the vault. Try again.");
+                    return 1;
+                }
+
                 if (!validation.IsValid)
                 {
                     var form = new PropertyForm(doc, validation.EmptyFields);
@@ -177,6 +201,17 @@ namespace PDMLite
                     {
                         Block("Required properties incomplete:\n\n" +
                               "• " + string.Join("\n• ", validation.EmptyFields) + "\n\n" +
+                              "Fill all fields and try again.");
+                        return 1;
+                    }
+
+                    // Re-validate after the form closes — confirm the user
+                    // actually filled everything before allowing the save.
+                    var recheck = PropertyValidator.Validate(doc);
+                    if (!recheck.IsValid)
+                    {
+                        Block("Required properties still incomplete:\n\n" +
+                              "• " + string.Join("\n• ", recheck.EmptyFields) + "\n\n" +
                               "Fill all fields and try again.");
                         return 1;
                     }

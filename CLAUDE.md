@@ -96,7 +96,7 @@ PartNo, DrawingNo, Description, DrawnBy, DrawnDate, Material1, FinishType, Revis
 
 Main entry point, ISwAddin implementation.
 
-\- Hooks: FileSaveNotify, FileSaveAsNotify, FileSavePostNotify, DestroyNotify
+\- Hooks: FileSaveNotify, FileSaveAsNotify2, FileSavePostNotify, DestroyNotify
 
 \- OnFileSaveNotify: check lock → check released → validate properties → auto-weight → broken refs
 
@@ -306,7 +306,7 @@ DPI-aware Form. S(v)=v\*\_scale.
 
 \- SQLite abandoned → XML (System.Xml.Linq) due to native DLL conflicts
 
-\- Event names: FileSaveNotify + FileSaveAsNotify (NOT FileSavePreNotify)
+\- Event names: FileSaveNotify (re-saves) + FileSaveAsNotify2 (first save / Save As). MUST use FileSaveAsNotify2 NOT the legacy FileSaveAsNotify — only Notify2 honours the return value to abort a new-file save. NOT FileSavePreNotify.
 
 \- FileSavePostNotify parameters: (int saveType, string FileName) - ORDER matters
 
@@ -342,7 +342,7 @@ DPI-aware Form. S(v)=v\*\_scale.
 
 \### Engineer Save
 
-FileSaveAsNotify/FileSaveNotify → check lock → check released → 
+FileSaveAsNotify2/FileSaveNotify → check lock → check released → 
 
 validate properties (show PropertyForm if missing) → auto-weight → 
 
