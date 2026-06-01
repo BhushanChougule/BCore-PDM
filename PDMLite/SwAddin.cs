@@ -17,8 +17,15 @@ namespace PDMLite
 
         private int _addinId;
         private TaskPaneHost _taskPane;
-        private readonly HashSet<string> _hookedDocs =
-            new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+        // Keeps a strong reference to each document's event handler for the
+        // lifetime of the document. This is REQUIRED — without it the .NET
+        // garbage collector reclaims the COM event sink and document events
+        // (FileSaveNotify etc.) silently stop firing. Interacting with UI such
+        // as the Custom Properties task pane triggers a GC, which is why saves
+        // stopped being validated after touching that tab.
+        private readonly Dictionary<string, DocEventHandler> _docHandlers =
+            new Dictionary<string, DocEventHandler>(StringComparer.OrdinalIgnoreCase);
 
         public bool ConnectToSW(object thisSW, int cookie)
         {
@@ -45,7 +52,8 @@ namespace PDMLite
         {
             _taskPane?.Unregister(SwApp);
             ((SldWorks)SwApp).ActiveDocChangeNotify -= OnActiveDocChange;
-            _hookedDocs.Clear();
+            foreach (var h in _docHandlers.Values) h.Detach();
+            _docHandlers.Clear();
             SwApp = null;
             return true;
         }
@@ -59,46 +67,12 @@ namespace PDMLite
 
             string path = doc.GetPathName();
             string identifier = string.IsNullOrEmpty(path) ? "NEW:" + doc.GetTitle() : path;
-            if (string.IsNullOrEmpty(identifier) || _hookedDocs.Contains(identifier)) return;
+            if (string.IsNullOrEmpty(identifier) || _docHandlers.ContainsKey(identifier)) return;
 
-            int t = doc.GetType();
-
-            // Capture doc and identifier in closures so that event handlers
-            // never rely on SwApp.ActiveDoc. When the Custom Properties task
-            // pane has focus, ActiveDoc returns null — using it inside a save
-            // handler causes a fail-open (save allowed without validation).
-            // Capturing the specific document avoids this entirely.
-            ModelDoc2 capturedDoc = doc;
-            string capturedId    = identifier;
-
-            // NOTE: For a document that has never been saved, SOLIDWORKS fires
-            // FileSaveAsNotify2 (NOT the legacy FileSaveAsNotify). Returning a
-            // non-zero value from FileSaveAsNotify2 actually aborts the save —
-            // the legacy FileSaveAsNotify ignores the return value.
-            if (t == (int)swDocumentTypes_e.swDocPART)
-            {
-                DPartDocEvents_Event d = (DPartDocEvents_Event)doc;
-                d.FileSaveNotify     += fn       => ValidateSave(capturedDoc, fn);
-                d.FileSaveAsNotify2  += fn       => ValidateSave(capturedDoc, fn);
-                d.FileSavePostNotify += (st, fn) => OnSavePost(capturedDoc, fn);
-                d.DestroyNotify      += ()       => { _hookedDocs.Remove(capturedId); return 0; };
-            }
-            else if (t == (int)swDocumentTypes_e.swDocASSEMBLY)
-            {
-                DAssemblyDocEvents_Event d = (DAssemblyDocEvents_Event)doc;
-                d.FileSaveNotify     += fn       => ValidateSave(capturedDoc, fn);
-                d.FileSaveAsNotify2  += fn       => ValidateSave(capturedDoc, fn);
-                d.FileSavePostNotify += (st, fn) => OnSavePost(capturedDoc, fn);
-                d.DestroyNotify      += ()       => { _hookedDocs.Remove(capturedId); return 0; };
-            }
-            else if (t == (int)swDocumentTypes_e.swDocDRAWING)
-            {
-                DDrawingDocEvents_Event d = (DDrawingDocEvents_Event)doc;
-                d.FileSaveNotify     += fn       => ValidateSave(capturedDoc, fn);
-                d.FileSaveAsNotify2  += fn       => ValidateSave(capturedDoc, fn);
-                d.FileSavePostNotify += (st, fn) => OnSavePost(capturedDoc, fn);
-                d.DestroyNotify      += ()       => { _hookedDocs.Remove(capturedId); return 0; };
-            }
+            // Attach and STORE the handler so it is not garbage collected.
+            var handler = new DocEventHandler(this, doc, identifier);
+            if (!handler.Attach()) return;     // unsupported doc type
+            _docHandlers[identifier] = handler;
 
             // ── Show status notification when file opens ──────────────────
             string fileStatus = DatabaseManager.GetFileStatus(path);
@@ -126,17 +100,15 @@ namespace PDMLite
                     (int)swMessageBoxIcon_e.swMbInformation,
                     (int)swMessageBoxBtn_e.swMbOk);
             }
-
-            _hookedDocs.Add(identifier);
         }
 
-        // ── Fires BEFORE the file is saved (both regular save and first-time save) ──
-        // Return 1 = CANCEL the save
-        // Return 0 = ALLOW the save
-        private int ValidateSave(ModelDoc2 doc, string fileName)
+        internal void RemoveHandler(string identifier) => _docHandlers.Remove(identifier);
+
+        // ── Fires BEFORE the file is saved (regular save AND first-time save) ──
+        // Return 1 = CANCEL the save ; Return 0 = ALLOW the save
+        internal int ValidateSave(ModelDoc2 doc, string fileName)
         {
-            // doc is the specific document captured at hook time — never null here
-            // unless SOLIDWORKS recycled the COM object, which we treat as fail-closed.
+            // Fail-closed: never allow a save we cannot fully validate.
             if (doc == null)
             {
                 Block("Save blocked: could not identify the document.\nPlease try again.");
@@ -244,7 +216,7 @@ namespace PDMLite
         }
 
         // ── Fires AFTER the file is saved — update database ──────────────────
-        private int OnSavePost(ModelDoc2 doc, string fileName)
+        internal int OnSavePost(ModelDoc2 doc, string fileName)
         {
             if (doc == null) return 0;
 
@@ -255,12 +227,12 @@ namespace PDMLite
             _taskPane?.RefreshPanel();
             DatabaseManager.UpsertFile(new VaultFile
             {
-                FilePath   = filePath,
-                FileName   = System.IO.Path.GetFileName(filePath),
-                PartNumber = PropertyValidator.GetProperty(doc, "PartNo"),
+                FilePath    = filePath,
+                FileName    = System.IO.Path.GetFileName(filePath),
+                PartNumber  = PropertyValidator.GetProperty(doc, "PartNo"),
                 Description = PropertyValidator.GetProperty(doc, "Description"),
-                Status     = string.IsNullOrEmpty(currentStatus) ? "WIP" : currentStatus,
-                ModifiedBy = CurrentUser,
+                Status      = string.IsNullOrEmpty(currentStatus) ? "WIP" : currentStatus,
+                ModifiedBy  = CurrentUser,
                 ModifiedDate = DateTime.Now
             });
 
@@ -272,5 +244,102 @@ namespace PDMLite
                 "SAVE BLOCKED — BCore PDM\n\n" + reason,
                 (int)swMessageBoxIcon_e.swMbStop,
                 (int)swMessageBoxBtn_e.swMbOk);
+
+        // ─────────────────────────────────────────────────────────────────────
+        // Per-document event handler. Held alive by _docHandlers so the COM
+        // event sink is never garbage collected (which would stop events firing).
+        // ─────────────────────────────────────────────────────────────────────
+        private class DocEventHandler
+        {
+            private readonly PDMLiteAddin _addin;
+            private readonly ModelDoc2 _doc;
+            private readonly string _id;
+            private readonly int _type;
+
+            private DPartDocEvents_Event _part;
+            private DAssemblyDocEvents_Event _asm;
+            private DDrawingDocEvents_Event _drw;
+
+            public DocEventHandler(PDMLiteAddin addin, ModelDoc2 doc, string id)
+            {
+                _addin = addin;
+                _doc   = doc;
+                _id    = id;
+                _type  = doc.GetType();
+            }
+
+            public bool Attach()
+            {
+                // NOTE: never-saved docs fire FileSaveAsNotify2 (NOT the legacy
+                // FileSaveAsNotify, whose return value is ignored). FileSaveNotify
+                // covers re-saves of already-saved docs.
+                if (_type == (int)swDocumentTypes_e.swDocPART)
+                {
+                    _part = (DPartDocEvents_Event)_doc;
+                    _part.FileSaveNotify     += OnSave;
+                    _part.FileSaveAsNotify2  += OnSave;
+                    _part.FileSavePostNotify += OnSavePost;
+                    _part.DestroyNotify      += OnDestroy;
+                    return true;
+                }
+                if (_type == (int)swDocumentTypes_e.swDocASSEMBLY)
+                {
+                    _asm = (DAssemblyDocEvents_Event)_doc;
+                    _asm.FileSaveNotify     += OnSave;
+                    _asm.FileSaveAsNotify2  += OnSave;
+                    _asm.FileSavePostNotify += OnSavePost;
+                    _asm.DestroyNotify      += OnDestroy;
+                    return true;
+                }
+                if (_type == (int)swDocumentTypes_e.swDocDRAWING)
+                {
+                    _drw = (DDrawingDocEvents_Event)_doc;
+                    _drw.FileSaveNotify     += OnSave;
+                    _drw.FileSaveAsNotify2  += OnSave;
+                    _drw.FileSavePostNotify += OnSavePost;
+                    _drw.DestroyNotify      += OnDestroy;
+                    return true;
+                }
+                return false;
+            }
+
+            public void Detach()
+            {
+                if (_part != null)
+                {
+                    _part.FileSaveNotify     -= OnSave;
+                    _part.FileSaveAsNotify2  -= OnSave;
+                    _part.FileSavePostNotify -= OnSavePost;
+                    _part.DestroyNotify      -= OnDestroy;
+                    _part = null;
+                }
+                if (_asm != null)
+                {
+                    _asm.FileSaveNotify     -= OnSave;
+                    _asm.FileSaveAsNotify2  -= OnSave;
+                    _asm.FileSavePostNotify -= OnSavePost;
+                    _asm.DestroyNotify      -= OnDestroy;
+                    _asm = null;
+                }
+                if (_drw != null)
+                {
+                    _drw.FileSaveNotify     -= OnSave;
+                    _drw.FileSaveAsNotify2  -= OnSave;
+                    _drw.FileSavePostNotify -= OnSavePost;
+                    _drw.DestroyNotify      -= OnDestroy;
+                    _drw = null;
+                }
+            }
+
+            private int OnSave(string fileName) => _addin.ValidateSave(_doc, fileName);
+            private int OnSavePost(int saveType, string fileName) => _addin.OnSavePost(_doc, fileName);
+
+            private int OnDestroy()
+            {
+                Detach();
+                _addin.RemoveHandler(_id);
+                return 0;
+            }
+        }
     }
 }
