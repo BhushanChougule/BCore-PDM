@@ -1,4 +1,4 @@
-﻿using SolidWorks.Interop.sldworks;
+using SolidWorks.Interop.sldworks;
 using SolidWorks.Interop.swpublished;
 using SolidWorks.Interop.swconst;
 using System;
@@ -63,34 +63,41 @@ namespace PDMLite
 
             int t = doc.GetType();
 
+            // Capture doc and identifier in closures so that event handlers
+            // never rely on SwApp.ActiveDoc. When the Custom Properties task
+            // pane has focus, ActiveDoc returns null — using it inside a save
+            // handler causes a fail-open (save allowed without validation).
+            // Capturing the specific document avoids this entirely.
+            ModelDoc2 capturedDoc = doc;
+            string capturedId    = identifier;
+
             // NOTE: For a document that has never been saved, SOLIDWORKS fires
             // FileSaveAsNotify2 (NOT the legacy FileSaveAsNotify). Returning a
             // non-zero value from FileSaveAsNotify2 actually aborts the save —
-            // the legacy FileSaveAsNotify ignores the return value, which let
-            // new parts get saved even when properties were missing.
+            // the legacy FileSaveAsNotify ignores the return value.
             if (t == (int)swDocumentTypes_e.swDocPART)
             {
                 DPartDocEvents_Event d = (DPartDocEvents_Event)doc;
-                d.FileSaveNotify += OnFileSaveNotify;
-                d.FileSaveAsNotify2 += OnFileSaveAsNotify;
-                d.FileSavePostNotify += OnFileSavePost;
-                d.DestroyNotify += OnDocDestroy;
+                d.FileSaveNotify     += fn       => ValidateSave(capturedDoc, fn);
+                d.FileSaveAsNotify2  += fn       => ValidateSave(capturedDoc, fn);
+                d.FileSavePostNotify += (st, fn) => OnSavePost(capturedDoc, fn);
+                d.DestroyNotify      += ()       => { _hookedDocs.Remove(capturedId); return 0; };
             }
             else if (t == (int)swDocumentTypes_e.swDocASSEMBLY)
             {
                 DAssemblyDocEvents_Event d = (DAssemblyDocEvents_Event)doc;
-                d.FileSaveNotify += OnFileSaveNotify;
-                d.FileSaveAsNotify2 += OnFileSaveAsNotify;
-                d.FileSavePostNotify += OnFileSavePost;
-                d.DestroyNotify += OnDocDestroy;
+                d.FileSaveNotify     += fn       => ValidateSave(capturedDoc, fn);
+                d.FileSaveAsNotify2  += fn       => ValidateSave(capturedDoc, fn);
+                d.FileSavePostNotify += (st, fn) => OnSavePost(capturedDoc, fn);
+                d.DestroyNotify      += ()       => { _hookedDocs.Remove(capturedId); return 0; };
             }
             else if (t == (int)swDocumentTypes_e.swDocDRAWING)
             {
                 DDrawingDocEvents_Event d = (DDrawingDocEvents_Event)doc;
-                d.FileSaveNotify += OnFileSaveNotify;
-                d.FileSaveAsNotify2 += OnFileSaveAsNotify;
-                d.FileSavePostNotify += OnFileSavePost;
-                d.DestroyNotify += OnDocDestroy;
+                d.FileSaveNotify     += fn       => ValidateSave(capturedDoc, fn);
+                d.FileSaveAsNotify2  += fn       => ValidateSave(capturedDoc, fn);
+                d.FileSavePostNotify += (st, fn) => OnSavePost(capturedDoc, fn);
+                d.DestroyNotify      += ()       => { _hookedDocs.Remove(capturedId); return 0; };
             }
 
             // ── Show status notification when file opens ──────────────────
@@ -98,7 +105,6 @@ namespace PDMLite
             var lockInfo = DatabaseManager.GetLockInfo(path);
             string userRole = DatabaseManager.GetUserRole(CurrentUser);
 
-            // Notification 1: File is locked by someone else
             if (lockInfo.IsLocked &&
                 !lockInfo.LockedBy.Equals(CurrentUser, StringComparison.OrdinalIgnoreCase))
             {
@@ -110,8 +116,6 @@ namespace PDMLite
                     (int)swMessageBoxIcon_e.swMbInformation,
                     (int)swMessageBoxBtn_e.swMbOk);
             }
-
-            // Notification 2: File is Released (show to engineers only)
             else if (fileStatus == "Released" && userRole != "Master")
             {
                 SwApp.SendMsgToUser2(
@@ -123,27 +127,21 @@ namespace PDMLite
                     (int)swMessageBoxBtn_e.swMbOk);
             }
 
-            // Notification 3: File is WIP but no properties filled yet (new file warning)
-            else if (string.IsNullOrEmpty(fileStatus) && userRole != "Master")
-            {
-                // No popup for new WIP files — property form handles this on save
-            }
-
             _hookedDocs.Add(identifier);
         }
 
-        // ── Fires BEFORE a never-saved doc is saved (Save / Save As) ─────────
-        // FileSaveAsNotify2 honours the return value to abort the save, unlike
-        // the legacy FileSaveAsNotify. Reuses the same validation logic.
-        private int OnFileSaveAsNotify(string fileName) => OnFileSaveNotify(fileName);
-
-        // ── Fires BEFORE the file is saved ───────────────────────────────────
+        // ── Fires BEFORE the file is saved (both regular save and first-time save) ──
         // Return 1 = CANCEL the save
         // Return 0 = ALLOW the save
-        private int OnFileSaveNotify(string fileName)
+        private int ValidateSave(ModelDoc2 doc, string fileName)
         {
-            ModelDoc2 doc = SwApp.ActiveDoc as ModelDoc2;
-            if (doc == null) return 0;
+            // doc is the specific document captured at hook time — never null here
+            // unless SOLIDWORKS recycled the COM object, which we treat as fail-closed.
+            if (doc == null)
+            {
+                Block("Save blocked: could not identify the document.\nPlease try again.");
+                return 1;
+            }
 
             string filePath = doc.GetPathName();
             if (string.IsNullOrEmpty(filePath)) filePath = fileName;
@@ -172,13 +170,12 @@ namespace PDMLite
 
             int docType = doc.GetType();
             bool isPart = docType == (int)swDocumentTypes_e.swDocPART;
-            bool isAsm = docType == (int)swDocumentTypes_e.swDocASSEMBLY;
+            bool isAsm  = docType == (int)swDocumentTypes_e.swDocASSEMBLY;
 
             if (isPart || isAsm)
             {
                 // Rule 3: All required properties must be filled.
-                // Fail-closed: if validation itself errors, block the save
-                // rather than let an unvalidated file slip through.
+                // Fail-closed: if validation itself errors, block the save.
                 ValidationResult validation;
                 try
                 {
@@ -205,8 +202,7 @@ namespace PDMLite
                         return 1;
                     }
 
-                    // Re-validate after the form closes — confirm the user
-                    // actually filled everything before allowing the save.
+                    // Re-validate after form closes — confirm fields were actually saved.
                     var recheck = PropertyValidator.Validate(doc);
                     if (!recheck.IsValid)
                     {
@@ -248,35 +244,26 @@ namespace PDMLite
         }
 
         // ── Fires AFTER the file is saved — update database ──────────────────
-        private int OnFileSavePost(int saveType, string fileName)
+        private int OnSavePost(ModelDoc2 doc, string fileName)
         {
-            ModelDoc2 doc = SwApp.ActiveDoc as ModelDoc2;
             if (doc == null) return 0;
 
             string filePath = doc.GetPathName();
+            if (string.IsNullOrEmpty(filePath)) filePath = fileName;
             string currentStatus = DatabaseManager.GetFileStatus(filePath);
 
             _taskPane?.RefreshPanel();
             DatabaseManager.UpsertFile(new VaultFile
             {
-                FilePath = filePath,
-                FileName = System.IO.Path.GetFileName(filePath),
+                FilePath   = filePath,
+                FileName   = System.IO.Path.GetFileName(filePath),
                 PartNumber = PropertyValidator.GetProperty(doc, "PartNo"),
                 Description = PropertyValidator.GetProperty(doc, "Description"),
-                Status = string.IsNullOrEmpty(currentStatus) ? "WIP" : currentStatus,
+                Status     = string.IsNullOrEmpty(currentStatus) ? "WIP" : currentStatus,
                 ModifiedBy = CurrentUser,
                 ModifiedDate = DateTime.Now
             });
 
-            return 0;
-        }
-
-        // ── Fires when document is closed — remove from tracked list ─────────
-        private int OnDocDestroy()
-        {
-            ModelDoc2 doc = SwApp?.ActiveDoc as ModelDoc2;
-            if (doc != null)
-                _hookedDocs.Remove(doc.GetPathName());
             return 0;
         }
 
