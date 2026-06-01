@@ -1,4 +1,4 @@
-﻿using SolidWorks.Interop.sldworks;
+using SolidWorks.Interop.sldworks;
 using SolidWorks.Interop.swpublished;
 using SolidWorks.Interop.swconst;
 using System;
@@ -17,8 +17,13 @@ namespace PDMLite
 
         private int _addinId;
         private TaskPaneHost _taskPane;
-        private readonly HashSet<string> _hookedDocs =
-            new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+        // Strong references to per-document event handlers.
+        // This dictionary MUST be kept alive for the lifetime of the add-in.
+        // Without it, the .NET GC collects the event sinks and document events
+        // (FileSaveNotify, FileSaveAsNotify2, etc.) silently stop firing.
+        private readonly Dictionary<string, DocEventHandler> _docHandlers =
+            new Dictionary<string, DocEventHandler>(StringComparer.OrdinalIgnoreCase);
 
         public bool ConnectToSW(object thisSW, int cookie)
         {
@@ -30,7 +35,7 @@ namespace PDMLite
                 _taskPane = new TaskPaneHost();
                 _taskPane.Register(SwApp);
                 ((SldWorks)SwApp).ActiveDocChangeNotify += OnActiveDocChange;
-                HookCurrentDoc();
+                HookAllOpenDocs();
                 return true;
             }
             catch (Exception ex)
@@ -45,203 +50,219 @@ namespace PDMLite
         {
             _taskPane?.Unregister(SwApp);
             ((SldWorks)SwApp).ActiveDocChangeNotify -= OnActiveDocChange;
-            _hookedDocs.Clear();
+            foreach (var h in _docHandlers.Values)
+                try { h.Detach(); } catch { }
+            _docHandlers.Clear();
             SwApp = null;
             return true;
         }
 
-        private int OnActiveDocChange() { HookCurrentDoc(); return 0; }
+        // On every active-doc change, re-scan ALL open documents.
+        // This catches new files and any document that lost its handler
+        // (e.g. due to a spurious DestroyNotify from the Custom Properties tab).
+        private int OnActiveDocChange() { HookAllOpenDocs(); return 0; }
 
-        private void HookCurrentDoc()
+        internal void HookAllOpenDocs()
         {
-            ModelDoc2 doc = SwApp?.ActiveDoc as ModelDoc2;
-            if (doc == null) return;
-
-            string path = doc.GetPathName();
-            string identifier = string.IsNullOrEmpty(path) ? "NEW:" + doc.GetTitle() : path;
-            if (string.IsNullOrEmpty(identifier) || _hookedDocs.Contains(identifier)) return;
-
-            int t = doc.GetType();
-
-            if (t == (int)swDocumentTypes_e.swDocPART)
+            try
             {
-                DPartDocEvents_Event d = (DPartDocEvents_Event)doc;
-                d.FileSaveNotify += OnFileSaveNotify;
-                d.FileSaveAsNotify += OnFileSaveNotify;
-                d.FileSavePostNotify += OnFileSavePost;
-                d.DestroyNotify += OnDocDestroy;
+                object[] docs = (object[])SwApp?.GetDocuments();
+                if (docs == null) return;
+                foreach (object d in docs)
+                    TryHookDoc(d as ModelDoc2);
             }
-            else if (t == (int)swDocumentTypes_e.swDocASSEMBLY)
-            {
-                DAssemblyDocEvents_Event d = (DAssemblyDocEvents_Event)doc;
-                d.FileSaveNotify += OnFileSaveNotify;
-                d.FileSaveAsNotify += OnFileSaveNotify;
-                d.FileSavePostNotify += OnFileSavePost;
-                d.DestroyNotify += OnDocDestroy;
-            }
-            else if (t == (int)swDocumentTypes_e.swDocDRAWING)
-            {
-                DDrawingDocEvents_Event d = (DDrawingDocEvents_Event)doc;
-                d.FileSaveNotify += OnFileSaveNotify;
-                d.FileSaveAsNotify += OnFileSaveNotify;
-                d.FileSavePostNotify += OnFileSavePost;
-                d.DestroyNotify += OnDocDestroy;
-            }
-
-            // ── Show status notification when file opens ──────────────────
-            string fileStatus = DatabaseManager.GetFileStatus(path);
-            var lockInfo = DatabaseManager.GetLockInfo(path);
-            string userRole = DatabaseManager.GetUserRole(CurrentUser);
-
-            // Notification 1: File is locked by someone else
-            if (lockInfo.IsLocked &&
-                !lockInfo.LockedBy.Equals(CurrentUser, StringComparison.OrdinalIgnoreCase))
-            {
-                SwApp.SendMsgToUser2(
-                    "🔒  FILE LOCKED — BCore PDM\n\n" +
-                    "Locked by : " + lockInfo.LockedBy + "\n" +
-                    "Locked on : " + lockInfo.LockedDate.ToString("dd/MM/yyyy HH:mm") + "\n\n" +
-                    "You can view and reference this file\nbut cannot save any changes.",
-                    (int)swMessageBoxIcon_e.swMbInformation,
-                    (int)swMessageBoxBtn_e.swMbOk);
-            }
-
-            // Notification 2: File is Released (show to engineers only)
-            else if (fileStatus == "Released" && userRole != "Master")
-            {
-                SwApp.SendMsgToUser2(
-                    "✅  FILE RELEASED — BCore PDM\n\n" +
-                    "This file has been officially released.\n\n" +
-                    "You can view and use it in assemblies\nbut cannot save changes to it.\n\n" +
-                    "Contact " + lockInfo.LockedBy + " to start a new revision.",
-                    (int)swMessageBoxIcon_e.swMbInformation,
-                    (int)swMessageBoxBtn_e.swMbOk);
-            }
-
-            // Notification 3: File is WIP but no properties filled yet (new file warning)
-            else if (string.IsNullOrEmpty(fileStatus) && userRole != "Master")
-            {
-                // No popup for new WIP files — property form handles this on save
-            }
-
-            _hookedDocs.Add(identifier);
+            catch { }
         }
 
-        // ── Fires BEFORE the file is saved ───────────────────────────────────
-        // Return 1 = CANCEL the save
-        // Return 0 = ALLOW the save
-        private int OnFileSaveNotify(string fileName)
+        private void TryHookDoc(ModelDoc2 doc)
         {
-            ModelDoc2 doc = SwApp.ActiveDoc as ModelDoc2;
-            if (doc == null) return 0;
-
-            string filePath = doc.GetPathName();
-            if (string.IsNullOrEmpty(filePath)) filePath = fileName;
-            string userRole = DatabaseManager.GetUserRole(CurrentUser);
-
-            // Rule 1: Is file locked by someone else?
-            var lockInfo = DatabaseManager.GetLockInfo(filePath);
-            if (lockInfo.IsLocked &&
-                !lockInfo.LockedBy.Equals(CurrentUser, StringComparison.OrdinalIgnoreCase))
+            if (doc == null) return;
+            try
             {
-                Block("File is locked by: " + lockInfo.LockedBy + "\n" +
-                      "Locked: " + lockInfo.LockedDate.ToString("yyyy-MM-dd HH:mm") + "\n\n" +
-                      "Contact your Master user to unlock it.");
-                return 1;
-            }
+                string path = doc.GetPathName();
+                string id = string.IsNullOrEmpty(path) ? "NEW:" + doc.GetTitle() : path;
+                if (string.IsNullOrEmpty(id) || _docHandlers.ContainsKey(id)) return;
 
-            // Rule 2: Released files are read-only
-            string status = DatabaseManager.GetFileStatus(filePath);
-            if (status == "Released" && userRole != "Master")
-            {
-                Block("This file is Released and locked.\n" +
-                      "Only the Master user can modify released files.\n" +
-                      "Create a new revision instead.");
-                return 1;
-            }
+                var handler = new DocEventHandler(this, doc, id);
+                if (!handler.Attach()) return;
+                _docHandlers[id] = handler;
 
-            int docType = doc.GetType();
-            bool isPart = docType == (int)swDocumentTypes_e.swDocPART;
-            bool isAsm = docType == (int)swDocumentTypes_e.swDocASSEMBLY;
+                // ── Status notification when a file is opened ─────────────
+                string fileStatus = DatabaseManager.GetFileStatus(path);
+                var lockInfo     = DatabaseManager.GetLockInfo(path);
+                string userRole  = DatabaseManager.GetUserRole(CurrentUser);
 
-            if (isPart || isAsm)
-            {
-                // Rule 3: All required properties must be filled
-                var validation = PropertyValidator.Validate(doc);
-                if (!validation.IsValid)
+                if (lockInfo.IsLocked &&
+                    !lockInfo.LockedBy.Equals(CurrentUser, StringComparison.OrdinalIgnoreCase))
                 {
-                    var form = new PropertyForm(doc, validation.EmptyFields);
-                    form.ShowDialog();
+                    SwApp.SendMsgToUser2(
+                        "🔒  FILE LOCKED — BCore PDM\n\n" +
+                        "Locked by : " + lockInfo.LockedBy + "\n" +
+                        "Locked on : " + lockInfo.LockedDate.ToString("dd/MM/yyyy HH:mm") + "\n\n" +
+                        "You can view and reference this file\nbut cannot save any changes.",
+                        (int)swMessageBoxIcon_e.swMbInformation,
+                        (int)swMessageBoxBtn_e.swMbOk);
+                }
+                else if (fileStatus == "Released" && userRole != "Master")
+                {
+                    SwApp.SendMsgToUser2(
+                        "✅  FILE RELEASED — BCore PDM\n\n" +
+                        "This file has been officially released.\n\n" +
+                        "You can view and use it in assemblies\nbut cannot save changes to it.\n\n" +
+                        "Contact " + lockInfo.LockedBy + " to start a new revision.",
+                        (int)swMessageBoxIcon_e.swMbInformation,
+                        (int)swMessageBoxBtn_e.swMbOk);
+                }
+            }
+            catch { }
+        }
 
-                    if (!form.PropertiesSaved)
+        // Called from DocEventHandler.OnDestroy. Removes stale handler then
+        // immediately re-scans open docs so any still-open file gets re-hooked.
+        internal void OnDocDestroyed(string id)
+        {
+            _docHandlers.Remove(id);
+            // Re-hook: DestroyNotify sometimes fires spuriously (e.g. when the
+            // Custom Properties task pane opens). Re-scanning immediately ensures
+            // the document gets re-registered if it is still open.
+            HookAllOpenDocs();
+        }
+
+        // ── Pre-save validation ───────────────────────────────────────────────
+        // Return 1 = CANCEL the save ; Return 0 = ALLOW the save
+        // The entire body is wrapped in try/catch. Any unhandled exception from
+        // a COM event handler is silently swallowed by the COM layer, which then
+        // uses the default return value (0 = allow). Explicitly returning 1 on
+        // any exception keeps the save blocked instead of silently allowed.
+        internal int ValidateSave(ModelDoc2 doc, string fileName)
+        {
+            try
+            {
+                if (doc == null)
+                {
+                    Block("Save blocked: document reference is invalid. Try again.");
+                    return 1;
+                }
+
+                string filePath = doc.GetPathName();
+                if (string.IsNullOrEmpty(filePath)) filePath = fileName;
+                string userRole = DatabaseManager.GetUserRole(CurrentUser);
+
+                // Rule 1: locked by someone else?
+                var lockInfo = DatabaseManager.GetLockInfo(filePath);
+                if (lockInfo.IsLocked &&
+                    !lockInfo.LockedBy.Equals(CurrentUser, StringComparison.OrdinalIgnoreCase))
+                {
+                    Block("File is locked by: " + lockInfo.LockedBy + "\n" +
+                          "Locked: " + lockInfo.LockedDate.ToString("yyyy-MM-dd HH:mm") + "\n\n" +
+                          "Contact your Master user to unlock it.");
+                    return 1;
+                }
+
+                // Rule 2: released file
+                string status = DatabaseManager.GetFileStatus(filePath);
+                if (status == "Released" && userRole != "Master")
+                {
+                    Block("This file is Released and locked.\n" +
+                          "Only the Master user can modify released files.\n" +
+                          "Create a new revision instead.");
+                    return 1;
+                }
+
+                int docType = doc.GetType();
+                bool isPart = docType == (int)swDocumentTypes_e.swDocPART;
+                bool isAsm  = docType == (int)swDocumentTypes_e.swDocASSEMBLY;
+
+                if (isPart || isAsm)
+                {
+                    // Rule 3: required properties
+                    ValidationResult validation;
+                    try   { validation = PropertyValidator.Validate(doc); }
+                    catch (Exception ex)
                     {
-                        Block("Required properties incomplete:\n\n" +
-                              "• " + string.Join("\n• ", validation.EmptyFields) + "\n\n" +
-                              "Fill all fields and try again.");
+                        Block("Could not verify required properties:\n\n" +
+                              ex.Message + "\n\nSave blocked. Try again.");
                         return 1;
+                    }
+
+                    if (!validation.IsValid)
+                    {
+                        using (var form = new PropertyForm(doc, validation.EmptyFields))
+                        {
+                            form.ShowDialog();
+                            if (!form.PropertiesSaved)
+                            {
+                                Block("Required properties incomplete:\n\n" +
+                                      "• " + string.Join("\n• ", validation.EmptyFields) + "\n\n" +
+                                      "Fill all fields and try again.");
+                                return 1;
+                            }
+                        }
+                        // Re-validate after form closes
+                        var recheck = PropertyValidator.Validate(doc);
+                        if (!recheck.IsValid)
+                        {
+                            Block("Required properties still incomplete:\n\n" +
+                                  "• " + string.Join("\n• ", recheck.EmptyFields) + "\n\n" +
+                                  "Fill all fields and try again.");
+                            return 1;
+                        }
+                    }
+
+                    PropertyValidator.FixDateFormats(doc);
+                    PropertyValidator.AutoFillWeight(doc);
+
+                    // Rule 5: broken references
+                    var broken = ReferenceChecker.GetBrokenReferences(doc);
+                    if (broken.Count > 0)
+                    {
+                        int choice = SwApp.SendMsgToUser2(
+                            "BROKEN REFERENCES:\n\n• " +
+                            string.Join("\n• ", broken) + "\n\n" +
+                            "Cannot release with broken refs.\nSave as WIP anyway?",
+                            (int)swMessageBoxIcon_e.swMbWarning,
+                            (int)swMessageBoxBtn_e.swMbYesNo);
+                        if (choice == (int)swMessageBoxResult_e.swMbHitNo) return 1;
+                        DatabaseManager.SetBrokenRefFlag(filePath, true);
+                    }
+                    else
+                    {
+                        DatabaseManager.SetBrokenRefFlag(filePath, false);
                     }
                 }
 
-                // Auto-convert date formats if in old yyyy-MM-dd format
-                PropertyValidator.FixDateFormats(doc);
-
-                // Rule 4: Auto-fill PartWeight from mass properties
-                PropertyValidator.AutoFillWeight(doc);
-
-                // Rule 5: Check for broken references
-                var broken = ReferenceChecker.GetBrokenReferences(doc);
-                if (broken.Count > 0)
-                {
-                    int choice = SwApp.SendMsgToUser2(
-                        "BROKEN REFERENCES:\n\n• " +
-                        string.Join("\n• ", broken) + "\n\n" +
-                        "Cannot release with broken refs.\nSave as WIP anyway?",
-                        (int)swMessageBoxIcon_e.swMbWarning,
-                        (int)swMessageBoxBtn_e.swMbYesNo);
-
-                    if (choice == (int)swMessageBoxResult_e.swMbHitNo) return 1;
-
-                    DatabaseManager.SetBrokenRefFlag(filePath, true);
-                }
-                else
-                {
-                    DatabaseManager.SetBrokenRefFlag(filePath, false);
-                }
+                return 0;
             }
-
-            return 0;
-        }
-
-        // ── Fires AFTER the file is saved — update database ──────────────────
-        private int OnFileSavePost(int saveType, string fileName)
-        {
-            ModelDoc2 doc = SwApp.ActiveDoc as ModelDoc2;
-            if (doc == null) return 0;
-
-            string filePath = doc.GetPathName();
-            string currentStatus = DatabaseManager.GetFileStatus(filePath);
-
-            _taskPane?.RefreshPanel();
-            DatabaseManager.UpsertFile(new VaultFile
+            catch (Exception ex)
             {
-                FilePath = filePath,
-                FileName = System.IO.Path.GetFileName(filePath),
-                PartNumber = PropertyValidator.GetProperty(doc, "PartNo"),
-                Description = PropertyValidator.GetProperty(doc, "Description"),
-                Status = string.IsNullOrEmpty(currentStatus) ? "WIP" : currentStatus,
-                ModifiedBy = CurrentUser,
-                ModifiedDate = DateTime.Now
-            });
-
-            return 0;
+                // Fail-closed: block the save if anything unexpected goes wrong.
+                Block("Unexpected error during save validation:\n\n" +
+                      ex.Message + "\n\nSave blocked to protect the vault. Try again.");
+                return 1;
+            }
         }
 
-        // ── Fires when document is closed — remove from tracked list ─────────
-        private int OnDocDestroy()
+        internal int OnSavePost(ModelDoc2 doc, string fileName)
         {
-            ModelDoc2 doc = SwApp?.ActiveDoc as ModelDoc2;
-            if (doc != null)
-                _hookedDocs.Remove(doc.GetPathName());
+            try
+            {
+                if (doc == null) return 0;
+                string filePath = doc.GetPathName();
+                if (string.IsNullOrEmpty(filePath)) filePath = fileName;
+                string currentStatus = DatabaseManager.GetFileStatus(filePath);
+                _taskPane?.RefreshPanel();
+                DatabaseManager.UpsertFile(new VaultFile
+                {
+                    FilePath    = filePath,
+                    FileName    = System.IO.Path.GetFileName(filePath),
+                    PartNumber  = PropertyValidator.GetProperty(doc, "PartNo"),
+                    Description = PropertyValidator.GetProperty(doc, "Description"),
+                    Status      = string.IsNullOrEmpty(currentStatus) ? "WIP" : currentStatus,
+                    ModifiedBy  = CurrentUser,
+                    ModifiedDate = DateTime.Now
+                });
+            }
+            catch { }
             return 0;
         }
 
@@ -250,5 +271,141 @@ namespace PDMLite
                 "SAVE BLOCKED — BCore PDM\n\n" + reason,
                 (int)swMessageBoxIcon_e.swMbStop,
                 (int)swMessageBoxBtn_e.swMbOk);
+
+        // ─────────────────────────────────────────────────────────────────────
+        // Per-document event handler.
+        //
+        // CRITICAL: Delegate instances must be stored as typed fields.
+        // Writing `part.FileSaveNotify += OnSave` creates a temporary delegate
+        // object that has no other strong .NET reference, so it can be GC'd at
+        // any time. Storing them as fields on this class (which itself lives in
+        // _docHandlers on the add-in) keeps them alive for the document's life.
+        // ─────────────────────────────────────────────────────────────────────
+        private class DocEventHandler
+        {
+            private readonly PDMLiteAddin _addin;
+            private readonly ModelDoc2    _doc;
+            private readonly string       _id;
+            private readonly int          _type;
+
+            // Part delegates
+            private DPartDocEvents_FileSaveNotifyEventHandler    _partSave;
+            private DPartDocEvents_FileSaveAsNotify2EventHandler _partSaveAs;
+            private DPartDocEvents_FileSavePostNotifyEventHandler _partPost;
+            private DPartDocEvents_DestroyNotifyEventHandler     _partDestroy;
+
+            // Assembly delegates
+            private DAssemblyDocEvents_FileSaveNotifyEventHandler    _asmSave;
+            private DAssemblyDocEvents_FileSaveAsNotify2EventHandler _asmSaveAs;
+            private DAssemblyDocEvents_FileSavePostNotifyEventHandler _asmPost;
+            private DAssemblyDocEvents_DestroyNotifyEventHandler     _asmDestroy;
+
+            // Drawing delegates
+            private DDrawingDocEvents_FileSaveNotifyEventHandler    _drwSave;
+            private DDrawingDocEvents_FileSaveAsNotify2EventHandler _drwSaveAs;
+            private DDrawingDocEvents_FileSavePostNotifyEventHandler _drwPost;
+            private DDrawingDocEvents_DestroyNotifyEventHandler     _drwDestroy;
+
+            public DocEventHandler(PDMLiteAddin addin, ModelDoc2 doc, string id)
+            {
+                _addin = addin;
+                _doc   = doc;
+                _id    = id;
+                _type  = doc.GetType();
+            }
+
+            public bool Attach()
+            {
+                // NOTE: FileSaveAsNotify2 is fired for never-saved docs (first
+                // save / Save As). FileSaveNotify fires for re-saves. Only
+                // FileSaveAsNotify2 honours the nonzero return to abort the save;
+                // the legacy FileSaveAsNotify ignores it.
+                if (_type == (int)swDocumentTypes_e.swDocPART)
+                {
+                    var d = (DPartDocEvents_Event)_doc;
+                    _partSave    = new DPartDocEvents_FileSaveNotifyEventHandler(OnSave);
+                    _partSaveAs  = new DPartDocEvents_FileSaveAsNotify2EventHandler(OnSave);
+                    _partPost    = new DPartDocEvents_FileSavePostNotifyEventHandler(OnPost);
+                    _partDestroy = new DPartDocEvents_DestroyNotifyEventHandler(OnDestroy);
+                    d.FileSaveNotify    += _partSave;
+                    d.FileSaveAsNotify2 += _partSaveAs;
+                    d.FileSavePostNotify += _partPost;
+                    d.DestroyNotify     += _partDestroy;
+                    return true;
+                }
+                if (_type == (int)swDocumentTypes_e.swDocASSEMBLY)
+                {
+                    var d = (DAssemblyDocEvents_Event)_doc;
+                    _asmSave    = new DAssemblyDocEvents_FileSaveNotifyEventHandler(OnSave);
+                    _asmSaveAs  = new DAssemblyDocEvents_FileSaveAsNotify2EventHandler(OnSave);
+                    _asmPost    = new DAssemblyDocEvents_FileSavePostNotifyEventHandler(OnPost);
+                    _asmDestroy = new DAssemblyDocEvents_DestroyNotifyEventHandler(OnDestroy);
+                    d.FileSaveNotify    += _asmSave;
+                    d.FileSaveAsNotify2 += _asmSaveAs;
+                    d.FileSavePostNotify += _asmPost;
+                    d.DestroyNotify     += _asmDestroy;
+                    return true;
+                }
+                if (_type == (int)swDocumentTypes_e.swDocDRAWING)
+                {
+                    var d = (DDrawingDocEvents_Event)_doc;
+                    _drwSave    = new DDrawingDocEvents_FileSaveNotifyEventHandler(OnSave);
+                    _drwSaveAs  = new DDrawingDocEvents_FileSaveAsNotify2EventHandler(OnSave);
+                    _drwPost    = new DDrawingDocEvents_FileSavePostNotifyEventHandler(OnPost);
+                    _drwDestroy = new DDrawingDocEvents_DestroyNotifyEventHandler(OnDestroy);
+                    d.FileSaveNotify    += _drwSave;
+                    d.FileSaveAsNotify2 += _drwSaveAs;
+                    d.FileSavePostNotify += _drwPost;
+                    d.DestroyNotify     += _drwDestroy;
+                    return true;
+                }
+                return false;
+            }
+
+            public void Detach()
+            {
+                try
+                {
+                    if (_type == (int)swDocumentTypes_e.swDocPART && _partSave != null)
+                    {
+                        var d = (DPartDocEvents_Event)_doc;
+                        d.FileSaveNotify    -= _partSave;
+                        d.FileSaveAsNotify2 -= _partSaveAs;
+                        d.FileSavePostNotify -= _partPost;
+                        d.DestroyNotify     -= _partDestroy;
+                    }
+                    else if (_type == (int)swDocumentTypes_e.swDocASSEMBLY && _asmSave != null)
+                    {
+                        var d = (DAssemblyDocEvents_Event)_doc;
+                        d.FileSaveNotify    -= _asmSave;
+                        d.FileSaveAsNotify2 -= _asmSaveAs;
+                        d.FileSavePostNotify -= _asmPost;
+                        d.DestroyNotify     -= _asmDestroy;
+                    }
+                    else if (_type == (int)swDocumentTypes_e.swDocDRAWING && _drwSave != null)
+                    {
+                        var d = (DDrawingDocEvents_Event)_doc;
+                        d.FileSaveNotify    -= _drwSave;
+                        d.FileSaveAsNotify2 -= _drwSaveAs;
+                        d.FileSavePostNotify -= _drwPost;
+                        d.DestroyNotify     -= _drwDestroy;
+                    }
+                }
+                catch { }
+                _partSave = null; _partSaveAs = null; _partPost = null; _partDestroy = null;
+                _asmSave  = null; _asmSaveAs  = null; _asmPost  = null; _asmDestroy  = null;
+                _drwSave  = null; _drwSaveAs  = null; _drwPost  = null; _drwDestroy  = null;
+            }
+
+            private int OnSave(string fileName) => _addin.ValidateSave(_doc, fileName);
+            private int OnPost(int t, string fn) => _addin.OnSavePost(_doc, fn);
+
+            private int OnDestroy()
+            {
+                Detach();
+                _addin.OnDocDestroyed(_id);
+                return 0;
+            }
+        }
     }
 }

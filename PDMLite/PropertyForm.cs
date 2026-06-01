@@ -64,8 +64,8 @@ namespace PDMLite
             }},
             { "Revision", new[] {
                 "-- Select --",
-                "A","B","C","D","E","F",
-                "G","H","J","K","L","M"
+                "A","B","C","D","E","F","G","H","J","K","L","M",
+                "N","P","R","T","U","V","W","Y","Z"
             }}
         };
 
