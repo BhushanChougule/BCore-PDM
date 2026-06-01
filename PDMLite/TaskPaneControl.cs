@@ -94,10 +94,12 @@ namespace PDMLite
                 BackColor = cBrandDark,
                 Location = new Point(0, y),
                 Width = S(210),
-                Height = S(32)
+                Height = S(32),
+                Cursor = Cursors.Hand
             };
+            headerBanner.Click += (s, e) => ShowAboutDialog();
             this.Controls.Add(headerBanner);
-            headerBanner.Controls.Add(new Label
+            var headerLbl = new Label
             {
                 Text = "BCore PDM",
                 Font = fHeader,
@@ -106,8 +108,11 @@ namespace PDMLite
                 AutoSize = false,
                 Width = S(210),
                 Height = S(32),
-                TextAlign = ContentAlignment.MiddleCenter
-            });
+                TextAlign = ContentAlignment.MiddleCenter,
+                Cursor = Cursors.Hand
+            };
+            headerLbl.Click += (s, e) => ShowAboutDialog();
+            headerBanner.Controls.Add(headerLbl);
             y += S(32);
 
             // ── Search Section ────────────────────────────────────────
@@ -697,6 +702,122 @@ namespace PDMLite
             else if (action == "myrequests") { VaultManager.ViewMyRequests(); return; }
 
             Refresh(doc);
+        }
+
+        // ── About Dialog ─────────────────────────────────────────────
+        private void ShowAboutDialog()
+        {
+            int fw = S(320);
+            int fh = S(260);
+
+            using (var form = new Form())
+            {
+                form.Text = "About BCore PDM";
+                form.Width  = fw;
+                form.Height = fh;
+                form.StartPosition    = FormStartPosition.CenterScreen;
+                form.FormBorderStyle  = FormBorderStyle.FixedDialog;
+                form.MaximizeBox      = false;
+                form.MinimizeBox      = false;
+                form.BackColor        = Color.White;
+
+                // Top accent bar
+                form.Controls.Add(new Panel {
+                    BackColor = cBrandDark,
+                    Location  = new Point(0, 0),
+                    Width     = fw,
+                    Height    = S(5)
+                });
+
+                int y = S(16);
+
+                // ── "BCore PDM" — "BC" in cBrand, "ore PDM" in cTextDark ──
+                // Paint-based panel avoids Label padding causing gap/clipping issues
+                Font fTitle = new Font("Segoe UI", 10f * _scale, FontStyle.Bold);
+                var titlePanel = new Panel {
+                    Location  = new Point(0, y),
+                    Width     = fw,
+                    Height    = S(44),
+                    BackColor = Color.White
+                };
+                titlePanel.Paint += (s, pe) => {
+                    var bcSz  = TextRenderer.MeasureText(pe.Graphics, "BC",      fTitle, new Size(fw, S(44)), TextFormatFlags.NoPadding | TextFormatFlags.SingleLine);
+                    var oreSz = TextRenderer.MeasureText(pe.Graphics, "ore PDM", fTitle, new Size(fw, S(44)), TextFormatFlags.NoPadding | TextFormatFlags.SingleLine);
+                    int startX = (fw - bcSz.Width - oreSz.Width) / 2;
+                    int textY  = (titlePanel.Height - bcSz.Height) / 2;
+                    TextRenderer.DrawText(pe.Graphics, "BC",      fTitle, new Point(startX,              textY), cBrand,    TextFormatFlags.NoPadding | TextFormatFlags.SingleLine);
+                    TextRenderer.DrawText(pe.Graphics, "ore PDM", fTitle, new Point(startX + bcSz.Width, textY), cTextDark, TextFormatFlags.NoPadding | TextFormatFlags.SingleLine);
+                };
+                form.Controls.Add(titlePanel);
+                y += S(48);
+
+                // Divider
+                form.Controls.Add(new Panel {
+                    BackColor = cBorder,
+                    Location  = new Point(S(30), y),
+                    Width     = fw - S(60), Height = 1
+                });
+                y += S(12);
+
+                // "A Product Data Management Solution for"
+                form.Controls.Add(new Label {
+                    Text = "A Product Data Management Solution for",
+                    Font = new Font("Segoe UI", 3.8f * _scale),
+                    ForeColor = cTextGray, TextAlign = ContentAlignment.MiddleCenter,
+                    Location  = new Point(0, y),
+                    AutoSize  = false, Width = fw, Height = S(16)
+                });
+                y += S(18);
+
+                // "Richards-Wilcox" — Georgia Bold Italic
+                form.Controls.Add(new Label {
+                    Text = "Richards-Wilcox",
+                    Font = new Font("Georgia", 7f * _scale, FontStyle.Bold | FontStyle.Italic),
+                    ForeColor = cTextDark, TextAlign = ContentAlignment.MiddleCenter,
+                    Location  = new Point(0, y),
+                    AutoSize  = false, Width = fw, Height = S(22)
+                });
+                y += S(30);
+
+                // "Designed, Developed and Maintained by"
+                form.Controls.Add(new Label {
+                    Text = "Designed, Developed and Maintained by",
+                    Font = new Font("Segoe UI", 3.8f * _scale),
+                    ForeColor = cTextGray, TextAlign = ContentAlignment.MiddleCenter,
+                    Location  = new Point(0, y),
+                    AutoSize  = false, Width = fw, Height = S(16)
+                });
+                y += S(18);
+
+                // "Bhushan Chougule" — Georgia Bold Italic, same cBrand as "BC"
+                form.Controls.Add(new Label {
+                    Text = "Bhushan Chougule",
+                    Font = new Font("Georgia", 7f * _scale, FontStyle.Bold | FontStyle.Italic),
+                    ForeColor = cBrand, TextAlign = ContentAlignment.MiddleCenter,
+                    Location  = new Point(0, y),
+                    AutoSize  = false, Width = fw, Height = S(22)
+                });
+                y += S(30);
+
+                // Divider
+                form.Controls.Add(new Panel {
+                    BackColor = cBorder,
+                    Location  = new Point(S(30), y),
+                    Width     = fw - S(60), Height = 1
+                });
+                y += S(12);
+
+                // "Release Version 1.0"
+                form.Controls.Add(new Label {
+                    Text = "Release Version 1.0",
+                    Font = new Font("Segoe UI", 3.8f * _scale, FontStyle.Bold),
+                    ForeColor = cTextLight, TextAlign = ContentAlignment.MiddleCenter,
+                    Location  = new Point(0, y),
+                    AutoSize  = false, Width = fw, Height = S(16)
+                });
+
+                form.ShowDialog(this);
+            }
         }
 
         // ── UI Helpers ────────────────────────────────────────────────
