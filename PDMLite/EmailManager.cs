@@ -132,7 +132,7 @@ namespace PDMLite
                 return "SenderEmail is blank in email.config.";
             if (string.IsNullOrWhiteSpace(cfg.SenderPassword))
                 return "SenderPassword is blank in email.config.\n\n" +
-                       "For Gmail this must be a 16-character App Password.";
+                       "Contact IT for the Mailgun SMTP password.";
 
             try
             {
@@ -158,8 +158,8 @@ namespace PDMLite
                     detail += "\n\n" + ex.InnerException.Message;
                 return "Send FAILED:\n\n" + detail +
                        "\n\nCommon causes:\n" +
-                       "• Password is not a Gmail App Password\n" +
-                       "• SenderEmail doesn't match the account\n" +
+                       "• Wrong SMTP password (ask IT for the Mailgun password)\n" +
+                       "• SenderEmail doesn't match the Mailgun account\n" +
                        "• Network/firewall blocks SMTP port " + cfg.SmtpPort;
             }
 
@@ -200,13 +200,13 @@ namespace PDMLite
                     "<?xml version=\"1.0\" encoding=\"utf-8\"?>\r\n" +
                     "<!-- BCore PDM Email Configuration\r\n" +
                     "     Set Enabled to true and fill in SMTP credentials to activate.\r\n" +
-                    "     SenderPassword: use a Gmail App Password (16-char, no spaces). -->\r\n" +
+                    "     Contact IT for Mailgun SMTP credentials. -->\r\n" +
                     "<EmailConfig>\r\n" +
                     "  <Enabled>false</Enabled>\r\n" +
-                    "  <SmtpServer>smtp.gmail.com</SmtpServer>\r\n" +
+                    "  <SmtpServer>smtp.mailgun.org</SmtpServer>\r\n" +
                     "  <SmtpPort>587</SmtpPort>\r\n" +
-                    "  <SenderEmail>your-gmail@gmail.com</SenderEmail>\r\n" +
-                    "  <SenderPassword>your-app-password-here</SenderPassword>\r\n" +
+                    "  <SenderEmail>bcorepdm@mg.richardswilcox.com</SenderEmail>\r\n" +
+                    "  <SenderPassword>your-mailgun-smtp-password-here</SenderPassword>\r\n" +
                     "  <EmailDomain>richardswilcox.com</EmailDomain>\r\n" +
                     "</EmailConfig>\r\n");
             }
