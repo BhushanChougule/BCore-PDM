@@ -49,6 +49,21 @@ namespace PDMLite
     {
         private const string VaultFolder = @"N:\PDM-SolidWorks\vault";
         private const string DataFile = @"N:\PDM-SolidWorks\vault\vault.xml";
+        private const string WipRoot = @"N:\PDM-SolidWorks\WIP";
+
+        // Division subfolders under WIP — one per product line.
+        // Initialize() creates these on first addin load so engineers
+        // can navigate to them immediately without manual setup.
+        public static readonly string[] WipDivisions = {
+            "A - Aurora Shelving",
+            "B - Aurora Mobile",
+            "E - Cabinets",
+            "G - Hardware",
+            "L - Library Shelving",
+            "M - Conveyor",
+            "O - Oil tank",
+            "X - Rotary"
+        };
 
         private static readonly object _lock = new object();
 
@@ -91,6 +106,15 @@ namespace PDMLite
         public static void Initialize()
         {
             lock (_lock) { LoadOrCreate(); }
+
+            // Ensure WIP division subfolders exist so engineers can
+            // navigate to them from the first day without manual setup.
+            try
+            {
+                foreach (string div in WipDivisions)
+                    Directory.CreateDirectory(Path.Combine(WipRoot, div));
+            }
+            catch { }
         }
 
         // ════════════════════════════════════════════════════════════════

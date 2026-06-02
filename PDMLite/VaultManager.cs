@@ -694,8 +694,13 @@ namespace PDMLite
             string dir = Path.GetDirectoryName(filePath);
             string name = Path.GetFileNameWithoutExtension(filePath);
 
-            // Search same folder then WIP folder for matching drawing
-            string[] searchDirs = { dir, WipFolder };
+            // Build search list: same folder as the part first (fastest, most
+            // common case), then each WIP division subfolder as a fallback in
+            // case the drawing was saved in a different division than the part.
+            var searchDirs = new System.Collections.Generic.List<string> { dir };
+            foreach (string div in DatabaseManager.WipDivisions)
+                searchDirs.Add(Path.Combine(WipFolder, div));
+
             foreach (string searchDir in searchDirs)
             {
                 string candidate = Path.Combine(searchDir, name + ".slddrw");

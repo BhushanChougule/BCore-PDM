@@ -32,6 +32,24 @@ N:\\PDM-SolidWorks\\
 
 \- WIP\\                   → work in progress files — THE single canonical home for every vault file. Engineers always save here. The DB tracks the WIP path.
 
+  Division subfolders (auto-created by Initialize on first addin load):
+
+  \- WIP\\A - Aurora Shelving\\
+
+  \- WIP\\B - Aurora Mobile\\
+
+  \- WIP\\E - Cabinets\\
+
+  \- WIP\\G - Hardware\\
+
+  \- WIP\\L - Library Shelving\\
+
+  \- WIP\\M - Conveyor\\
+
+  \- WIP\\O - Oil tank\\
+
+  \- WIP\\X - Rotary\\
+
 \- RELEASED\\              → read-only published snapshots (OS read-only). Write-once OUTPUT only — never opened for editing. To change a released file, Unlock or New Revision (both act on the WIP copy).
 
 \- ARCHIVE\\PARTS\\         → archived .sldprt files
