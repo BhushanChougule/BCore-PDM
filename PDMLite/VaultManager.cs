@@ -227,7 +227,10 @@ namespace PDMLite
             if (!isDrawing)
                 PropertyValidator.AutoFillWeight(doc);
 
-            doc.Save3((int)swSaveAsOptions_e.swSaveAsOptions_Silent, 0, 0);
+            // This programmatic save must bypass the released-file save lock.
+            PDMLiteAddin.SuppressSaveValidation = true;
+            try { doc.Save3((int)swSaveAsOptions_e.swSaveAsOptions_Silent, 0, 0); }
+            finally { PDMLiteAddin.SuppressSaveValidation = false; }
 
             // ── Archive old exports before creating new ones ──────────────
             // Parts use cleaned part number (dots removed) for STEP naming
@@ -242,16 +245,33 @@ namespace PDMLite
             string releasedCopy = Path.Combine(RelFolder,
                 Path.GetFileName(filePath));
 
-            // Remove read-only from old released copy before overwriting
-            if (File.Exists(releasedCopy))
-                SetReadOnly(releasedCopy, false);
+            // Delete any existing released copy first. Overwriting a read-only
+            // file on the network share fails, which previously left a STALE
+            // copy in RELEASED while the exports updated. Delete-then-copy is
+            // reliable, and any genuine failure is now surfaced, not swallowed.
+            try
+            {
+                if (File.Exists(releasedCopy))
+                {
+                    SetReadOnly(releasedCopy, false);
+                    File.Delete(releasedCopy);
+                }
+                File.Copy(filePath, releasedCopy, overwrite: true);
 
-            File.Copy(filePath, releasedCopy, overwrite: true);
-
-            // ── Set OS-level read-only protection ─────────────────────────
-            SetReadOnly(filePath, true);
-            SetReadOnly(Path.Combine(RelFolder,
-                Path.GetFileName(filePath)), true);
+                // ── Set OS-level read-only protection ─────────────────────
+                SetReadOnly(filePath, true);
+                SetReadOnly(releasedCopy, true);
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show(
+                    "WARNING: the released copy could not be updated in:\n" +
+                    RelFolder + "\n\n" + ex.Message + "\n\n" +
+                    "The exports were updated, but the SOLIDWORKS file in the " +
+                    "RELEASED folder is STALE. Check folder/file permissions.",
+                    "BCore PDM — Released Copy Failed",
+                    MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            }
 
             // ── Update database — source path ─────────────────────────────
             DatabaseManager.LockFile(filePath, user);
@@ -333,9 +353,12 @@ namespace PDMLite
                 Path.Combine(swArchive, archiveName),
                 overwrite: true);
 
-            // Bump revision
+            // Bump revision. This save happens while the file is still
+            // "Released" in the DB, so it must bypass the released-file lock.
             PropertyValidator.SetProperty(doc, "Revision", nextRev);
-            doc.Save3((int)swSaveAsOptions_e.swSaveAsOptions_Silent, 0, 0);
+            PDMLiteAddin.SuppressSaveValidation = true;
+            try { doc.Save3((int)swSaveAsOptions_e.swSaveAsOptions_Silent, 0, 0); }
+            finally { PDMLiteAddin.SuppressSaveValidation = false; }
 
             // Reset to WIP — source path and RELEASED copy
             DatabaseManager.UnlockFile(filePath);

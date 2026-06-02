@@ -98,7 +98,9 @@ Main entry point, ISwAddin implementation.
 
 \- Hooks: FileSaveNotify, FileSaveAsNotify2, FileSavePostNotify, DestroyNotify
 
-\- OnFileSaveNotify: check lock → check released → validate properties → auto-weight → duplicate part number → broken refs
+\- OnFileSaveNotify: suppress-flag check → check lock → check released (blocks EVERYONE incl. Masters) → validate properties → auto-weight → duplicate part number → broken refs
+
+\- SuppressSaveValidation (static bool): VaultManager sets it around its own internal Save3 calls (Release, New Revision) so those programmatic saves bypass the released-file lock
 
 \- OnFileSavePost: upsert file to database, update description
 
@@ -361,6 +363,10 @@ DPI-aware Form. S(v)=v\*\_scale.
 \- Fonts: new Font("Segoe UI", Xf \* \_scale) — NOT S() for font sizes
 
 \- OS read-only set on release, removed on unlock/new revision
+
+\- Released files are locked for EVERYONE (incl. Masters) — must use New Revision or Unlock to edit; enforced in ValidateSave, bypassed for internal saves via SuppressSaveValidation
+
+\- Release copies the SW file to RELEASED via delete-then-copy (overwriting a read-only file on the network share fails and left stale copies); copy failures are surfaced, not swallowed
 
 \- No COM auto-registration (no admin rights) — manual IT registration
 
