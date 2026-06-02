@@ -98,7 +98,7 @@ Main entry point, ISwAddin implementation.
 
 \- Hooks: FileSaveNotify, FileSaveAsNotify2, FileSavePostNotify, DestroyNotify
 
-\- OnFileSaveNotify: check lock → check released → validate properties → auto-weight → broken refs
+\- OnFileSaveNotify: check lock → check released → validate properties → auto-weight → duplicate part number → broken refs
 
 \- OnFileSavePost: upsert file to database, update description
 
@@ -157,6 +157,8 @@ Methods:
 \- GetUserRole, AddUser
 
 \- SearchFiles(term) → searches PartNumber + Description + FileName (Released files only)
+
+\- FindPartNumberConflict(partNo, excludeFilePath) → returns filename of another file using same PartNo (case-insensitive, trimmed), or null. Excludes the file being saved so it never conflicts with itself.
 
 \- GetFileHistory(filePath) → returns List<HistoryEntry> reversed (most recent first)
 
@@ -292,13 +294,13 @@ DPI-aware Form (680×500 scaled). S(v)=v\*\_scale. Opened from PENDING REQUESTS 
 
 \### EmailManager.cs
 
-Sends email notifications via Gmail SMTP. Non-fatal — all sends wrapped in try/catch; failure never blocks workflow.
+Sends email notifications via SMTP (company uses Mailgun: smtp.mailgun.org:587, sender bcorepdm@mg.richardswilcox.com). Non-fatal — all sends wrapped in try/catch; failure never blocks workflow.
 
 Config file: N:\\PDM-SolidWorks\\vault\\email.config (XML, created on first addin load if missing)
 
 \- Enabled = true/false toggle
 
-\- SmtpServer, SmtpPort (587), SenderEmail, SenderPassword (Gmail App Password), EmailDomain
+\- SmtpServer, SmtpPort (587), SenderEmail, SenderPassword (SMTP password), EmailDomain
 
 \- Email addresses derived as {username}@{EmailDomain}
 
@@ -500,15 +502,15 @@ GetNextRevision() in VaultManager.cs handles this
 
 \- File history rendered as individual labels (no text overlap), with StatusColor per entry
 
-\- Email notifications (Gmail SMTP) on request submit/approve/reject — config at N:\\PDM-SolidWorks\\vault\\email.config
+\- Email notifications (Mailgun SMTP) on request submit/approve/reject — config at N:\\PDM-SolidWorks\\vault\\email.config; "Send Test Email" button sends to the logged-in user to verify the pipeline
+
+\- Duplicate part-number detection on save (warns with Yes/No override when another file already uses the same PartNo) — format validation deemed unfeasible due to 3 divisions with inconsistent numbering
 
 
 
 \## Remaining Features (in priority order)
 
-1\. Part/Drawing number validation (enforce numbering format)
-
-3\. BOM Export to Excel on assembly release
+1\. BOM Export to Excel on assembly release
 
 4\. Multi-user conflict detection (warn when two engineers open same WIP)
 

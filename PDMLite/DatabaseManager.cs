@@ -353,8 +353,37 @@ namespace PDMLite
 
             return results;
         }
-        // ════════════════════════════════════════════════════════════════
-        // Engineer Requests (Unlock / Revision / Release)
+
+        // Find another file already using the given part number.
+        // Returns the conflicting file's name, or null if no conflict.
+        // Comparison is case-insensitive and trimmed; the file at
+        // excludeFilePath (the one being saved) is ignored so a file never
+        // conflicts with itself across re-saves, revisions, or configs.
+        public static string FindPartNumberConflict(string partNo, string excludeFilePath)
+        {
+            if (string.IsNullOrWhiteSpace(partNo)) return null;
+
+            string target = partNo.Trim();
+            string exclude = (excludeFilePath ?? "").Trim();
+
+            lock (_lock)
+            {
+                var doc = LoadOrCreate();
+                foreach (var el in doc.Root.Element("Files").Elements("File"))
+                {
+                    string elPath = ((string)el.Element("FilePath") ?? "").Trim();
+                    if (elPath.Equals(exclude, StringComparison.OrdinalIgnoreCase))
+                        continue;
+
+                    string elPart = ((string)el.Element("PartNumber") ?? "").Trim();
+                    if (elPart.Equals(target, StringComparison.OrdinalIgnoreCase))
+                        return (string)el.Element("FileName") ?? elPath;
+                }
+            }
+
+            return null;
+        }
+
         // ════════════════════════════════════════════════════════════════
         private static void AddRequest(string requestType, string filePath,
             string requestedBy, string note)
