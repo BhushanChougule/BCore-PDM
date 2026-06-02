@@ -27,7 +27,7 @@ namespace PDMLite
                     SmtpPort      = (int?)root.Element("SmtpPort")         ?? 587,
                     SenderEmail   = (string)root.Element("SenderEmail")   ?? "",
                     SenderPassword= (string)root.Element("SenderPassword") ?? "",
-                    EmailDomain   = (string)root.Element("EmailDomain")   ?? "richards-wilcox.com"
+                    EmailDomain   = (string)root.Element("EmailDomain")   ?? "richardswilcox.com"
                 };
             }
             catch { return null; }
@@ -130,7 +130,7 @@ namespace PDMLite
                     "  <SmtpPort>587</SmtpPort>\r\n" +
                     "  <SenderEmail>your-gmail@gmail.com</SenderEmail>\r\n" +
                     "  <SenderPassword>your-app-password-here</SenderPassword>\r\n" +
-                    "  <EmailDomain>richards-wilcox.com</EmailDomain>\r\n" +
+                    "  <EmailDomain>richardswilcox.com</EmailDomain>\r\n" +
                     "</EmailConfig>\r\n");
             }
             catch { }

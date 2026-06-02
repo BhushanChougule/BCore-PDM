@@ -2,8 +2,8 @@ Windows Registry Editor Version 5.00
 
 [HKEY_LOCAL_MACHINE\SOFTWARE\SolidWorks\AddIns\{A1B2C3D4-E5F6-7890-ABCD-EF1234567890}]
 @=dword:00000001
-"Title"="PDM Lite"
-"Description"="PDM Lite - Property Enforcer and Vault"
+"Title"="BCore PDM"
+"Description"="BCore PDM - Property Enforcer and Vault"
 
 [HKEY_CLASSES_ROOT\PDMLite.PDMLiteAddin]
 @="PDMLite.PDMLiteAddin Class"
