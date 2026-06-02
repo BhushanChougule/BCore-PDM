@@ -273,23 +273,14 @@ namespace PDMLite
                     MessageBoxButtons.OK, MessageBoxIcon.Warning);
             }
 
-            // ── Update database — source path ─────────────────────────────
+            // ── Update database ───────────────────────────────────────────
+            // Only track the source-path entry. SearchFiles() redirects callers
+            // to the RELEASED folder at open time, so no second entry is needed.
+            // A second entry would cause duplicate search results and false
+            // part-number conflict warnings.
             DatabaseManager.LockFile(filePath, user);
             DatabaseManager.SetFileStatus(filePath, "Released", user,
                 "Released REV " + rev);
-
-            // ── Update database — RELEASED folder copy ────────────────────
-            // Ensures the copy in the RELEASED folder shows correct status
-            // and shares the same history via filename fallback in GetFileHistory
-            DatabaseManager.UpsertFile(new VaultFile
-            {
-                FilePath = releasedCopy,
-                FileName = Path.GetFileName(filePath),
-                PartNumber = partNo,
-                Status = "Released",
-                ModifiedBy = user,
-                ModifiedDate = DateTime.Now
-            });
 
             MessageBox.Show(
                 "File Released Successfully!\n\n" +
@@ -360,15 +351,10 @@ namespace PDMLite
             try { doc.Save3((int)swSaveAsOptions_e.swSaveAsOptions_Silent, 0, 0); }
             finally { PDMLiteAddin.SuppressSaveValidation = false; }
 
-            // Reset to WIP — source path and RELEASED copy
+            // Reset to WIP — source path only (no separate entry for RELEASED copy)
             DatabaseManager.UnlockFile(filePath);
             DatabaseManager.SetFileStatus(filePath, "WIP", user,
                 "New revision started: REV " + nextRev);
-
-            string relCopy = Path.Combine(RelFolder, Path.GetFileName(filePath));
-            if (File.Exists(relCopy))
-                DatabaseManager.SetFileStatus(relCopy, "WIP", user,
-                    "New revision started: REV " + nextRev);
 
             MessageBox.Show(
                 "Revision bumped to REV " + nextRev + ".\nFile is now back in WIP.",

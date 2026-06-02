@@ -317,12 +317,18 @@ namespace PDMLite
         // ════════════════════════════════════════════════════════════════════
         // Search Files
         // ════════════════════════════════════════════════════════════════
+        private const string ReleasedFolder = @"N:\PDM-SolidWorks\RELEASED";
+
         public static List<VaultFile> SearchFiles(string searchTerm)
         {
             var results = new List<VaultFile>();
             if (string.IsNullOrWhiteSpace(searchTerm)) return results;
 
             string term = searchTerm.ToLower().Trim();
+            // Deduplicate by filename: vault.xml may have both a source-path entry
+            // and a RELEASED-folder entry for the same file after a release.
+            var seenFileNames = new System.Collections.Generic.HashSet<string>(
+                StringComparer.OrdinalIgnoreCase);
 
             lock (_lock)
             {
@@ -332,19 +338,31 @@ namespace PDMLite
                     string status = (string)el.Element("Status") ?? "";
                     if (status != "Released") continue;
 
+                    string fileName = (string)el.Element("FileName") ?? "";
+
+                    // Skip if we already have a result for this filename
+                    if (!seenFileNames.Add(fileName)) continue;
+
                     string partNo = ((string)el.Element("PartNumber") ?? "").ToLower();
                     string desc = ((string)el.Element("Description") ?? "").ToLower();
-                    string fileName = ((string)el.Element("FileName") ?? "").ToLower();
+                    string fileNameLower = fileName.ToLower();
 
-                    if (partNo.Contains(term) || desc.Contains(term) || fileName.Contains(term))
+                    if (partNo.Contains(term) || desc.Contains(term) || fileNameLower.Contains(term))
                     {
+                        // Always open Released files from the RELEASED folder,
+                        // not from wherever the engineer originally saved the file.
+                        string releasedPath = System.IO.Path.Combine(ReleasedFolder, fileName);
+                        string returnPath = File.Exists(releasedPath)
+                            ? releasedPath
+                            : (string)el.Element("FilePath") ?? "";
+
                         results.Add(new VaultFile
                         {
-                            FilePath = (string)el.Element("FilePath") ?? "",
-                            FileName = (string)el.Element("FileName") ?? "",
+                            FilePath = returnPath,
+                            FileName = fileName,
                             PartNumber = (string)el.Element("PartNumber") ?? "",
                             Description = (string)el.Element("Description") ?? "",
-                            Status = (string)el.Element("Status") ?? "",
+                            Status = status,
                             Revision = (string)el.Element("Revision") ?? ""
                         });
                     }
@@ -365,6 +383,9 @@ namespace PDMLite
 
             string target = partNo.Trim();
             string exclude = (excludeFilePath ?? "").Trim();
+            // Also exclude by filename so the RELEASED-folder copy of the same
+            // file (different path, same filename) never triggers a false conflict.
+            string excludeFileName = System.IO.Path.GetFileName(exclude);
 
             lock (_lock)
             {
@@ -375,9 +396,14 @@ namespace PDMLite
                     if (elPath.Equals(exclude, StringComparison.OrdinalIgnoreCase))
                         continue;
 
+                    string elFileName = ((string)el.Element("FileName") ?? "").Trim();
+                    if (!string.IsNullOrEmpty(excludeFileName) &&
+                        elFileName.Equals(excludeFileName, StringComparison.OrdinalIgnoreCase))
+                        continue;
+
                     string elPart = ((string)el.Element("PartNumber") ?? "").Trim();
                     if (elPart.Equals(target, StringComparison.OrdinalIgnoreCase))
-                        return (string)el.Element("FileName") ?? elPath;
+                        return elFileName.Length > 0 ? elFileName : elPath;
                 }
             }
 
