@@ -245,22 +245,36 @@ namespace PDMLite
             string releasedCopy = Path.Combine(RelFolder,
                 Path.GetFileName(filePath));
 
+            // The file being released may itself already live in the RELEASED
+            // folder — e.g. it was opened from search, which now points there.
+            // In that case it is already in place (and currently open in
+            // SOLIDWORKS), so we must NOT delete/copy it onto itself; doing so
+            // throws "being used by another process". Just re-apply read-only.
+            bool fileIsReleasedCopy = string.Equals(
+                Path.GetFullPath(filePath),
+                Path.GetFullPath(releasedCopy),
+                StringComparison.OrdinalIgnoreCase);
+
             // Delete any existing released copy first. Overwriting a read-only
             // file on the network share fails, which previously left a STALE
             // copy in RELEASED while the exports updated. Delete-then-copy is
             // reliable, and any genuine failure is now surfaced, not swallowed.
             try
             {
-                if (File.Exists(releasedCopy))
+                if (!fileIsReleasedCopy)
                 {
-                    SetReadOnly(releasedCopy, false);
-                    File.Delete(releasedCopy);
+                    if (File.Exists(releasedCopy))
+                    {
+                        SetReadOnly(releasedCopy, false);
+                        File.Delete(releasedCopy);
+                    }
+                    File.Copy(filePath, releasedCopy, overwrite: true);
                 }
-                File.Copy(filePath, releasedCopy, overwrite: true);
 
                 // ── Set OS-level read-only protection ─────────────────────
                 SetReadOnly(filePath, true);
-                SetReadOnly(releasedCopy, true);
+                if (!fileIsReleasedCopy)
+                    SetReadOnly(releasedCopy, true);
             }
             catch (Exception ex)
             {
