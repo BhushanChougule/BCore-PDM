@@ -134,6 +134,11 @@ namespace PDMLite
                 return "SenderPassword is blank in email.config.\n\n" +
                        "Contact IT for the Mailgun SMTP password.";
 
+            // Send to the logged-in user's own address — same derivation used
+            // for real notifications — so they actually receive it and can
+            // confirm end-to-end delivery (the sender address is send-only).
+            string to = ToEmail(PDMLiteAddin.CurrentUser, cfg.EmailDomain);
+
             try
             {
                 using (var client = new SmtpClient(cfg.SmtpServer, cfg.SmtpPort))
@@ -143,7 +148,7 @@ namespace PDMLite
                         cfg.SenderEmail, cfg.SenderPassword);
                     client.Timeout = 15000;
 
-                    using (var msg = new MailMessage(cfg.SenderEmail, cfg.SenderEmail,
+                    using (var msg = new MailMessage(cfg.SenderEmail, to,
                         "BCore PDM — Test Email",
                         "This is a test email from BCore PDM.\r\n\r\n" +
                         "If you can read this, your email notifications are " +
@@ -164,7 +169,7 @@ namespace PDMLite
             }
 
             success = true;
-            return "SUCCESS — test email sent to:\n" + cfg.SenderEmail +
+            return "SUCCESS — test email sent to:\n" + to +
                    "\n\nCheck that inbox to confirm it arrived.";
         }
 
