@@ -58,6 +58,7 @@
   </ItemGroup>
   <ItemGroup>
     <Compile Include="DatabaseManager.cs" />
+    <Compile Include="EmailManager.cs" />
     <Compile Include="ExportManager.cs" />
     <Compile Include="PendingRequestsForm.cs">
       <SubType>Form</SubType>

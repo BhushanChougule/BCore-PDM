@@ -1,0 +1,148 @@
+using System;
+using System.IO;
+using System.Net;
+using System.Net.Mail;
+using System.Xml.Linq;
+
+namespace PDMLite
+{
+    internal static class EmailManager
+    {
+        private const string ConfigPath = @"N:\PDM-SolidWorks\vault\email.config";
+
+        // ── Load config — returns null if file missing or Enabled=false ──
+        private static EmailConfig LoadConfig()
+        {
+            if (!File.Exists(ConfigPath)) return null;
+            try
+            {
+                var root = XDocument.Load(ConfigPath).Root;
+                if (root == null) return null;
+                bool enabled = string.Equals((string)root.Element("Enabled"),
+                    "true", StringComparison.OrdinalIgnoreCase);
+                if (!enabled) return null;
+                return new EmailConfig
+                {
+                    SmtpServer    = (string)root.Element("SmtpServer")    ?? "",
+                    SmtpPort      = (int?)root.Element("SmtpPort")         ?? 587,
+                    SenderEmail   = (string)root.Element("SenderEmail")   ?? "",
+                    SenderPassword= (string)root.Element("SenderPassword") ?? "",
+                    EmailDomain   = (string)root.Element("EmailDomain")   ?? "richards-wilcox.com"
+                };
+            }
+            catch { return null; }
+        }
+
+        private static string ToEmail(string username, string domain) =>
+            username.ToLower() + "@" + domain;
+
+        // ── Notify both Masters: a request was submitted ─────────────────
+        public static void NotifyRequestSubmitted(string requestType, string fileName,
+            string partNo, string rev, string requester, string note)
+        {
+            var cfg = LoadConfig();
+            if (cfg == null) return;
+
+            string subject = $"BCore PDM — {requestType} Request: {fileName}";
+            string body =
+                $"A {requestType.ToLower()} request has been submitted and is awaiting your approval.\r\n\r\n" +
+                $"File      : {fileName}\r\n" +
+                (string.IsNullOrEmpty(partNo) ? "" : $"Part No   : {partNo}\r\n") +
+                (string.IsNullOrEmpty(rev)    ? "" : $"Revision  : {rev}\r\n") +
+                $"Requested : {requester}\r\n" +
+                (string.IsNullOrEmpty(note)   ? "" : $"Note      : {note}\r\n") +
+                "\r\nOpen SOLIDWORKS and click PENDING REQUESTS in BCore PDM to approve or reject.";
+
+            string[] masters = { "bchougule", "rkramarz" };
+            foreach (string m in masters)
+                TrySend(cfg, ToEmail(m, cfg.EmailDomain), subject, body);
+        }
+
+        // ── Notify the engineer: their request was approved ──────────────
+        public static void NotifyRequestApproved(string requestType, string fileName,
+            string requestedBy)
+        {
+            var cfg = LoadConfig();
+            if (cfg == null) return;
+
+            string subject = $"BCore PDM — {requestType} Request Approved: {fileName}";
+            string body =
+                $"Your {requestType.ToLower()} request has been approved.\r\n\r\n" +
+                $"File : {fileName}\r\n\r\n" +
+                "You may now proceed with the file in SOLIDWORKS.";
+
+            TrySend(cfg, ToEmail(requestedBy, cfg.EmailDomain), subject, body);
+        }
+
+        // ── Notify the engineer: their request was rejected ──────────────
+        public static void NotifyRequestRejected(string requestType, string fileName,
+            string requestedBy, string note = "")
+        {
+            var cfg = LoadConfig();
+            if (cfg == null) return;
+
+            string subject = $"BCore PDM — {requestType} Request Rejected: {fileName}";
+            string body =
+                $"Your {requestType.ToLower()} request has been rejected.\r\n\r\n" +
+                $"File : {fileName}\r\n" +
+                (string.IsNullOrEmpty(note) ? "" : $"Note : {note}\r\n") +
+                "\r\nContact your Master for more details.";
+
+            TrySend(cfg, ToEmail(requestedBy, cfg.EmailDomain), subject, body);
+        }
+
+        // ── Internal send — never throws, always fire-and-forget ─────────
+        private static void TrySend(EmailConfig cfg, string to,
+            string subject, string body)
+        {
+            try
+            {
+                using (var client = new SmtpClient(cfg.SmtpServer, cfg.SmtpPort))
+                {
+                    client.EnableSsl = true;
+                    client.Credentials = new NetworkCredential(
+                        cfg.SenderEmail, cfg.SenderPassword);
+                    client.Timeout = 10000;
+
+                    using (var msg = new MailMessage(cfg.SenderEmail, to, subject, body))
+                        client.Send(msg);
+                }
+            }
+            catch { /* non-fatal — email failure never blocks workflow */ }
+        }
+
+        // ── Create a template config file for first-time setup ───────────
+        public static void EnsureConfigTemplate()
+        {
+            if (File.Exists(ConfigPath)) return;
+            try
+            {
+                string dir = Path.GetDirectoryName(ConfigPath);
+                if (!Directory.Exists(dir)) return;
+                File.WriteAllText(ConfigPath,
+                    "<?xml version=\"1.0\" encoding=\"utf-8\"?>\r\n" +
+                    "<!-- BCore PDM Email Configuration\r\n" +
+                    "     Set Enabled to true and fill in SMTP credentials to activate.\r\n" +
+                    "     SenderPassword: use a Gmail App Password (16-char, no spaces). -->\r\n" +
+                    "<EmailConfig>\r\n" +
+                    "  <Enabled>false</Enabled>\r\n" +
+                    "  <SmtpServer>smtp.gmail.com</SmtpServer>\r\n" +
+                    "  <SmtpPort>587</SmtpPort>\r\n" +
+                    "  <SenderEmail>your-gmail@gmail.com</SenderEmail>\r\n" +
+                    "  <SenderPassword>your-app-password-here</SenderPassword>\r\n" +
+                    "  <EmailDomain>richards-wilcox.com</EmailDomain>\r\n" +
+                    "</EmailConfig>\r\n");
+            }
+            catch { }
+        }
+    }
+
+    internal class EmailConfig
+    {
+        public string SmtpServer     { get; set; }
+        public int    SmtpPort       { get; set; }
+        public string SenderEmail    { get; set; }
+        public string SenderPassword { get; set; }
+        public string EmailDomain    { get; set; }
+    }
+}

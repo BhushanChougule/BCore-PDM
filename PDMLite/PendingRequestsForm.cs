@@ -253,6 +253,8 @@ namespace PDMLite
                     if (type == "UNLOCK")
                     {
                         DatabaseManager.ResolveRequest(capturedReq.Id, "Approved");
+                        EmailManager.NotifyRequestApproved("Unlock",
+                            capturedReq.FileName, capturedReq.RequestedBy);
                         VaultManager.UnlockFile(capturedReq.FilePath);
                     }
                     else if (type == "REVISION" || string.IsNullOrEmpty(capturedReq.RequestType))
@@ -263,6 +265,8 @@ namespace PDMLite
                     {
                         // Release request — open file and trigger release
                         DatabaseManager.ResolveRequest(capturedReq.Id, "Approved");
+                        EmailManager.NotifyRequestApproved("Release",
+                            capturedReq.FileName, capturedReq.RequestedBy);
                         ModelDoc2 doc = PDMLiteAddin.SwApp?
                             .GetOpenDocumentByName(capturedReq.FilePath) as ModelDoc2;
                         if (doc != null)

@@ -607,6 +607,7 @@ namespace PDMLite
             if (note == null) return;
 
             DatabaseManager.AddRevisionRequest(filePath, user, note);
+            EmailManager.NotifyRequestSubmitted("Revision", fileName, partNo, rev, user, note);
             MessageBox.Show(
                 "Revision request submitted!\n\nFile    : " + fileName +
                 "\nPart No : " + partNo + "\nRev     : REV " + rev +
@@ -626,6 +627,7 @@ namespace PDMLite
             if (note == null) return;
 
             DatabaseManager.AddUnlockRequest(filePath, user, note);
+            EmailManager.NotifyRequestSubmitted("Unlock", fileName, "", "", user, note);
             MessageBox.Show(
                 "Unlock request submitted!\n\nFile : " + fileName +
                 "\n\nThe Master will be notified.",
@@ -646,6 +648,7 @@ namespace PDMLite
             if (note == null) return;
 
             DatabaseManager.AddReleaseRequest(filePath, user, note);
+            EmailManager.NotifyRequestSubmitted("Release", fileName, partNo, rev, user, note);
             MessageBox.Show(
                 "Release request submitted!\n\nFile    : " + fileName +
                 "\nPart No : " + partNo + "\nRev     : REV " + rev +
@@ -858,6 +861,9 @@ namespace PDMLite
             }
 
             DatabaseManager.ResolveRequest(request.Id, "Approved");
+            EmailManager.NotifyRequestApproved(
+                string.IsNullOrEmpty(request.RequestType) ? "Revision" : request.RequestType,
+                request.FileName, request.RequestedBy);
             StartNewRevision(doc);
         }
 
@@ -879,6 +885,9 @@ namespace PDMLite
             if (confirm != DialogResult.Yes) return;
 
             DatabaseManager.ResolveRequest(request.Id, "Rejected");
+            EmailManager.NotifyRequestRejected(
+                string.IsNullOrEmpty(request.RequestType) ? "Revision" : request.RequestType,
+                request.FileName, request.RequestedBy, request.Note);
 
             MessageBox.Show(
                 "Request rejected and removed from pending list.",

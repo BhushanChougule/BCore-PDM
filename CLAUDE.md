@@ -288,6 +288,40 @@ DPI-aware Form (680×500 scaled). S(v)=v\*\_scale. Opened from PENDING REQUESTS 
 
 
 
+\### EmailManager.cs
+
+Sends email notifications via Gmail SMTP. Non-fatal — all sends wrapped in try/catch; failure never blocks workflow.
+
+Config file: N:\\PDM-SolidWorks\\vault\\email.config (XML, created on first addin load if missing)
+
+\- Enabled = true/false toggle
+
+\- SmtpServer, SmtpPort (587), SenderEmail, SenderPassword (Gmail App Password), EmailDomain
+
+\- Email addresses derived as {username}@{EmailDomain}
+
+Methods:
+
+\- EnsureConfigTemplate() → creates template email.config if not present (called in ConnectToSW)
+
+\- NotifyRequestSubmitted(type, fileName, partNo, rev, requester, note) → emails both Masters
+
+\- NotifyRequestApproved(type, fileName, requestedBy) → emails the engineer
+
+\- NotifyRequestRejected(type, fileName, requestedBy, note) → emails the engineer
+
+Trigger points:
+
+\- VaultManager.RequestRevision/Unlock/Release → NotifyRequestSubmitted
+
+\- VaultManager.ApproveRequest → NotifyRequestApproved
+
+\- VaultManager.RejectRequest → NotifyRequestRejected
+
+\- PendingRequestsForm Unlock/Release direct approve paths → NotifyRequestApproved
+
+
+
 \### RollbackDialog.cs
 
 DPI-aware Form. S(v)=v\*\_scale.
@@ -390,9 +424,13 @@ Engineer clicks action button (Request Unlock / Request Revision / Request Relea
 
 show note dialog → log request to vault.xml RevisionRequests with RequestType →
 
+email both Masters (bchougule, rkramarz) via EmailManager.NotifyRequestSubmitted →
+
 Master clicks PENDING REQUESTS button → PendingRequestsForm opens →
 
-Approve (by type: Unlock→UnlockFile, Revision→StartNewRevision, Release→ReleaseFile) or Reject
+Approve (by type: Unlock→UnlockFile, Revision→StartNewRevision, Release→ReleaseFile) or Reject →
+
+email engineer via EmailManager.NotifyRequestApproved / NotifyRequestRejected
 
 
 
@@ -458,13 +496,13 @@ GetNextRevision() in VaultManager.cs handles this
 
 \- File history rendered as individual labels (no text overlap), with StatusColor per entry
 
+\- Email notifications (Gmail SMTP) on request submit/approve/reject — config at N:\\PDM-SolidWorks\\vault\\email.config
+
 
 
 \## Remaining Features (in priority order)
 
-1\. Email notifications (SMTP) when requests submitted/approved/rejected
-
-2\. Part/Drawing number validation (enforce numbering format)
+1\. Part/Drawing number validation (enforce numbering format)
 
 3\. BOM Export to Excel on assembly release
 
