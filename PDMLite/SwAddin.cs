@@ -213,6 +213,21 @@ namespace PDMLite
                     PropertyValidator.FixDateFormats(doc);
                     PropertyValidator.AutoFillWeight(doc);
 
+                    // Rule 4: duplicate part number (another file already uses it)
+                    string partNo = PropertyValidator.GetProperty(doc, "PartNo");
+                    string conflict = DatabaseManager.FindPartNumberConflict(partNo, filePath);
+                    if (conflict != null)
+                    {
+                        int choice = SwApp.SendMsgToUser2(
+                            "DUPLICATE PART NUMBER:\n\n" +
+                            "Part No '" + partNo + "' is already used by:\n• " + conflict + "\n\n" +
+                            "Two files should not share the same part number.\n" +
+                            "Save anyway?",
+                            (int)swMessageBoxIcon_e.swMbWarning,
+                            (int)swMessageBoxBtn_e.swMbYesNo);
+                        if (choice == (int)swMessageBoxResult_e.swMbHitNo) return 1;
+                    }
+
                     // Rule 5: broken references
                     var broken = ReferenceChecker.GetBrokenReferences(doc);
                     if (broken.Count > 0)
