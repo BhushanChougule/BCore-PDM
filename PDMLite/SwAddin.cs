@@ -15,6 +15,11 @@ namespace PDMLite
         public static ISldWorks SwApp { get; private set; }
         public static string CurrentUser => System.Environment.UserName;
 
+        // Set by VaultManager around its own internal Save3 calls (release,
+        // new revision) so those programmatic saves are not blocked by the
+        // "Released files cannot be edited" rule in ValidateSave.
+        internal static bool SuppressSaveValidation = false;
+
         private int _addinId;
         private TaskPaneHost _taskPane;
 
@@ -139,6 +144,10 @@ namespace PDMLite
         {
             try
             {
+                // Internal saves performed by VaultManager (release / new
+                // revision) bypass validation — they manage status themselves.
+                if (SuppressSaveValidation) return 0;
+
                 if (doc == null)
                 {
                     Block("Save blocked: document reference is invalid. Try again.");
@@ -160,13 +169,22 @@ namespace PDMLite
                     return 1;
                 }
 
-                // Rule 2: released file
+                // Rule 2: released file — locked for EVERYONE, including Masters.
+                // A released file must not be edited in place; it has to be
+                // explicitly returned to WIP first.
                 string status = DatabaseManager.GetFileStatus(filePath);
-                if (status == "Released" && userRole != "Master")
+                if (status == "Released")
                 {
-                    Block("This file is Released and locked.\n" +
-                          "Only the Master user can modify released files.\n" +
-                          "Create a new revision instead.");
+                    string howTo = userRole == "Master"
+                        ? "To make changes, use the BCore PDM task pane:\n" +
+                          "  • \"New Revision\" — bumps the revision and returns it to WIP, or\n" +
+                          "  • \"Unlock File\" — returns it to WIP at the same revision."
+                        : "To make changes, request a new revision or unlock\n" +
+                          "from a Master via the BCore PDM task pane.";
+
+                    Block("This file is RELEASED and locked.\n\n" +
+                          "Released files cannot be edited directly.\n\n" +
+                          howTo + "\n\nSave blocked.");
                     return 1;
                 }
 
