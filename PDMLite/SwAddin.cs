@@ -32,6 +32,7 @@ namespace PDMLite
                 SwApp = (ISldWorks)thisSW;
                 _addinId = cookie;
                 DatabaseManager.Initialize();
+                EmailManager.EnsureConfigTemplate();
                 _taskPane = new TaskPaneHost();
                 _taskPane.Register(SwApp);
                 ((SldWorks)SwApp).ActiveDocChangeNotify += OnActiveDocChange;

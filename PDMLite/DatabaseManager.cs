@@ -60,7 +60,7 @@ namespace PDMLite
             if (!File.Exists(DataFile))
             {
                 var doc = new XDocument(
-                    new XElement("PDMLiteVault",
+                    new XElement("BCorePDMVault",
                         new XElement("Files"),
                         new XElement("Users",
                             new XElement("User",
