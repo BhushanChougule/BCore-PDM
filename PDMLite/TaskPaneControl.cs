@@ -350,12 +350,31 @@ namespace PDMLite
             _btnRequests.FlatAppearance.BorderSize = 0;
             _btnRequests.Click += (s, e) => OpenRequestsPopup();
             this.Controls.Add(_btnRequests);
+            if (isMaster) y += S(30);
+
+            // ── Send Test Email (all users) ───────────────────────────
+            Button btnTestEmail = new Button
+            {
+                Text = "Send Test Email",
+                Font = fBtn,
+                Width = w,
+                Height = S(24),
+                Location = new Point(x, y),
+                BackColor = cBrand,
+                ForeColor = Color.White,
+                FlatStyle = FlatStyle.Flat,
+                Cursor = Cursors.Hand
+            };
+            btnTestEmail.FlatAppearance.BorderSize = 0;
+            btnTestEmail.Click += (s, e) => SendTestEmail();
+            this.Controls.Add(btnTestEmail);
+            y += S(28);
 
             // 1px sentinel — pins the AutoScroll virtual bottom to remove gap
             this.Controls.Add(new Panel
             {
                 BackColor = cBg,
-                Location = new Point(0, y + S(26) + S(2)),
+                Location = new Point(0, y + S(2)),
                 Width = S(210),
                 Height = 1
             });
@@ -380,6 +399,16 @@ namespace PDMLite
             var form = new PendingRequestsForm(_scale);
             form.ShowDialog(this);
             RefreshRequests();
+        }
+
+        // ── Send a diagnostic test email and show the result ──────────
+        private void SendTestEmail()
+        {
+            bool success;
+            string result = EmailManager.SendTestEmail(out success);
+            MessageBox.Show(result, "BCore PDM — Test Email",
+                MessageBoxButtons.OK,
+                success ? MessageBoxIcon.Information : MessageBoxIcon.Warning);
         }
 
         // ── Search ────────────────────────────────────────────────────

@@ -246,6 +246,8 @@ Sections (top to bottom):
 
 7\. PENDING REQUESTS button (Masters only) — shows count, opens PendingRequestsForm popup
 
+8\. Send Test Email button (all users) — calls EmailManager.SendTestEmail, shows success/error in MessageBox
+
 
 
 File History uses PopulateHistoryPanel(List<HistoryEntry>) helper. Each entry: status label (StatusColor), date+user label, optional note label, 1px Panel divider. All labels have explicit Height.
@@ -309,6 +311,8 @@ Methods:
 \- NotifyRequestApproved(type, fileName, requestedBy) → emails the engineer
 
 \- NotifyRequestRejected(type, fileName, requestedBy, note) → emails the engineer
+
+\- SendTestEmail(out success) → diagnostic; sends to SenderEmail itself, returns human-readable result string (surfaces real SMTP error instead of failing silently). Wired to "Send Test Email" button in task pane.
 
 Trigger points:
 

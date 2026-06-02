@@ -91,6 +91,83 @@ namespace PDMLite
             TrySend(cfg, ToEmail(requestedBy, cfg.EmailDomain), subject, body);
         }
 
+        // ── Send a diagnostic test email — returns a human-readable result.
+        //    Unlike the notification methods, this surfaces the real error so
+        //    the user can fix the config. Sends to the sender address itself,
+        //    which isolates SMTP/auth from whether recipient mailboxes exist. ──
+        public static string SendTestEmail(out bool success)
+        {
+            success = false;
+
+            if (!File.Exists(ConfigPath))
+                return "No config file found at:\n" + ConfigPath +
+                       "\n\nRestart SOLIDWORKS to auto-create the template, " +
+                       "then fill it in.";
+
+            EmailConfig cfg;
+            try
+            {
+                var root = XDocument.Load(ConfigPath).Root;
+                bool enabled = string.Equals((string)root.Element("Enabled"),
+                    "true", StringComparison.OrdinalIgnoreCase);
+                if (!enabled)
+                    return "Email is turned OFF.\n\nSet <Enabled>true</Enabled> in:\n" +
+                           ConfigPath;
+
+                cfg = new EmailConfig
+                {
+                    SmtpServer    = (string)root.Element("SmtpServer")     ?? "",
+                    SmtpPort      = (int?)root.Element("SmtpPort")          ?? 587,
+                    SenderEmail   = (string)root.Element("SenderEmail")    ?? "",
+                    SenderPassword= (string)root.Element("SenderPassword") ?? "",
+                    EmailDomain   = (string)root.Element("EmailDomain")    ?? "richardswilcox.com"
+                };
+            }
+            catch (Exception ex)
+            {
+                return "Could not read email.config:\n\n" + ex.Message;
+            }
+
+            if (string.IsNullOrWhiteSpace(cfg.SenderEmail))
+                return "SenderEmail is blank in email.config.";
+            if (string.IsNullOrWhiteSpace(cfg.SenderPassword))
+                return "SenderPassword is blank in email.config.\n\n" +
+                       "For Gmail this must be a 16-character App Password.";
+
+            try
+            {
+                using (var client = new SmtpClient(cfg.SmtpServer, cfg.SmtpPort))
+                {
+                    client.EnableSsl = true;
+                    client.Credentials = new NetworkCredential(
+                        cfg.SenderEmail, cfg.SenderPassword);
+                    client.Timeout = 15000;
+
+                    using (var msg = new MailMessage(cfg.SenderEmail, cfg.SenderEmail,
+                        "BCore PDM — Test Email",
+                        "This is a test email from BCore PDM.\r\n\r\n" +
+                        "If you can read this, your email notifications are " +
+                        "configured correctly."))
+                        client.Send(msg);
+                }
+            }
+            catch (Exception ex)
+            {
+                string detail = ex.Message;
+                if (ex.InnerException != null)
+                    detail += "\n\n" + ex.InnerException.Message;
+                return "Send FAILED:\n\n" + detail +
+                       "\n\nCommon causes:\n" +
+                       "• Password is not a Gmail App Password\n" +
+                       "• SenderEmail doesn't match the account\n" +
+                       "• Network/firewall blocks SMTP port " + cfg.SmtpPort;
+            }
+
+            success = true;
+            return "SUCCESS — test email sent to:\n" + cfg.SenderEmail +
+                   "\n\nCheck that inbox to confirm it arrived.";
+        }
+
         // ── Internal send — never throws, always fire-and-forget ─────────
         private static void TrySend(EmailConfig cfg, string to,
             string subject, string body)
