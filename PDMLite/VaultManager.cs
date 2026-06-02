@@ -245,11 +245,11 @@ namespace PDMLite
             string releasedCopy = Path.Combine(RelFolder,
                 Path.GetFileName(filePath));
 
-            // The file being released may itself already live in the RELEASED
-            // folder — e.g. it was opened from search, which now points there.
-            // In that case it is already in place (and currently open in
+            // Safety net: if the file being released somehow already lives in
+            // the RELEASED folder, it is already in place (and open in
             // SOLIDWORKS), so we must NOT delete/copy it onto itself; doing so
             // throws "being used by another process". Just re-apply read-only.
+            // In the normal flow the file lives in WIP, so this stays false.
             bool fileIsReleasedCopy = string.Equals(
                 Path.GetFullPath(filePath),
                 Path.GetFullPath(releasedCopy),

@@ -317,16 +317,18 @@ namespace PDMLite
         // ════════════════════════════════════════════════════════════════════
         // Search Files
         // ════════════════════════════════════════════════════════════════
-        private const string ReleasedFolder = @"N:\PDM-SolidWorks\RELEASED";
-
+        // The RELEASED folder holds read-only published snapshots and is never
+        // opened for editing. Search returns the canonical WIP working path so
+        // that task-pane actions (New Revision, Unlock) operate on the file the
+        // vault actually manages, not on a frozen copy.
         public static List<VaultFile> SearchFiles(string searchTerm)
         {
             var results = new List<VaultFile>();
             if (string.IsNullOrWhiteSpace(searchTerm)) return results;
 
             string term = searchTerm.ToLower().Trim();
-            // Deduplicate by filename: vault.xml may have both a source-path entry
-            // and a RELEASED-folder entry for the same file after a release.
+            // Deduplicate by filename as a safety net against any legacy
+            // vault.xml that still has more than one entry per file.
             var seenFileNames = new System.Collections.Generic.HashSet<string>(
                 StringComparer.OrdinalIgnoreCase);
 
@@ -349,16 +351,9 @@ namespace PDMLite
 
                     if (partNo.Contains(term) || desc.Contains(term) || fileNameLower.Contains(term))
                     {
-                        // Always open Released files from the RELEASED folder,
-                        // not from wherever the engineer originally saved the file.
-                        string releasedPath = System.IO.Path.Combine(ReleasedFolder, fileName);
-                        string returnPath = File.Exists(releasedPath)
-                            ? releasedPath
-                            : (string)el.Element("FilePath") ?? "";
-
                         results.Add(new VaultFile
                         {
-                            FilePath = returnPath,
+                            FilePath = (string)el.Element("FilePath") ?? "",
                             FileName = fileName,
                             PartNumber = (string)el.Element("PartNumber") ?? "",
                             Description = (string)el.Element("Description") ?? "",

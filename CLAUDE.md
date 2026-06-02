@@ -30,9 +30,9 @@ N:\\PDM-SolidWorks\\
 
 \- vault\\vault.xml        → XML database (System.Xml.Linq, no SQLite)
 
-\- WIP\\                   → work in progress files
+\- WIP\\                   → work in progress files — THE single canonical home for every vault file. Engineers always save here. The DB tracks the WIP path.
 
-\- RELEASED\\              → released files (OS read-only protected)
+\- RELEASED\\              → read-only published snapshots (OS read-only). Write-once OUTPUT only — never opened for editing. To change a released file, Unlock or New Revision (both act on the WIP copy).
 
 \- ARCHIVE\\PARTS\\         → archived .sldprt files
 
@@ -98,7 +98,7 @@ Main entry point, ISwAddin implementation.
 
 \- Hooks: FileSaveNotify, FileSaveAsNotify2, FileSavePostNotify, DestroyNotify
 
-\- OnFileSaveNotify: suppress-flag check → check lock → check released (blocks EVERYONE incl. Masters) → validate properties → auto-weight → duplicate part number → broken refs
+\- OnFileSaveNotify: suppress-flag check → check lock → check released (blocks EVERYONE incl. Masters) → warn if outside WIP folder (Yes/No override) → validate properties → auto-weight → duplicate part number → broken refs
 
 \- SuppressSaveValidation (static bool): VaultManager sets it around its own internal Save3 calls (Release, New Revision) so those programmatic saves bypass the released-file lock
 
@@ -158,7 +158,7 @@ Methods:
 
 \- GetUserRole, AddUser
 
-\- SearchFiles(term) → searches PartNumber + Description + FileName (Released files only)
+\- SearchFiles(term) → searches PartNumber + Description + FileName (Released files only); returns the canonical WIP path (RELEASED is never opened for editing); dedupes by filename as a safety net
 
 \- FindPartNumberConflict(partNo, excludeFilePath) → returns filename of another file using same PartNo (case-insensitive, trimmed), or null. Excludes the file being saved so it never conflicts with itself.
 
@@ -262,7 +262,7 @@ No longer uses StringBuilder/AppendLine — individual labels prevent text overl
 
 Search results: file cards with status color bar, part number, Open in SOLIDWORKS button.
 
-Uses ActivateDoc3 if file already open, OpenDoc6 with correct type if not.
+Uses ActivateDoc3 if file already open, OpenDoc6 with correct type if not. Opens the canonical WIP copy (read-only when Released), never the RELEASED snapshot.
 
 
 
@@ -386,13 +386,31 @@ DPI-aware Form. S(v)=v\*\_scale.
 
 
 
+\### Canonical File Location (WIP-only model)
+
+There is ONE home for every vault file: N:\\PDM-SolidWorks\\WIP. Engineers save there from the start.
+
+\- The DB tracks the WIP path as the canonical FilePath. There is exactly one vault.xml entry per file.
+
+\- RELEASED holds read-only published snapshots — pure OUTPUT, never opened for editing.
+
+\- Release copies WIP → RELEASED and freezes BOTH (read-only). The DB status on the WIP path becomes Released.
+
+\- Unlock / New Revision remove read-only from the WIP copy so editing resumes on WIP. RELEASED stays untouched until the next Release overwrites the snapshot.
+
+\- Search returns only Released files and opens the canonical WIP copy (so task-pane actions operate on the managed file, not a frozen snapshot). The WIP copy is OS read-only while Released, so SOLIDWORKS opens it read-only for viewing.
+
+\- ValidateSave warns (Yes/No override) if a file is saved outside WIP — keeps the single-location model intact.
+
+
+
 \### Engineer Save
 
 FileSaveAsNotify2/FileSaveNotify → check lock → check released → 
 
-validate properties (show PropertyForm if missing) → auto-weight → 
+warn if outside WIP folder → validate properties (show PropertyForm if missing) → 
 
-check refs → allow save → post-save updates DB
+auto-weight → duplicate part number → check refs → allow save → post-save updates DB
 
 
 
