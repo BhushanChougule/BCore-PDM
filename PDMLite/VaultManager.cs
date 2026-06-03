@@ -359,10 +359,10 @@ namespace PDMLite
 
             if (confirm != DialogResult.Yes) return;
 
-            // Remove OS-level read-only so we can modify the file
-            SetReadOnly(filePath, false);
+            int reopenType = doc.GetType();
 
-            // Archive current released SW file to correct subfolder
+            // Archive the current released SW file (still on disk at the old rev)
+            // to the correct subfolder BEFORE we reopen and bump the revision.
             string ext = Path.GetExtension(filePath).ToLower();
             string swSubFolder = ext == ".sldprt" ? "PARTS"
                                : ext == ".sldasm" ? "ASSEMBLIES"
@@ -378,11 +378,35 @@ namespace PDMLite
                 Path.Combine(swArchive, archiveName),
                 overwrite: true);
 
-            // Bump revision. This save happens while the file is still
-            // "Released" in the DB, so it must bypass the released-file lock.
-            PropertyValidator.SetProperty(doc, "Revision", nextRev);
+            // CRITICAL: the file was opened read-only (it was Released), so
+            // SOLIDWORKS keeps it in read-only mode internally and silently
+            // refuses to Save3 — the revision bump would update memory but never
+            // reach disk. We must remove the OS read-only flag and reopen the
+            // document as WRITABLE *before* bumping the revision and saving.
+            SetReadOnly(filePath, false);
+            PDMLiteAddin.SwApp.CloseDoc(filePath);
+            int oErr = 0, oWarn = 0;
+            ModelDoc2 fresh = PDMLiteAddin.SwApp.OpenDoc6(filePath, reopenType,
+                (int)swOpenDocOptions_e.swOpenDocOptions_Silent,
+                "", ref oErr, ref oWarn) as ModelDoc2;
+            if (fresh == null) fresh = PDMLiteAddin.SwApp.ActiveDoc as ModelDoc2;
+
+            if (fresh == null)
+            {
+                MessageBox.Show(
+                    "Could not reopen the file to start the new revision:\n" +
+                    filePath + "\n\nPlease open it manually and try again.",
+                    "BCore PDM — New Revision Failed",
+                    MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                return;
+            }
+
+            // Bump revision on the now-writable document and save. This save
+            // happens while the file is still "Released" in the DB, so it must
+            // bypass the released-file lock.
+            PropertyValidator.SetProperty(fresh, "Revision", nextRev);
             PDMLiteAddin.SuppressSaveValidation = true;
-            try { doc.Save3((int)swSaveAsOptions_e.swSaveAsOptions_Silent, 0, 0); }
+            try { fresh.Save3((int)swSaveAsOptions_e.swSaveAsOptions_Silent, 0, 0); }
             finally { PDMLiteAddin.SuppressSaveValidation = false; }
 
             // Reset to WIP — source path only (no separate entry for RELEASED copy)
@@ -390,27 +414,11 @@ namespace PDMLite
             DatabaseManager.SetFileStatus(filePath, "WIP", user,
                 "New revision started: REV " + nextRev);
 
-            // Show confirmation before closing the document.
             MessageBox.Show(
                 "Revision bumped to REV " + nextRev + ".\nFile is now back in WIP and ready to edit.",
                 "BCore PDM",
                 MessageBoxButtons.OK,
                 MessageBoxIcon.Information);
-
-            // SOLIDWORKS caches the "opened as read-only" state internally and
-            // ReloadOrReplace does not clear it. The only reliable fix is to
-            // close the document and reopen it — SOLIDWORKS will then open it
-            // without the read-only flag since the OS attribute is already gone.
-            int reopenType = doc.GetType();
-            try
-            {
-                PDMLiteAddin.SwApp.CloseDoc(filePath);
-                int errs = 0, warnings = 0;
-                PDMLiteAddin.SwApp.OpenDoc6(filePath, reopenType,
-                    (int)swOpenDocOptions_e.swOpenDocOptions_Silent,
-                    "", ref errs, ref warnings);
-            }
-            catch { }
         }
 
         // ── HELPERS ───────────────────────────────────────────────────────
