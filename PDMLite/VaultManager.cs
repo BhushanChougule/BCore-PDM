@@ -55,6 +55,13 @@ namespace PDMLite
             DatabaseManager.SetFileStatus(filePath, "WIP",
                 PDMLiteAddin.CurrentUser, "Unlocked by Master");
 
+            // If the file is currently open, reload it so SOLIDWORKS clears
+            // the cached read-only state it set when the file was first opened.
+            ModelDoc2 openDoc = PDMLiteAddin.SwApp
+                ?.GetOpenDocumentByName(filePath) as ModelDoc2;
+            if (openDoc != null)
+                try { openDoc.ReloadOrReplace(true, filePath, false); } catch { }
+
             MessageBox.Show(
                 "File unlocked and returned to WIP.\nEngineers can now edit it.",
                 "BCore PDM — Unlocked",
@@ -370,8 +377,15 @@ namespace PDMLite
             DatabaseManager.SetFileStatus(filePath, "WIP", user,
                 "New revision started: REV " + nextRev);
 
+            // The file was opened while OS read-only (Released), so SOLIDWORKS
+            // cached the read-only state internally. ReloadOrReplace forces a
+            // fresh load from disk — now non-read-only — clearing that cached
+            // state so the engineer can edit immediately without close/reopen.
+            try { doc.ReloadOrReplace(true, filePath, false); }
+            catch { }
+
             MessageBox.Show(
-                "Revision bumped to REV " + nextRev + ".\nFile is now back in WIP.",
+                "Revision bumped to REV " + nextRev + ".\nFile is now back in WIP and ready to edit.",
                 "BCore PDM",
                 MessageBoxButtons.OK,
                 MessageBoxIcon.Information);
