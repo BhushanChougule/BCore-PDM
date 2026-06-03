@@ -176,7 +176,7 @@ Methods:
 
 \- GetUserRole, AddUser
 
-\- SearchFiles(term) → searches PartNumber + Description + FileName (Released files only); returns the canonical WIP path (RELEASED is never opened for editing); dedupes by filename as a safety net
+\- SearchFiles(term) → searches PartNumber + Description + FileName (all statuses: WIP, Locked, Released); returns the canonical WIP path; dedupes by filename as a safety net
 
 \- FindPartNumberConflict(partNo, excludeFilePath) → returns filename of another file using same PartNo (case-insensitive, trimmed), or null. Excludes the file being saved so it never conflicts with itself.
 

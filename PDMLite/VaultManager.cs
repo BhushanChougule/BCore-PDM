@@ -55,18 +55,31 @@ namespace PDMLite
             DatabaseManager.SetFileStatus(filePath, "WIP",
                 PDMLiteAddin.CurrentUser, "Unlocked by Master");
 
-            // If the file is currently open, reload it so SOLIDWORKS clears
-            // the cached read-only state it set when the file was first opened.
+            // Check if the file is open before showing the message so we can
+            // close-and-reopen it after the user clicks OK.
             ModelDoc2 openDoc = PDMLiteAddin.SwApp
                 ?.GetOpenDocumentByName(filePath) as ModelDoc2;
-            if (openDoc != null)
-                try { openDoc.ReloadOrReplace(true, filePath, false); } catch { }
+            int reopenType = openDoc != null ? openDoc.GetType() : -1;
 
             MessageBox.Show(
                 "File unlocked and returned to WIP.\nEngineers can now edit it.",
                 "BCore PDM — Unlocked",
                 MessageBoxButtons.OK,
                 MessageBoxIcon.Information);
+
+            // Close and reopen so SOLIDWORKS discards its cached read-only state.
+            if (reopenType >= 0)
+            {
+                try
+                {
+                    PDMLiteAddin.SwApp.CloseDoc(filePath);
+                    int errs = 0, warnings = 0;
+                    PDMLiteAddin.SwApp.OpenDoc6(filePath, reopenType,
+                        (int)swOpenDocOptions_e.swOpenDocOptions_Silent,
+                        "", ref errs, ref warnings);
+                }
+                catch { }
+            }
         }
 
         // ── RELEASE ───────────────────────────────────────────────────────
@@ -377,18 +390,27 @@ namespace PDMLite
             DatabaseManager.SetFileStatus(filePath, "WIP", user,
                 "New revision started: REV " + nextRev);
 
-            // The file was opened while OS read-only (Released), so SOLIDWORKS
-            // cached the read-only state internally. ReloadOrReplace forces a
-            // fresh load from disk — now non-read-only — clearing that cached
-            // state so the engineer can edit immediately without close/reopen.
-            try { doc.ReloadOrReplace(true, filePath, false); }
-            catch { }
-
+            // Show confirmation before closing the document.
             MessageBox.Show(
                 "Revision bumped to REV " + nextRev + ".\nFile is now back in WIP and ready to edit.",
                 "BCore PDM",
                 MessageBoxButtons.OK,
                 MessageBoxIcon.Information);
+
+            // SOLIDWORKS caches the "opened as read-only" state internally and
+            // ReloadOrReplace does not clear it. The only reliable fix is to
+            // close the document and reopen it — SOLIDWORKS will then open it
+            // without the read-only flag since the OS attribute is already gone.
+            int reopenType = doc.GetType();
+            try
+            {
+                PDMLiteAddin.SwApp.CloseDoc(filePath);
+                int errs = 0, warnings = 0;
+                PDMLiteAddin.SwApp.OpenDoc6(filePath, reopenType,
+                    (int)swOpenDocOptions_e.swOpenDocOptions_Silent,
+                    "", ref errs, ref warnings);
+            }
+            catch { }
         }
 
         // ── HELPERS ───────────────────────────────────────────────────────

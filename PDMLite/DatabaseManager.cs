@@ -341,18 +341,17 @@ namespace PDMLite
         // ════════════════════════════════════════════════════════════════════
         // Search Files
         // ════════════════════════════════════════════════════════════════
-        // The RELEASED folder holds read-only published snapshots and is never
-        // opened for editing. Search returns the canonical WIP working path so
-        // that task-pane actions (New Revision, Unlock) operate on the file the
-        // vault actually manages, not on a frozen copy.
+        // Returns all tracked vault files (WIP, Locked, Released) matching the
+        // search term. Status is shown on each card so the engineer can see the
+        // state at a glance. WIP files must be findable after a revision bump.
         public static List<VaultFile> SearchFiles(string searchTerm)
         {
             var results = new List<VaultFile>();
             if (string.IsNullOrWhiteSpace(searchTerm)) return results;
 
             string term = searchTerm.ToLower().Trim();
-            // Deduplicate by filename as a safety net against any legacy
-            // vault.xml that still has more than one entry per file.
+            // Deduplicate by filename as a safety net against legacy vault.xml
+            // entries that have more than one record per file.
             var seenFileNames = new System.Collections.Generic.HashSet<string>(
                 StringComparer.OrdinalIgnoreCase);
 
@@ -362,11 +361,9 @@ namespace PDMLite
                 foreach (var el in doc.Root.Element("Files").Elements("File"))
                 {
                     string status = (string)el.Element("Status") ?? "";
-                    if (status != "Released") continue;
+                    if (string.IsNullOrEmpty(status)) continue;
 
                     string fileName = (string)el.Element("FileName") ?? "";
-
-                    // Skip if we already have a result for this filename
                     if (!seenFileNames.Add(fileName)) continue;
 
                     string partNo = ((string)el.Element("PartNumber") ?? "").ToLower();
