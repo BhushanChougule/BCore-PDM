@@ -132,6 +132,9 @@ namespace PDMLite
             // Custom Properties task pane opens). Re-scanning immediately ensures
             // the document gets re-registered if it is still open.
             HookAllOpenDocs();
+            // ActiveDocChangeNotify does not fire when the last document closes,
+            // so manually refresh here — Refresh(null) shows "No file open".
+            _taskPane?.RefreshPanel();
         }
 
         // ── Pre-save validation ───────────────────────────────────────────────
