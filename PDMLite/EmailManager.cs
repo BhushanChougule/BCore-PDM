@@ -8,7 +8,7 @@ namespace PDMLite
 {
     internal static class EmailManager
     {
-        private const string ConfigPath = @"N:\PDM-SolidWorks\vault\email.config";
+        private const string ConfigPath = @"N:\PDM-SolidWorks\VAULT\email.config";
 
         // ── Load config — returns null if file missing or Enabled=false ──
         private static EmailConfig LoadConfig()

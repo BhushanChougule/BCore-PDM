@@ -730,7 +730,9 @@ namespace PDMLite
             else if (action == "updatedrawings") VaultManager.OpenOrCreateDrawing(doc);
             else if (action == "myrequests") { VaultManager.ViewMyRequests(); return; }
 
-            Refresh(doc);
+            // New Revision and Unlock close and reopen the document, invalidating
+            // the original doc reference. Always refresh from the current active doc.
+            Refresh(PDMLiteAddin.SwApp?.ActiveDoc as ModelDoc2);
         }
 
         // ── About Dialog ─────────────────────────────────────────────

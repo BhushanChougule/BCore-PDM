@@ -47,8 +47,23 @@ namespace PDMLite
 
     public static class DatabaseManager
     {
-        private const string VaultFolder = @"N:\PDM-SolidWorks\vault";
-        private const string DataFile = @"N:\PDM-SolidWorks\vault\vault.xml";
+        private const string VaultFolder = @"N:\PDM-SolidWorks\VAULT";
+        private const string DataFile = @"N:\PDM-SolidWorks\VAULT\vault.xml";
+        private const string WipRoot = @"N:\PDM-SolidWorks\WIP";
+
+        // Division subfolders under WIP — one per product line.
+        // Initialize() creates these on first addin load so engineers
+        // can navigate to them immediately without manual setup.
+        public static readonly string[] WipDivisions = {
+            "A - Aurora Shelving",
+            "B - Aurora Mobile",
+            "E - Cabinets",
+            "G - Hardware",
+            "L - Library Shelving",
+            "M - Conveyor",
+            "O - Oil tank",
+            "X - Rotary"
+        };
 
         private static readonly object _lock = new object();
 
@@ -91,6 +106,15 @@ namespace PDMLite
         public static void Initialize()
         {
             lock (_lock) { LoadOrCreate(); }
+
+            // Ensure WIP division subfolders exist so engineers can
+            // navigate to them from the first day without manual setup.
+            try
+            {
+                foreach (string div in WipDivisions)
+                    Directory.CreateDirectory(Path.Combine(WipRoot, div));
+            }
+            catch { }
         }
 
         // ════════════════════════════════════════════════════════════════
@@ -317,12 +341,19 @@ namespace PDMLite
         // ════════════════════════════════════════════════════════════════════
         // Search Files
         // ════════════════════════════════════════════════════════════════
+        // Returns all tracked vault files (WIP, Locked, Released) matching the
+        // search term. Status is shown on each card so the engineer can see the
+        // state at a glance. WIP files must be findable after a revision bump.
         public static List<VaultFile> SearchFiles(string searchTerm)
         {
             var results = new List<VaultFile>();
             if (string.IsNullOrWhiteSpace(searchTerm)) return results;
 
             string term = searchTerm.ToLower().Trim();
+            // Deduplicate by filename as a safety net against legacy vault.xml
+            // entries that have more than one record per file.
+            var seenFileNames = new System.Collections.Generic.HashSet<string>(
+                StringComparer.OrdinalIgnoreCase);
 
             lock (_lock)
             {
@@ -330,21 +361,24 @@ namespace PDMLite
                 foreach (var el in doc.Root.Element("Files").Elements("File"))
                 {
                     string status = (string)el.Element("Status") ?? "";
-                    if (status != "Released") continue;
+                    if (string.IsNullOrEmpty(status)) continue;
+
+                    string fileName = (string)el.Element("FileName") ?? "";
+                    if (!seenFileNames.Add(fileName)) continue;
 
                     string partNo = ((string)el.Element("PartNumber") ?? "").ToLower();
                     string desc = ((string)el.Element("Description") ?? "").ToLower();
-                    string fileName = ((string)el.Element("FileName") ?? "").ToLower();
+                    string fileNameLower = fileName.ToLower();
 
-                    if (partNo.Contains(term) || desc.Contains(term) || fileName.Contains(term))
+                    if (partNo.Contains(term) || desc.Contains(term) || fileNameLower.Contains(term))
                     {
                         results.Add(new VaultFile
                         {
                             FilePath = (string)el.Element("FilePath") ?? "",
-                            FileName = (string)el.Element("FileName") ?? "",
+                            FileName = fileName,
                             PartNumber = (string)el.Element("PartNumber") ?? "",
                             Description = (string)el.Element("Description") ?? "",
-                            Status = (string)el.Element("Status") ?? "",
+                            Status = status,
                             Revision = (string)el.Element("Revision") ?? ""
                         });
                     }
@@ -365,6 +399,9 @@ namespace PDMLite
 
             string target = partNo.Trim();
             string exclude = (excludeFilePath ?? "").Trim();
+            // Also exclude by filename so the RELEASED-folder copy of the same
+            // file (different path, same filename) never triggers a false conflict.
+            string excludeFileName = System.IO.Path.GetFileName(exclude);
 
             lock (_lock)
             {
@@ -375,9 +412,14 @@ namespace PDMLite
                     if (elPath.Equals(exclude, StringComparison.OrdinalIgnoreCase))
                         continue;
 
+                    string elFileName = ((string)el.Element("FileName") ?? "").Trim();
+                    if (!string.IsNullOrEmpty(excludeFileName) &&
+                        elFileName.Equals(excludeFileName, StringComparison.OrdinalIgnoreCase))
+                        continue;
+
                     string elPart = ((string)el.Element("PartNumber") ?? "").Trim();
                     if (elPart.Equals(target, StringComparison.OrdinalIgnoreCase))
-                        return (string)el.Element("FileName") ?? elPath;
+                        return elFileName.Length > 0 ? elFileName : elPath;
                 }
             }
 

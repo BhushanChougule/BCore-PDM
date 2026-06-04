@@ -188,6 +188,41 @@ namespace PDMLite
                     return 1;
                 }
 
+                // Rule 2.5: vault files must live under a WIP division subfolder.
+                // Every file has one canonical home in N:\PDM-SolidWorks\WIP\<Division>.
+                // Saving elsewhere (Desktop, local drive) breaks SOLIDWORKS references
+                // and the released-snapshot model.
+                // Warn but allow override so nobody is ever hard-trapped.
+                const string WipRootPath = @"N:\PDM-SolidWorks\WIP";
+                if (!string.IsNullOrEmpty(filePath))
+                {
+                    bool underWip;
+                    try
+                    {
+                        underWip = System.IO.Path.GetFullPath(filePath)
+                            .StartsWith(System.IO.Path.GetFullPath(WipRootPath),
+                                        StringComparison.OrdinalIgnoreCase);
+                    }
+                    catch { underWip = true; } // never block on a path parse error
+
+                    if (!underWip)
+                    {
+                        string divList = string.Join("\n",
+                            System.Array.ConvertAll(DatabaseManager.WipDivisions,
+                                d => "  " + WipRootPath + @"\" + d));
+                        int choice = SwApp.SendMsgToUser2(
+                            "FILE OUTSIDE THE VAULT:\n\n" +
+                            "This file is being saved to:\n" + filePath + "\n\n" +
+                            "All vault files must be saved under a division folder:\n" +
+                            divList + "\n\n" +
+                            "Saving outside the vault breaks references and the file " +
+                            "will not be tracked correctly.\nSave here anyway?",
+                            (int)swMessageBoxIcon_e.swMbWarning,
+                            (int)swMessageBoxBtn_e.swMbYesNo);
+                        if (choice == (int)swMessageBoxResult_e.swMbHitNo) return 1;
+                    }
+                }
+
                 int docType = doc.GetType();
                 bool isPart = docType == (int)swDocumentTypes_e.swDocPART;
                 bool isAsm  = docType == (int)swDocumentTypes_e.swDocASSEMBLY;

@@ -55,11 +55,31 @@ namespace PDMLite
             DatabaseManager.SetFileStatus(filePath, "WIP",
                 PDMLiteAddin.CurrentUser, "Unlocked by Master");
 
+            // Check if the file is open before showing the message so we can
+            // close-and-reopen it after the user clicks OK.
+            ModelDoc2 openDoc = PDMLiteAddin.SwApp
+                ?.GetOpenDocumentByName(filePath) as ModelDoc2;
+            int reopenType = openDoc != null ? openDoc.GetType() : -1;
+
             MessageBox.Show(
                 "File unlocked and returned to WIP.\nEngineers can now edit it.",
                 "BCore PDM — Unlocked",
                 MessageBoxButtons.OK,
                 MessageBoxIcon.Information);
+
+            // Close and reopen so SOLIDWORKS discards its cached read-only state.
+            if (reopenType >= 0)
+            {
+                try
+                {
+                    PDMLiteAddin.SwApp.CloseDoc(filePath);
+                    int errs = 0, warnings = 0;
+                    PDMLiteAddin.SwApp.OpenDoc6(filePath, reopenType,
+                        (int)swOpenDocOptions_e.swOpenDocOptions_Silent,
+                        "", ref errs, ref warnings);
+                }
+                catch { }
+            }
         }
 
         // ── RELEASE ───────────────────────────────────────────────────────
@@ -245,22 +265,36 @@ namespace PDMLite
             string releasedCopy = Path.Combine(RelFolder,
                 Path.GetFileName(filePath));
 
+            // Safety net: if the file being released somehow already lives in
+            // the RELEASED folder, it is already in place (and open in
+            // SOLIDWORKS), so we must NOT delete/copy it onto itself; doing so
+            // throws "being used by another process". Just re-apply read-only.
+            // In the normal flow the file lives in WIP, so this stays false.
+            bool fileIsReleasedCopy = string.Equals(
+                Path.GetFullPath(filePath),
+                Path.GetFullPath(releasedCopy),
+                StringComparison.OrdinalIgnoreCase);
+
             // Delete any existing released copy first. Overwriting a read-only
             // file on the network share fails, which previously left a STALE
             // copy in RELEASED while the exports updated. Delete-then-copy is
             // reliable, and any genuine failure is now surfaced, not swallowed.
             try
             {
-                if (File.Exists(releasedCopy))
+                if (!fileIsReleasedCopy)
                 {
-                    SetReadOnly(releasedCopy, false);
-                    File.Delete(releasedCopy);
+                    if (File.Exists(releasedCopy))
+                    {
+                        SetReadOnly(releasedCopy, false);
+                        File.Delete(releasedCopy);
+                    }
+                    File.Copy(filePath, releasedCopy, overwrite: true);
                 }
-                File.Copy(filePath, releasedCopy, overwrite: true);
 
                 // ── Set OS-level read-only protection ─────────────────────
                 SetReadOnly(filePath, true);
-                SetReadOnly(releasedCopy, true);
+                if (!fileIsReleasedCopy)
+                    SetReadOnly(releasedCopy, true);
             }
             catch (Exception ex)
             {
@@ -273,23 +307,14 @@ namespace PDMLite
                     MessageBoxButtons.OK, MessageBoxIcon.Warning);
             }
 
-            // ── Update database — source path ─────────────────────────────
+            // ── Update database ───────────────────────────────────────────
+            // Only track the source-path entry. SearchFiles() redirects callers
+            // to the RELEASED folder at open time, so no second entry is needed.
+            // A second entry would cause duplicate search results and false
+            // part-number conflict warnings.
             DatabaseManager.LockFile(filePath, user);
             DatabaseManager.SetFileStatus(filePath, "Released", user,
                 "Released REV " + rev);
-
-            // ── Update database — RELEASED folder copy ────────────────────
-            // Ensures the copy in the RELEASED folder shows correct status
-            // and shares the same history via filename fallback in GetFileHistory
-            DatabaseManager.UpsertFile(new VaultFile
-            {
-                FilePath = releasedCopy,
-                FileName = Path.GetFileName(filePath),
-                PartNumber = partNo,
-                Status = "Released",
-                ModifiedBy = user,
-                ModifiedDate = DateTime.Now
-            });
 
             MessageBox.Show(
                 "File Released Successfully!\n\n" +
@@ -298,6 +323,19 @@ namespace PDMLite
                 "BCore PDM — Released",
                 MessageBoxButtons.OK,
                 MessageBoxIcon.Information);
+
+            // Close and reopen the WIP copy so SOLIDWORKS immediately adopts
+            // the OS read-only flag. Without this, SW keeps its cached writable
+            // state until the user manually closes and reopens the file.
+            try
+            {
+                PDMLiteAddin.SwApp.CloseDoc(filePath);
+                int errs = 0, warnings = 0;
+                PDMLiteAddin.SwApp.OpenDoc6(filePath, docType,
+                    (int)swOpenDocOptions_e.swOpenDocOptions_Silent,
+                    "", ref errs, ref warnings);
+            }
+            catch { }
         }
 
         // ── NEW REVISION ──────────────────────────────────────────────────
@@ -334,10 +372,10 @@ namespace PDMLite
 
             if (confirm != DialogResult.Yes) return;
 
-            // Remove OS-level read-only so we can modify the file
-            SetReadOnly(filePath, false);
+            int reopenType = doc.GetType();
 
-            // Archive current released SW file to correct subfolder
+            // Archive the current released SW file (still on disk at the old rev)
+            // to the correct subfolder BEFORE we reopen and bump the revision.
             string ext = Path.GetExtension(filePath).ToLower();
             string swSubFolder = ext == ".sldprt" ? "PARTS"
                                : ext == ".sldasm" ? "ASSEMBLIES"
@@ -353,25 +391,44 @@ namespace PDMLite
                 Path.Combine(swArchive, archiveName),
                 overwrite: true);
 
-            // Bump revision. This save happens while the file is still
-            // "Released" in the DB, so it must bypass the released-file lock.
-            PropertyValidator.SetProperty(doc, "Revision", nextRev);
+            // CRITICAL: the file was opened read-only (it was Released), so
+            // SOLIDWORKS keeps it in read-only mode internally and silently
+            // refuses to Save3 — the revision bump would update memory but never
+            // reach disk. We must remove the OS read-only flag and reopen the
+            // document as WRITABLE *before* bumping the revision and saving.
+            SetReadOnly(filePath, false);
+            PDMLiteAddin.SwApp.CloseDoc(filePath);
+            int oErr = 0, oWarn = 0;
+            ModelDoc2 fresh = PDMLiteAddin.SwApp.OpenDoc6(filePath, reopenType,
+                (int)swOpenDocOptions_e.swOpenDocOptions_Silent,
+                "", ref oErr, ref oWarn) as ModelDoc2;
+            if (fresh == null) fresh = PDMLiteAddin.SwApp.ActiveDoc as ModelDoc2;
+
+            if (fresh == null)
+            {
+                MessageBox.Show(
+                    "Could not reopen the file to start the new revision:\n" +
+                    filePath + "\n\nPlease open it manually and try again.",
+                    "BCore PDM — New Revision Failed",
+                    MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                return;
+            }
+
+            // Bump revision on the now-writable document and save. This save
+            // happens while the file is still "Released" in the DB, so it must
+            // bypass the released-file lock.
+            PropertyValidator.SetProperty(fresh, "Revision", nextRev);
             PDMLiteAddin.SuppressSaveValidation = true;
-            try { doc.Save3((int)swSaveAsOptions_e.swSaveAsOptions_Silent, 0, 0); }
+            try { fresh.Save3((int)swSaveAsOptions_e.swSaveAsOptions_Silent, 0, 0); }
             finally { PDMLiteAddin.SuppressSaveValidation = false; }
 
-            // Reset to WIP — source path and RELEASED copy
+            // Reset to WIP — source path only (no separate entry for RELEASED copy)
             DatabaseManager.UnlockFile(filePath);
             DatabaseManager.SetFileStatus(filePath, "WIP", user,
                 "New revision started: REV " + nextRev);
 
-            string relCopy = Path.Combine(RelFolder, Path.GetFileName(filePath));
-            if (File.Exists(relCopy))
-                DatabaseManager.SetFileStatus(relCopy, "WIP", user,
-                    "New revision started: REV " + nextRev);
-
             MessageBox.Show(
-                "Revision bumped to REV " + nextRev + ".\nFile is now back in WIP.",
+                "Revision bumped to REV " + nextRev + ".\nFile is now back in WIP and ready to edit.",
                 "BCore PDM",
                 MessageBoxButtons.OK,
                 MessageBoxIcon.Information);
@@ -694,8 +751,13 @@ namespace PDMLite
             string dir = Path.GetDirectoryName(filePath);
             string name = Path.GetFileNameWithoutExtension(filePath);
 
-            // Search same folder then WIP folder for matching drawing
-            string[] searchDirs = { dir, WipFolder };
+            // Build search list: same folder as the part first (fastest, most
+            // common case), then each WIP division subfolder as a fallback in
+            // case the drawing was saved in a different division than the part.
+            var searchDirs = new System.Collections.Generic.List<string> { dir };
+            foreach (string div in DatabaseManager.WipDivisions)
+                searchDirs.Add(Path.Combine(WipFolder, div));
+
             foreach (string searchDir in searchDirs)
             {
                 string candidate = Path.Combine(searchDir, name + ".slddrw");
