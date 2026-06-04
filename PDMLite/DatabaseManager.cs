@@ -47,8 +47,8 @@ namespace PDMLite
 
     public static class DatabaseManager
     {
-        private const string VaultFolder = @"N:\PDM-SolidWorks\vault";
-        private const string DataFile = @"N:\PDM-SolidWorks\vault\vault.xml";
+        private const string VaultFolder = @"N:\PDM-SolidWorks\VAULT";
+        private const string DataFile = @"N:\PDM-SolidWorks\VAULT\vault.xml";
         private const string WipRoot = @"N:\PDM-SolidWorks\WIP";
 
         // Division subfolders under WIP — one per product line.

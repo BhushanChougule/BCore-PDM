@@ -28,7 +28,7 @@ D:\\06 SOLIDWORKS\_Automation\\08\_Documentation\\PDMLite\_CL\\PDMLite\\PDMLite\
 
 N:\\PDM-SolidWorks\\
 
-\- vault\\vault.xml        → XML database (System.Xml.Linq, no SQLite)
+\- VAULT\\vault.xml        → XML database (System.Xml.Linq, no SQLite)
 
 \- WIP\\                   → work in progress files — THE single canonical home for every vault file. Engineers always save here. The DB tracks the WIP path.
 
@@ -66,7 +66,7 @@ N:\\PDM-SolidWorks\\
 
 \- EXPORTS\\STEP\\          → current released STEP files
 
-\- Addin\\                 → DLL and registration files
+\- ADDIN\\                 → DLL and registration files
 
 
 
@@ -162,7 +162,7 @@ WinForms dialog for missing properties. Fixed sizes (not DPI-scaled, form is sho
 
 \### DatabaseManager.cs
 
-XML vault database at N:\\PDM-SolidWorks\\vault\\vault.xml
+XML vault database at N:\\PDM-SolidWorks\\VAULT\\vault.xml
 
 Classes: VaultFile, LockInfo, HistoryEntry, RevisionRequest
 
@@ -316,7 +316,7 @@ DPI-aware Form (680×500 scaled). S(v)=v\*\_scale. Opened from PENDING REQUESTS 
 
 Sends email notifications via SMTP (company uses Mailgun: smtp.mailgun.org:587, sender bcorepdm@mg.richardswilcox.com). Non-fatal — all sends wrapped in try/catch; failure never blocks workflow.
 
-Config file: N:\\PDM-SolidWorks\\vault\\email.config (XML, created on first addin load if missing)
+Config file: N:\\PDM-SolidWorks\\VAULT\\email.config (XML, created on first addin load if missing)
 
 \- Enabled = true/false toggle
 
@@ -396,7 +396,7 @@ DPI-aware Form. S(v)=v\*\_scale.
 
 \- Registry: HKLM\\SOFTWARE\\SolidWorks\\AddIns\\{GUID}
 
-\- IT runs: N:\\PDM-SolidWorks\\Addin\\InstallPDMLite.bat as Administrator
+\- IT runs: N:\\PDM-SolidWorks\\ADDIN\\InstallPDMLite.bat as Administrator
 
 
 
@@ -544,7 +544,7 @@ GetNextRevision() in VaultManager.cs handles this
 
 \- File history rendered as individual labels (no text overlap), with StatusColor per entry
 
-\- Email notifications (Mailgun SMTP) on request submit/approve/reject — config at N:\\PDM-SolidWorks\\vault\\email.config; "Send Test Email" button sends to the logged-in user to verify the pipeline
+\- Email notifications (Mailgun SMTP) on request submit/approve/reject — config at N:\\PDM-SolidWorks\\VAULT\\email.config; "Send Test Email" button sends to the logged-in user to verify the pipeline
 
 \- Duplicate part-number detection on save (warns with Yes/No override when another file already uses the same PartNo) — format validation deemed unfeasible due to 3 divisions with inconsistent numbering
 
