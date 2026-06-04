@@ -132,15 +132,13 @@ namespace PDMLite
             // Custom Properties task pane opens). Re-scanning immediately ensures
             // the document gets re-registered if it is still open.
             HookAllOpenDocs();
-            // ActiveDocChangeNotify does not fire when the last document closes.
-            // We cannot use RefreshPanel() here because SwApp.ActiveDoc still
-            // points to the closing document at the time DestroyNotify fires.
-            // Instead, check our own handler count: if zero, no docs are truly
-            // open and we explicitly pass null; otherwise refresh normally.
-            if (_docHandlers.Count == 0)
-                _taskPane?.ClearPanel();
-            else
-                _taskPane?.RefreshPanel();
+            // ActiveDocChangeNotify does not fire when the last document closes,
+            // so refresh here. Must be DEFERRED: at DestroyNotify time the doc is
+            // still mid-close (ActiveDoc and GetDocuments still report it), so a
+            // synchronous refresh would read stale state. RefreshPanelDeferred
+            // re-evaluates ActiveDoc after the close completes — null when no
+            // files remain (clears the panel), or the next open doc.
+            _taskPane?.RefreshPanelDeferred();
         }
 
         // ── Pre-save validation ───────────────────────────────────────────────
