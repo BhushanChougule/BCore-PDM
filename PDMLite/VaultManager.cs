@@ -323,6 +323,19 @@ namespace PDMLite
                 "BCore PDM — Released",
                 MessageBoxButtons.OK,
                 MessageBoxIcon.Information);
+
+            // Close and reopen the WIP copy so SOLIDWORKS immediately adopts
+            // the OS read-only flag. Without this, SW keeps its cached writable
+            // state until the user manually closes and reopens the file.
+            try
+            {
+                PDMLiteAddin.SwApp.CloseDoc(filePath);
+                int errs = 0, warnings = 0;
+                PDMLiteAddin.SwApp.OpenDoc6(filePath, docType,
+                    (int)swOpenDocOptions_e.swOpenDocOptions_Silent,
+                    "", ref errs, ref warnings);
+            }
+            catch { }
         }
 
         // ── NEW REVISION ──────────────────────────────────────────────────
