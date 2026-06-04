@@ -74,6 +74,33 @@ namespace PDMLite
             }
             catch { }
         }
+
+        // ── Deferred refresh ──────────────────────────────────────────
+        // Used from DestroyNotify. At the moment a document is closing,
+        // SwApp.ActiveDoc still points to the closing doc and GetDocuments()
+        // still lists it, so a synchronous refresh reads stale state. Posting
+        // the refresh to the UI thread runs it AFTER SOLIDWORKS finishes the
+        // close, by which point ActiveDoc is null (no files) or the correct
+        // remaining document. This naturally handles the spurious-destroy case
+        // too: if the doc is still open, ActiveDoc returns it.
+        public void RefreshPanelDeferred()
+        {
+            try
+            {
+                if (_taskPaneControl == null || !_taskPaneControl.IsHandleCreated)
+                    return;
+                _taskPaneControl.BeginInvoke((Action)(() =>
+                {
+                    try
+                    {
+                        ModelDoc2 doc = PDMLiteAddin.SwApp?.ActiveDoc as ModelDoc2;
+                        _taskPaneControl.Refresh(doc);
+                    }
+                    catch { }
+                }));
+            }
+            catch { }
+        }
         private string CreateIcon()
         {
             try
