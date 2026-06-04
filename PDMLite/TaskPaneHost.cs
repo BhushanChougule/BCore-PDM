@@ -74,6 +74,15 @@ namespace PDMLite
             }
             catch { }
         }
+
+        // ── Called when the last document closes ──────────────────────
+        // RefreshPanel() can't be used here because ActiveDoc still points
+        // to the closing document at the time DestroyNotify fires.
+        public void ClearPanel()
+        {
+            try { _taskPaneControl?.Refresh(null); }
+            catch { }
+        }
         private string CreateIcon()
         {
             try
