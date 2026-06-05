@@ -124,6 +124,36 @@ namespace PDMLite
                             MessageBoxIcon.Stop);
                         return;
                     }
+
+                    // If the drawing's model is an ASSEMBLY, the assembly can be
+                    // Released while one of its child parts was just unlocked back
+                    // to WIP. Releasing the assembly drawing in that state would
+                    // publish a PDF whose components are not all Released — so apply
+                    // the same child-component gate the assembly itself uses.
+                    if (Path.GetExtension(referencedModel)
+                            .Equals(".sldasm", StringComparison.OrdinalIgnoreCase))
+                    {
+                        ModelDoc2 refAsm = PDMLiteAddin.SwApp
+                            .GetOpenDocumentByName(referencedModel) as ModelDoc2;
+                        if (refAsm != null)
+                        {
+                            var unreleasedChildren = GetUnreleasedComponents(refAsm);
+                            if (unreleasedChildren.Count > 0)
+                            {
+                                MessageBox.Show(
+                                    "Cannot release Assembly Drawing — these " +
+                                    "components of the referenced assembly are not " +
+                                    "yet Released:\n\n• " +
+                                    string.Join("\n• ", unreleasedChildren) + "\n\n" +
+                                    "Release all components first, then release the " +
+                                    "Assembly Drawing.",
+                                    "BCore PDM — Release Blocked",
+                                    MessageBoxButtons.OK,
+                                    MessageBoxIcon.Stop);
+                                return;
+                            }
+                        }
+                    }
                 }
             }
 

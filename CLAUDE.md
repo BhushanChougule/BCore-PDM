@@ -466,7 +466,9 @@ skipped → archive old exports → export STEP → copy to RELEASED → set rea
 
 \### Master Release (Drawing)
 
-check referenced part is Released → sync drawing revision with part revision →
+check referenced part is Released → (if referenced model is an assembly) check all
+
+assembly components are Released → sync drawing revision with part revision →
 
 export PDF (all sheets) → copy to RELEASED → set read-only → update DB
 
