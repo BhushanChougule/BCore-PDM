@@ -441,6 +441,25 @@ namespace PDMLite
                 Path.GetExtension(filePath);
             ArchiveCopy(filePath, Path.Combine(swArchive, archiveName));
 
+            // If the drawing is open, close it BEFORE we close/reopen the part.
+            // When a drawing is open and references the part, OpenDoc6 on the part
+            // may load it as a lightweight reference of the drawing (read-only
+            // context) rather than a standalone writable document, causing Save3
+            // to silently fail and leaving the revision letter unchanged on disk.
+            // We reopen it below once the model is saved and returned to WIP.
+            bool drwWasOpen = false;
+            string drwPreClose = ext != ".slddrw" ? FindDrawingPath(filePath) : null;
+            if (drwPreClose != null)
+            {
+                ModelDoc2 openDrwCheck = PDMLiteAddin.SwApp
+                    ?.GetOpenDocumentByName(drwPreClose) as ModelDoc2;
+                if (openDrwCheck != null)
+                {
+                    drwWasOpen = true;
+                    try { PDMLiteAddin.SwApp.CloseDoc(drwPreClose); } catch { }
+                }
+            }
+
             // CRITICAL: the file was opened read-only (it was Released), so
             // SOLIDWORKS keeps it in read-only mode internally and silently
             // refuses to Save3 — the revision bump would update memory but never
@@ -493,6 +512,22 @@ namespace PDMLite
             string drwSummary = ext == ".slddrw"
                 ? "n/a (this file is a drawing)"
                 : StartDrawingRevisionWith(filePath, currentRev, user);
+
+            // Reopen the drawing if we pre-closed it above. By this point
+            // the drawing's read-only flag is cleared and the DB is WIP, so
+            // it reopens as a writable document referencing the updated part.
+            if (drwWasOpen && drwPreClose != null)
+            {
+                try
+                {
+                    int eDrw = 0, wDrw = 0;
+                    PDMLiteAddin.SwApp.OpenDoc6(drwPreClose,
+                        (int)swDocumentTypes_e.swDocDRAWING,
+                        (int)swOpenDocOptions_e.swOpenDocOptions_Silent,
+                        "", ref eDrw, ref wDrw);
+                }
+                catch { }
+            }
 
             // ── Warn about parent assemblies that use this file ───────────
             List<string> parents = GetParentAssemblies(filePath);
