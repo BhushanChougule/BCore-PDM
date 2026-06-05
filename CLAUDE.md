@@ -404,6 +404,8 @@ DPI-aware Form. S(v)=v\*\_scale.
 
 \- Release copies the SW file to RELEASED via delete-then-copy (overwriting a read-only file on the network share fails and left stale copies); copy failures are surfaced, not swallowed
 
+\- Release closes and reopens the WIP file so SOLIDWORKS adopts the OS read-only flag immediately. If the model's drawing is open, the open drawing holds a reference to the model and CloseDoc(model) is refused — so Release pre-closes the drawing first, reopens the model read-only, then reopens the drawing (same pattern as New Revision)
+
 \- No COM auto-registration (no admin rights) — manual IT registration
 
 

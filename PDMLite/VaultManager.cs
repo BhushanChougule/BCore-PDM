@@ -381,11 +381,39 @@ namespace PDMLite
             // state until the user manually closes and reopens the file.
             try
             {
+                // If this is a part/assembly and its drawing is open, the open
+                // drawing holds a reference to the model, so CloseDoc(model) is
+                // refused — the model never closes and never adopts the read-only
+                // flag. Pre-close the drawing first, then reopen it afterwards.
+                bool drwWasOpen = false;
+                string drwPreClose = !isDrawing ? FindDrawingPath(filePath) : null;
+                if (drwPreClose != null)
+                {
+                    ModelDoc2 openDrwCheck = PDMLiteAddin.SwApp
+                        ?.GetOpenDocumentByName(drwPreClose) as ModelDoc2;
+                    if (openDrwCheck != null)
+                    {
+                        drwWasOpen = true;
+                        try { PDMLiteAddin.SwApp.CloseDoc(drwPreClose); } catch { }
+                    }
+                }
+
                 PDMLiteAddin.SwApp.CloseDoc(filePath);
                 int errs = 0, warnings = 0;
                 PDMLiteAddin.SwApp.OpenDoc6(filePath, docType,
                     (int)swOpenDocOptions_e.swOpenDocOptions_Silent,
                     "", ref errs, ref warnings);
+
+                // Reopen the drawing if we pre-closed it. It is also Released
+                // (or will be released next), so it opens read-only too.
+                if (drwWasOpen && drwPreClose != null)
+                {
+                    int eDrw = 0, wDrw = 0;
+                    PDMLiteAddin.SwApp.OpenDoc6(drwPreClose,
+                        (int)swDocumentTypes_e.swDocDRAWING,
+                        (int)swOpenDocOptions_e.swOpenDocOptions_Silent,
+                        "", ref eDrw, ref wDrw);
+                }
             }
             catch { }
         }
