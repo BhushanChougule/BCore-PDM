@@ -439,9 +439,7 @@ namespace PDMLite
                 Path.GetFileNameWithoutExtension(filePath) +
                 " REV " + currentRev +
                 Path.GetExtension(filePath);
-            File.Copy(filePath,
-                Path.Combine(swArchive, archiveName),
-                overwrite: true);
+            ArchiveCopy(filePath, Path.Combine(swArchive, archiveName));
 
             // CRITICAL: the file was opened read-only (it was Released), so
             // SOLIDWORKS keeps it in read-only mode internally and silently
@@ -647,8 +645,7 @@ namespace PDMLite
                 string archiveName =
                     Path.GetFileNameWithoutExtension(drwPath) +
                     " REV " + currentRev + Path.GetExtension(drwPath);
-                File.Copy(drwPath,
-                    Path.Combine(drwArchive, archiveName), overwrite: true);
+                ArchiveCopy(drwPath, Path.Combine(drwArchive, archiveName));
 
                 // Return the WIP drawing to an editable state.
                 SetReadOnly(drwPath, false);
@@ -898,7 +895,7 @@ namespace PDMLite
                     " REV " + currentRev + ext;
                 string currentArchivePath = Path.Combine(
                     archivePath, currentArchiveName);
-                File.Copy(filePath, currentArchivePath, overwrite: true);
+                ArchiveCopy(filePath, currentArchivePath);
 
                 // ── Step 3: Remove read-only from archived file ───────────
                 SetReadOnly(selectedFile, false);
@@ -961,9 +958,8 @@ namespace PDMLite
                             if (File.Exists(drwTarget))
                             {
                                 SetReadOnly(drwTarget, false);
-                                File.Copy(drwTarget, Path.Combine(drwArchiveDir,
-                                    fileName + " REV " + currentRev + ".slddrw"),
-                                    overwrite: true);
+                                ArchiveCopy(drwTarget, Path.Combine(drwArchiveDir,
+                                    fileName + " REV " + currentRev + ".slddrw"));
                             }
 
                             // Restore the archived drawing to the WIP path.
@@ -1475,6 +1471,23 @@ namespace PDMLite
                         attrs & ~FileAttributes.ReadOnly);
             }
             catch { }
+        }
+
+        // ── Copy a file into an archive/destination, overwriting safely ──
+        // File.Copy(overwrite:true) throws UnauthorizedAccessException
+        // ("Access to the path is denied") when the destination already
+        // exists AND is read-only. Archived and released copies are read-only
+        // (File.Copy preserves the attribute), so re-archiving the same
+        // revision — common during testing or after a rollback — hits this.
+        // Clear the flag and delete the stale file first, then copy.
+        private static void ArchiveCopy(string source, string dest)
+        {
+            if (File.Exists(dest))
+            {
+                SetReadOnly(dest, false);
+                File.Delete(dest);
+            }
+            File.Copy(source, dest);
         }
     }
 }
