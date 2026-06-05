@@ -183,13 +183,33 @@ namespace PDMLite
                 var validation = PropertyValidator.Validate(doc);
                 if (!validation.IsValid)
                 {
-                    MessageBox.Show(
-                        "Cannot release — missing properties:\n\n• " +
-                        string.Join("\n• ", validation.EmptyFields),
-                        "BCore PDM — Release Blocked",
-                        MessageBoxButtons.OK,
-                        MessageBoxIcon.Stop);
-                    return;
+                    // Show PropertyForm so the Master can fill missing fields
+                    // without closing this dialog and doing a manual save first.
+                    using (var form = new PropertyForm(doc, validation.EmptyFields))
+                    {
+                        form.ShowDialog();
+                        if (!form.PropertiesSaved)
+                        {
+                            MessageBox.Show(
+                                "Release blocked — required properties incomplete:\n\n• " +
+                                string.Join("\n• ", validation.EmptyFields),
+                                "BCore PDM — Release Blocked",
+                                MessageBoxButtons.OK,
+                                MessageBoxIcon.Stop);
+                            return;
+                        }
+                    }
+                    var recheck = PropertyValidator.Validate(doc);
+                    if (!recheck.IsValid)
+                    {
+                        MessageBox.Show(
+                            "Release blocked — required properties still incomplete:\n\n• " +
+                            string.Join("\n• ", recheck.EmptyFields),
+                            "BCore PDM — Release Blocked",
+                            MessageBoxButtons.OK,
+                            MessageBoxIcon.Stop);
+                        return;
+                    }
                 }
             }
 
@@ -434,7 +454,16 @@ namespace PDMLite
             ModelDoc2 fresh = PDMLiteAddin.SwApp.OpenDoc6(filePath, reopenType,
                 (int)swOpenDocOptions_e.swOpenDocOptions_Silent,
                 "", ref oErr, ref oWarn) as ModelDoc2;
-            if (fresh == null) fresh = PDMLiteAddin.SwApp.ActiveDoc as ModelDoc2;
+
+            // OpenDoc6 can return null or the wrong doc on some SW versions even
+            // when the file opened successfully (e.g. another doc becomes ActiveDoc
+            // during the reopen). Always verify by path.
+            if (fresh == null || !string.Equals(
+                    fresh.GetPathName(), filePath,
+                    StringComparison.OrdinalIgnoreCase))
+            {
+                fresh = PDMLiteAddin.SwApp.GetOpenDocumentByName(filePath) as ModelDoc2;
+            }
 
             if (fresh == null)
             {

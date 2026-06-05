@@ -175,7 +175,8 @@ namespace PDMLite
                 var doc = LoadOrCreate();
                 foreach (var el in doc.Root.Element("Files").Elements("File"))
                 {
-                    if ((string)el.Element("FilePath") == filePath)
+                    if (string.Equals((string)el.Element("FilePath"), filePath,
+                            StringComparison.OrdinalIgnoreCase))
                         return (string)el.Element("Status") ?? "";
                 }
                 return "";
@@ -191,7 +192,8 @@ namespace PDMLite
 
                 foreach (var el in doc.Root.Element("Files").Elements("File"))
                 {
-                    if ((string)el.Element("FilePath") == filePath)
+                    if (string.Equals((string)el.Element("FilePath"), filePath,
+                            StringComparison.OrdinalIgnoreCase))
                     {
                         el.Element("Status").Value = status;
                         break;
@@ -219,7 +221,8 @@ namespace PDMLite
                 var doc = LoadOrCreate();
                 foreach (var el in doc.Root.Element("Files").Elements("File"))
                 {
-                    if ((string)el.Element("FilePath") == filePath)
+                    if (string.Equals((string)el.Element("FilePath"), filePath,
+                            StringComparison.OrdinalIgnoreCase))
                     {
                         el.Element("HasBrokenRefs").Value =
                             hasBroken ? "true" : "false";
@@ -240,7 +243,8 @@ namespace PDMLite
                 var doc = LoadOrCreate();
                 foreach (var el in doc.Root.Element("Files").Elements("File"))
                 {
-                    if ((string)el.Element("FilePath") == filePath)
+                    if (string.Equals((string)el.Element("FilePath"), filePath,
+                            StringComparison.OrdinalIgnoreCase))
                     {
                         el.Element("LockedBy").Value = lockedBy;
                         el.Element("LockedDate").Value = DateTime.Now.ToString("o");
@@ -258,7 +262,8 @@ namespace PDMLite
                 var doc = LoadOrCreate();
                 foreach (var el in doc.Root.Element("Files").Elements("File"))
                 {
-                    if ((string)el.Element("FilePath") == filePath)
+                    if (string.Equals((string)el.Element("FilePath"), filePath,
+                            StringComparison.OrdinalIgnoreCase))
                     {
                         el.Element("LockedBy").Value = "";
                         el.Element("LockedDate").Value = "";
@@ -276,7 +281,8 @@ namespace PDMLite
                 var doc = LoadOrCreate();
                 foreach (var el in doc.Root.Element("Files").Elements("File"))
                 {
-                    if ((string)el.Element("FilePath") == filePath)
+                    if (string.Equals((string)el.Element("FilePath"), filePath,
+                            StringComparison.OrdinalIgnoreCase))
                     {
                         string lockedBy = (string)el.Element("LockedBy") ?? "";
                         if (!string.IsNullOrEmpty(lockedBy))
