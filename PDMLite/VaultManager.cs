@@ -129,29 +129,28 @@ namespace PDMLite
                     // Released while one of its child parts was just unlocked back
                     // to WIP. Releasing the assembly drawing in that state would
                     // publish a PDF whose components are not all Released — so apply
-                    // the same child-component gate the assembly itself uses.
+                    // the same child-component gate the assembly itself uses. Read
+                    // from disk: the assembly is loaded only as the drawing's
+                    // reference (often lightweight) and may not even be reachable
+                    // via GetOpenDocumentByName, so the live read is unreliable.
                     if (Path.GetExtension(referencedModel)
                             .Equals(".sldasm", StringComparison.OrdinalIgnoreCase))
                     {
-                        ModelDoc2 refAsm = PDMLiteAddin.SwApp
-                            .GetOpenDocumentByName(referencedModel) as ModelDoc2;
-                        if (refAsm != null)
+                        var unreleasedChildren =
+                            GetUnreleasedComponentsByPath(referencedModel);
+                        if (unreleasedChildren.Count > 0)
                         {
-                            var unreleasedChildren = GetUnreleasedComponents(refAsm);
-                            if (unreleasedChildren.Count > 0)
-                            {
-                                MessageBox.Show(
-                                    "Cannot release Assembly Drawing — these " +
-                                    "components of the referenced assembly are not " +
-                                    "yet Released:\n\n• " +
-                                    string.Join("\n• ", unreleasedChildren) + "\n\n" +
-                                    "Release all components first, then release the " +
-                                    "Assembly Drawing.",
-                                    "BCore PDM — Release Blocked",
-                                    MessageBoxButtons.OK,
-                                    MessageBoxIcon.Stop);
-                                return;
-                            }
+                            MessageBox.Show(
+                                "Cannot release Assembly Drawing — these " +
+                                "components of the referenced assembly are not " +
+                                "yet Released:\n\n• " +
+                                string.Join("\n• ", unreleasedChildren) + "\n\n" +
+                                "Release all components first, then release the " +
+                                "Assembly Drawing.",
+                                "BCore PDM — Release Blocked",
+                                MessageBoxButtons.OK,
+                                MessageBoxIcon.Stop);
+                            return;
                         }
                     }
                 }
@@ -160,7 +159,9 @@ namespace PDMLite
             // ── Assembly: check all child parts are Released first ────────
             if (docType == (int)swDocumentTypes_e.swDocASSEMBLY)
             {
-                var unreleased = GetUnreleasedComponents(doc);
+                // Read from disk so a lightweight-loaded assembly still reports
+                // its WIP children (the live GetComponents read misses them).
+                var unreleased = GetUnreleasedComponentsByPath(filePath);
                 if (unreleased.Count > 0)
                 {
                     MessageBox.Show(
@@ -1131,35 +1132,63 @@ namespace PDMLite
             }
         }
         // ── Get list of unreleased components in an assembly ──────────
-        private static List<string> GetUnreleasedComponents(ModelDoc2 doc)
+        // Disk-based component release check. Reads the assembly's dependency
+        // tree straight from the file via GetDocumentDependencies2 (no UI open
+        // required), so it is independent of how the assembly is loaded — a
+        // lightweight assembly, or one loaded only as a drawing's reference,
+        // would cause the live GetComponents read above to miss WIP children.
+        // Returns "<filename>  —  <status>" for every tracked component that is
+        // not Released. Toolbox/standard hardware is skipped (not vault-managed).
+        // Best-effort: relies on the reference paths stored in the assembly
+        // matching the vault path format the DB tracks (same caveat as
+        // GetParentAssemblies); an unmatched path reads as WIP and blocks.
+        private static List<string> GetUnreleasedComponentsByPath(string asmPath)
         {
             var unreleased = new List<string>();
+            var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             try
             {
-                AssemblyDoc asm = (AssemblyDoc)doc;
-                object[] components = (object[])asm.GetComponents(false);
+                if (string.IsNullOrEmpty(asmPath) || !File.Exists(asmPath))
+                    return unreleased;
 
-                if (components == null) return unreleased;
+                string asmNorm;
+                try { asmNorm = Path.GetFullPath(asmPath); }
+                catch { asmNorm = asmPath; }
 
-                foreach (object obj in components)
+                // Alternating array: name, path, name, path…
+                object depsObj = PDMLiteAddin.SwApp.GetDocumentDependencies2(
+                    asmPath, true, true, false);
+                string[] deps = depsObj as string[];
+                if (deps == null) return unreleased;
+
+                for (int i = 1; i < deps.Length; i += 2)
                 {
-                    Component2 comp = (Component2)obj;
-                    if (comp == null) continue;
-
-                    string path = comp.GetPathName();
+                    string path = deps[i];
                     if (string.IsNullOrEmpty(path)) continue;
 
-                    // Skip suppressed or lightweight components
-                    if (comp.IsSuppressed()) continue;
+                    // Skip Toolbox / standard hardware — not vault-managed.
+                    if (path.IndexOf("\\Toolbox\\",
+                            StringComparison.OrdinalIgnoreCase) >= 0)
+                        continue;
 
-                    string status = DatabaseManager.GetFileStatus(path);
-                    string fileName = Path.GetFileName(path);
+                    string norm;
+                    try { norm = Path.GetFullPath(path); }
+                    catch { norm = path; }
 
+                    // Skip the assembly itself and any duplicate instances.
+                    if (string.Equals(norm, asmNorm,
+                            StringComparison.OrdinalIgnoreCase)) continue;
+                    if (!seen.Add(norm)) continue;
+
+                    string ext = Path.GetExtension(norm).ToLower();
+                    if (ext != ".sldprt" && ext != ".sldasm") continue;
+
+                    string status = DatabaseManager.GetFileStatus(norm);
                     if (status != "Released")
                     {
                         string statusLabel = string.IsNullOrEmpty(status)
                             ? "WIP" : status;
-                        unreleased.Add(fileName + "  —  " + statusLabel);
+                        unreleased.Add(Path.GetFileName(norm) + "  —  " + statusLabel);
                     }
                 }
             }

@@ -230,7 +230,7 @@ Core vault operations.
 
 \- OpenOrCreateDrawing(doc) → searches for matching .slddrw, prompts to create if not found
 
-\- GetUnreleasedComponents(doc) → checks all assembly children are Released
+\- GetUnreleasedComponentsByPath(asmPath) → checks all assembly children are Released by reading the dependency tree from disk via GetDocumentDependencies2 (independent of load mode — a lightweight assembly, or one loaded only as a drawing reference, still reports its WIP children). Skips Toolbox; dedupes; non-Released tracked components block. Used by both the assembly-release gate and the assembly-drawing-release gate
 
 \- GetDrawingNo(doc) → gets DrawingNo from referenced model
 
