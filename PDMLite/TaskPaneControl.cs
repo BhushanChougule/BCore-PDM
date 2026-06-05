@@ -722,7 +722,16 @@ namespace PDMLite
             if (action == "lock") VaultManager.LockFile(path);
             else if (action == "release") VaultManager.ReleaseFile(doc);
             else if (action == "unlock") VaultManager.UnlockFile(path);
-            else if (action == "newrev") VaultManager.StartNewRevision(doc);
+            else if (action == "newrev")
+            {
+                VaultManager.StartNewRevision(doc);
+                // StartNewRevision closes and reopens the file (and may also
+                // close/reopen the drawing). Defer the refresh so SOLIDWORKS
+                // fully settles the reopened docs before we read properties.
+                BeginInvoke((Action)(() =>
+                    Refresh(PDMLiteAddin.SwApp?.ActiveDoc as ModelDoc2)));
+                return;
+            }
             else if (action == "rollback") VaultManager.RollbackRevision(doc);
             else if (action == "requestrev") VaultManager.RequestRevision(doc);
             else if (action == "requnlock") VaultManager.RequestUnlock(doc);
@@ -730,8 +739,7 @@ namespace PDMLite
             else if (action == "updatedrawings") VaultManager.OpenOrCreateDrawing(doc);
             else if (action == "myrequests") { VaultManager.ViewMyRequests(); return; }
 
-            // New Revision and Unlock close and reopen the document, invalidating
-            // the original doc reference. Always refresh from the current active doc.
+            // Unlock also closes and reopens — use current active doc for refresh.
             Refresh(PDMLiteAddin.SwApp?.ActiveDoc as ModelDoc2);
         }
 

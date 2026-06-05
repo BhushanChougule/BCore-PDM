@@ -124,13 +124,44 @@ namespace PDMLite
                             MessageBoxIcon.Stop);
                         return;
                     }
+
+                    // If the drawing's model is an ASSEMBLY, the assembly can be
+                    // Released while one of its child parts was just unlocked back
+                    // to WIP. Releasing the assembly drawing in that state would
+                    // publish a PDF whose components are not all Released — so apply
+                    // the same child-component gate the assembly itself uses. Read
+                    // from disk: the assembly is loaded only as the drawing's
+                    // reference (often lightweight) and may not even be reachable
+                    // via GetOpenDocumentByName, so the live read is unreliable.
+                    if (Path.GetExtension(referencedModel)
+                            .Equals(".sldasm", StringComparison.OrdinalIgnoreCase))
+                    {
+                        var unreleasedChildren =
+                            GetUnreleasedComponentsByPath(referencedModel);
+                        if (unreleasedChildren.Count > 0)
+                        {
+                            MessageBox.Show(
+                                "Cannot release Assembly Drawing — these " +
+                                "components of the referenced assembly are not " +
+                                "yet Released:\n\n• " +
+                                string.Join("\n• ", unreleasedChildren) + "\n\n" +
+                                "Release all components first, then release the " +
+                                "Assembly Drawing.",
+                                "BCore PDM — Release Blocked",
+                                MessageBoxButtons.OK,
+                                MessageBoxIcon.Stop);
+                            return;
+                        }
+                    }
                 }
             }
 
             // ── Assembly: check all child parts are Released first ────────
             if (docType == (int)swDocumentTypes_e.swDocASSEMBLY)
             {
-                var unreleased = GetUnreleasedComponents(doc);
+                // Read from disk so a lightweight-loaded assembly still reports
+                // its WIP children (the live GetComponents read misses them).
+                var unreleased = GetUnreleasedComponentsByPath(filePath);
                 if (unreleased.Count > 0)
                 {
                     MessageBox.Show(
@@ -143,6 +174,38 @@ namespace PDMLite
                         MessageBoxIcon.Stop);
                     return;
                 }
+
+                // ── Drawing-release gate ──────────────────────────────────
+                // Every component with a drawing must have it Released first.
+                // Manufactured parts with no drawing warn (override); Purchased
+                // and Toolbox parts with no drawing are skipped.
+                List<string> drwBlockers, drwWarnings;
+                EvaluateAssemblyDrawings(doc, out drwBlockers, out drwWarnings);
+
+                if (drwBlockers.Count > 0)
+                {
+                    MessageBox.Show(
+                        "Cannot release Assembly — these component drawings " +
+                        "are not yet Released:\n\n• " +
+                        string.Join("\n• ", drwBlockers) + "\n\n" +
+                        "Release the part drawings first, then release the Assembly.",
+                        "BCore PDM — Release Blocked",
+                        MessageBoxButtons.OK,
+                        MessageBoxIcon.Stop);
+                    return;
+                }
+
+                if (drwWarnings.Count > 0)
+                {
+                    var choice = MessageBox.Show(
+                        "These Manufactured components have NO drawing:\n\n• " +
+                        string.Join("\n• ", drwWarnings) + "\n\n" +
+                        "They may be missing a drawing. Release the Assembly anyway?",
+                        "BCore PDM — Missing Drawings",
+                        MessageBoxButtons.YesNo,
+                        MessageBoxIcon.Warning);
+                    if (choice != DialogResult.Yes) return;
+                }
             }
 
             // ── Validate properties (Parts and Assemblies only) ───────────
@@ -151,13 +214,33 @@ namespace PDMLite
                 var validation = PropertyValidator.Validate(doc);
                 if (!validation.IsValid)
                 {
-                    MessageBox.Show(
-                        "Cannot release — missing properties:\n\n• " +
-                        string.Join("\n• ", validation.EmptyFields),
-                        "BCore PDM — Release Blocked",
-                        MessageBoxButtons.OK,
-                        MessageBoxIcon.Stop);
-                    return;
+                    // Show PropertyForm so the Master can fill missing fields
+                    // without closing this dialog and doing a manual save first.
+                    using (var form = new PropertyForm(doc, validation.EmptyFields))
+                    {
+                        form.ShowDialog();
+                        if (!form.PropertiesSaved)
+                        {
+                            MessageBox.Show(
+                                "Release blocked — required properties incomplete:\n\n• " +
+                                string.Join("\n• ", validation.EmptyFields),
+                                "BCore PDM — Release Blocked",
+                                MessageBoxButtons.OK,
+                                MessageBoxIcon.Stop);
+                            return;
+                        }
+                    }
+                    var recheck = PropertyValidator.Validate(doc);
+                    if (!recheck.IsValid)
+                    {
+                        MessageBox.Show(
+                            "Release blocked — required properties still incomplete:\n\n• " +
+                            string.Join("\n• ", recheck.EmptyFields),
+                            "BCore PDM — Release Blocked",
+                            MessageBoxButtons.OK,
+                            MessageBoxIcon.Stop);
+                        return;
+                    }
                 }
             }
 
@@ -329,11 +412,39 @@ namespace PDMLite
             // state until the user manually closes and reopens the file.
             try
             {
+                // If this is a part/assembly and its drawing is open, the open
+                // drawing holds a reference to the model, so CloseDoc(model) is
+                // refused — the model never closes and never adopts the read-only
+                // flag. Pre-close the drawing first, then reopen it afterwards.
+                bool drwWasOpen = false;
+                string drwPreClose = !isDrawing ? FindDrawingPath(filePath) : null;
+                if (drwPreClose != null)
+                {
+                    ModelDoc2 openDrwCheck = PDMLiteAddin.SwApp
+                        ?.GetOpenDocumentByName(drwPreClose) as ModelDoc2;
+                    if (openDrwCheck != null)
+                    {
+                        drwWasOpen = true;
+                        try { PDMLiteAddin.SwApp.CloseDoc(drwPreClose); } catch { }
+                    }
+                }
+
                 PDMLiteAddin.SwApp.CloseDoc(filePath);
                 int errs = 0, warnings = 0;
                 PDMLiteAddin.SwApp.OpenDoc6(filePath, docType,
                     (int)swOpenDocOptions_e.swOpenDocOptions_Silent,
                     "", ref errs, ref warnings);
+
+                // Reopen the drawing if we pre-closed it. It is also Released
+                // (or will be released next), so it opens read-only too.
+                if (drwWasOpen && drwPreClose != null)
+                {
+                    int eDrw = 0, wDrw = 0;
+                    PDMLiteAddin.SwApp.OpenDoc6(drwPreClose,
+                        (int)swDocumentTypes_e.swDocDRAWING,
+                        (int)swOpenDocOptions_e.swOpenDocOptions_Silent,
+                        "", ref eDrw, ref wDrw);
+                }
             }
             catch { }
         }
@@ -387,9 +498,26 @@ namespace PDMLite
                 Path.GetFileNameWithoutExtension(filePath) +
                 " REV " + currentRev +
                 Path.GetExtension(filePath);
-            File.Copy(filePath,
-                Path.Combine(swArchive, archiveName),
-                overwrite: true);
+            ArchiveCopy(filePath, Path.Combine(swArchive, archiveName));
+
+            // If the drawing is open, close it BEFORE we close/reopen the part.
+            // When a drawing is open and references the part, OpenDoc6 on the part
+            // may load it as a lightweight reference of the drawing (read-only
+            // context) rather than a standalone writable document, causing Save3
+            // to silently fail and leaving the revision letter unchanged on disk.
+            // We reopen it below once the model is saved and returned to WIP.
+            bool drwWasOpen = false;
+            string drwPreClose = ext != ".slddrw" ? FindDrawingPath(filePath) : null;
+            if (drwPreClose != null)
+            {
+                ModelDoc2 openDrwCheck = PDMLiteAddin.SwApp
+                    ?.GetOpenDocumentByName(drwPreClose) as ModelDoc2;
+                if (openDrwCheck != null)
+                {
+                    drwWasOpen = true;
+                    try { PDMLiteAddin.SwApp.CloseDoc(drwPreClose); } catch { }
+                }
+            }
 
             // CRITICAL: the file was opened read-only (it was Released), so
             // SOLIDWORKS keeps it in read-only mode internally and silently
@@ -402,7 +530,16 @@ namespace PDMLite
             ModelDoc2 fresh = PDMLiteAddin.SwApp.OpenDoc6(filePath, reopenType,
                 (int)swOpenDocOptions_e.swOpenDocOptions_Silent,
                 "", ref oErr, ref oWarn) as ModelDoc2;
-            if (fresh == null) fresh = PDMLiteAddin.SwApp.ActiveDoc as ModelDoc2;
+
+            // OpenDoc6 can return null or the wrong doc on some SW versions even
+            // when the file opened successfully (e.g. another doc becomes ActiveDoc
+            // during the reopen). Always verify by path.
+            if (fresh == null || !string.Equals(
+                    fresh.GetPathName(), filePath,
+                    StringComparison.OrdinalIgnoreCase))
+            {
+                fresh = PDMLiteAddin.SwApp.GetOpenDocumentByName(filePath) as ModelDoc2;
+            }
 
             if (fresh == null)
             {
@@ -427,11 +564,45 @@ namespace PDMLite
             DatabaseManager.SetFileStatus(filePath, "WIP", user,
                 "New revision started: REV " + nextRev);
 
-            MessageBox.Show(
-                "Revision bumped to REV " + nextRev + ".\nFile is now back in WIP and ready to edit.",
-                "BCore PDM",
-                MessageBoxButtons.OK,
-                MessageBoxIcon.Information);
+            // ── Auto-start the associated drawing revision (Option B) ─────
+            // Done AFTER the model is writable/bumped so the drawing reopens
+            // against the new model state. Skipped if THIS file is a drawing
+            // (it was already handled as the primary file above).
+            string drwSummary = ext == ".slddrw"
+                ? "n/a (this file is a drawing)"
+                : StartDrawingRevisionWith(filePath, currentRev, nextRev, user);
+
+            // Reopen the drawing if we pre-closed it above. By this point
+            // the drawing's read-only flag is cleared and the DB is WIP, so
+            // it reopens as a writable document referencing the updated part.
+            if (drwWasOpen && drwPreClose != null)
+            {
+                try
+                {
+                    int eDrw = 0, wDrw = 0;
+                    PDMLiteAddin.SwApp.OpenDoc6(drwPreClose,
+                        (int)swDocumentTypes_e.swDocDRAWING,
+                        (int)swOpenDocOptions_e.swOpenDocOptions_Silent,
+                        "", ref eDrw, ref wDrw);
+                }
+                catch { }
+            }
+
+            // ── Warn about parent assemblies that use this file ───────────
+            List<string> parents = GetParentAssemblies(filePath);
+
+            // ── Build summary message ─────────────────────────────────────
+            string msg = "Revision bumped to REV " + nextRev +
+                ".\nFile is now back in WIP and ready to edit.\n";
+
+            msg += "\nDrawing: " + (drwSummary ?? "none found (no matching .slddrw)");
+
+            if (parents.Count > 0)
+                msg += "\n\nUsed in these assemblies — review and re-release " +
+                       "when ready:\n  • " + string.Join("\n  • ", parents);
+
+            MessageBox.Show(msg, "BCore PDM",
+                MessageBoxButtons.OK, MessageBoxIcon.Information);
         }
 
         // ── HELPERS ───────────────────────────────────────────────────────
@@ -456,6 +627,247 @@ namespace PDMLite
             return idx >= 0 && idx < revs.Length - 1
                 ? revs[idx + 1] : current + "1";
         }
+
+        // ════════════════════════════════════════════════════════════════
+        //  Drawing / Assembly linkage helpers
+        // ════════════════════════════════════════════════════════════════
+
+        // Locate the drawing for a part/assembly by the convention that the
+        // drawing shares the model's base filename (e.g. TEST 1.sldprt →
+        // TEST 1.slddrw). Searches the model's own folder first, then every
+        // WIP division. Returns null if no matching drawing exists.
+        private static string FindDrawingPath(string modelPath)
+        {
+            try
+            {
+                if (string.IsNullOrEmpty(modelPath)) return null;
+                string name = Path.GetFileNameWithoutExtension(modelPath);
+                string dir = Path.GetDirectoryName(modelPath);
+
+                var searchDirs = new List<string>();
+                if (!string.IsNullOrEmpty(dir)) searchDirs.Add(dir);
+                foreach (string div in DatabaseManager.WipDivisions)
+                    searchDirs.Add(Path.Combine(WipFolder, div));
+
+                foreach (string sd in searchDirs)
+                {
+                    string candidate = Path.Combine(sd, name + ".slddrw");
+                    if (File.Exists(candidate)) return candidate;
+                }
+            }
+            catch { }
+            return null;
+        }
+
+        // Returns filenames of tracked assemblies that reference the given file
+        // (directly or via a sub-assembly). Best-effort: relies on the
+        // reference paths stored inside each assembly matching the vault path
+        // format. GetDocumentDependencies2 reads the file from disk WITHOUT
+        // opening it in the UI.
+        private static List<string> GetParentAssemblies(string filePath)
+        {
+            var parents = new List<string>();
+            try
+            {
+                string target;
+                try { target = Path.GetFullPath(filePath); }
+                catch { target = filePath; }
+
+                foreach (string asmPath in
+                         DatabaseManager.GetTrackedFilePathsByExtension(".sldasm"))
+                {
+                    try
+                    {
+                        if (string.Equals(Path.GetFullPath(asmPath), target,
+                                StringComparison.OrdinalIgnoreCase))
+                            continue; // skip self
+                    }
+                    catch { }
+                    if (!File.Exists(asmPath)) continue;
+
+                    // Returns a string array alternating: name, path, name, path…
+                    object depsObj = PDMLiteAddin.SwApp.GetDocumentDependencies2(
+                        asmPath, true, true, false);
+                    string[] deps = depsObj as string[];
+                    if (deps == null) continue;
+
+                    for (int i = 1; i < deps.Length; i += 2)
+                    {
+                        if (string.IsNullOrEmpty(deps[i])) continue;
+                        string depPath;
+                        try { depPath = Path.GetFullPath(deps[i]); }
+                        catch { depPath = deps[i]; }
+                        if (string.Equals(depPath, target,
+                                StringComparison.OrdinalIgnoreCase))
+                        {
+                            parents.Add(Path.GetFileName(asmPath));
+                            break;
+                        }
+                    }
+                }
+            }
+            catch { }
+            return parents;
+        }
+
+        // When a part/assembly starts a new revision, its drawing (same
+        // basename) must follow (Option B — automatic). The drawing's revision
+        // LETTER syncs to the model at drawing-release time, so here we only
+        // archive the released drawing at the OLD rev and return it to WIP for
+        // editing. Returns a human-readable summary line, or null if there is
+        // no drawing at all.
+        private static string StartDrawingRevisionWith(
+            string modelPath, string currentRev, string nextRev, string user)
+        {
+            string drwPath = FindDrawingPath(modelPath);
+            if (drwPath == null) return null; // no drawing — nothing to do
+
+            string drwName = Path.GetFileName(drwPath);
+            string drwStatus = DatabaseManager.GetFileStatusByName(drwPath);
+            string result;
+
+            try
+            {
+                if (drwStatus == "Released")
+                {
+                    // Archive the released drawing at the OLD rev as a matched pair
+                    // with the model archive.
+                    string drwArchive = Path.Combine(ObsFolder, "DRAWINGS");
+                    Directory.CreateDirectory(drwArchive);
+                    string archiveName =
+                        Path.GetFileNameWithoutExtension(drwPath) +
+                        " REV " + currentRev + Path.GetExtension(drwPath);
+                    ArchiveCopy(drwPath, Path.Combine(drwArchive, archiveName));
+
+                    // Return the WIP drawing to an editable state.
+                    SetReadOnly(drwPath, false);
+                    DatabaseManager.UnlockFile(drwPath);
+                    DatabaseManager.SetFileStatus(drwPath, "WIP", user,
+                        "New revision started with model (auto)");
+                    result = drwName + " — returned to WIP for editing";
+                }
+                else
+                {
+                    result = drwName + " — already editable (" +
+                             (string.IsNullOrEmpty(drwStatus) ? "WIP" : drwStatus) + ")";
+                }
+
+                // Bump the drawing's Revision property to match the model's new
+                // revision immediately. The drawing is closed here (pre-closed in
+                // StartNewRevision to prevent the part reopening as a lightweight
+                // reference), so we open it silently, set the property, save, and
+                // close. If the user had it open, StartNewRevision reopens it after.
+                try
+                {
+                    int e2 = 0, w2 = 0;
+                    ModelDoc2 drwDoc = PDMLiteAddin.SwApp.OpenDoc6(drwPath,
+                        (int)swDocumentTypes_e.swDocDRAWING,
+                        (int)swOpenDocOptions_e.swOpenDocOptions_Silent,
+                        "", ref e2, ref w2) as ModelDoc2;
+                    if (drwDoc == null)
+                        drwDoc = PDMLiteAddin.SwApp
+                            .GetOpenDocumentByName(drwPath) as ModelDoc2;
+                    if (drwDoc != null)
+                    {
+                        PropertyValidator.SetProperty(drwDoc, "Revision", nextRev);
+                        PDMLiteAddin.SuppressSaveValidation = true;
+                        try { drwDoc.Save3(
+                            (int)swSaveAsOptions_e.swSaveAsOptions_Silent, 0, 0); }
+                        finally { PDMLiteAddin.SuppressSaveValidation = false; }
+                        PDMLiteAddin.SwApp.CloseDoc(drwPath);
+                    }
+                }
+                catch { }
+
+                return result;
+            }
+            catch (Exception ex)
+            {
+                return drwName + " — could not auto-revise (" + ex.Message + ")";
+            }
+        }
+
+        // Heuristic SOLIDWORKS-Toolbox detection: standard Toolbox parts live
+        // under a "\Toolbox\" folder. Version-independent and safe. The primary
+        // classification mechanism is the PartType property; this is a secondary
+        // net for parts pulled from the SW Toolbox library.
+        private static bool IsToolboxComponent(Component2 comp)
+        {
+            try
+            {
+                string p = comp.GetPathName();
+                return !string.IsNullOrEmpty(p) &&
+                    p.IndexOf(@"\Toolbox\", StringComparison.OrdinalIgnoreCase) >= 0;
+            }
+            catch { return false; }
+        }
+
+        // Reads the PartType property (Manufactured/Purchased) from a loaded
+        // component. Returns "" if it cannot be read (lightweight/suppressed).
+        private static string GetComponentPartType(Component2 comp)
+        {
+            try
+            {
+                ModelDoc2 cd = comp.GetModelDoc2() as ModelDoc2;
+                if (cd == null) return "";
+                return PropertyValidator.GetProperty(cd, "PartType");
+            }
+            catch { return ""; }
+        }
+
+        // Evaluates every component of an assembly against the drawing-release
+        // gate. Populates:
+        //   blockers — components whose drawing exists but is NOT Released
+        //   warnings — Manufactured components with NO drawing (override allowed)
+        // Toolbox and Purchased-with-no-drawing components are skipped silently.
+        private static void EvaluateAssemblyDrawings(
+            ModelDoc2 doc, out List<string> blockers, out List<string> warnings)
+        {
+            blockers = new List<string>();
+            warnings = new List<string>();
+            var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+            try
+            {
+                AssemblyDoc asm = (AssemblyDoc)doc;
+                object[] components = (object[])asm.GetComponents(false);
+                if (components == null) return;
+
+                foreach (object obj in components)
+                {
+                    Component2 comp = obj as Component2;
+                    if (comp == null) continue;
+                    if (comp.IsSuppressed()) continue;
+
+                    string path = comp.GetPathName();
+                    if (string.IsNullOrEmpty(path)) continue;
+                    if (!seen.Add(path)) continue;      // dedupe repeated instances
+                    if (IsToolboxComponent(comp)) continue;
+
+                    string compName = Path.GetFileName(path);
+                    string drwPath = FindDrawingPath(path);
+
+                    if (drwPath != null)
+                    {
+                        // Drawing exists → must be Released (Purchased or not).
+                        string st = DatabaseManager.GetFileStatusByName(drwPath);
+                        if (st != "Released")
+                            blockers.Add(Path.GetFileName(drwPath) + " — " +
+                                (string.IsNullOrEmpty(st) ? "WIP" : st));
+                    }
+                    else
+                    {
+                        // No drawing → only warn for Manufactured parts.
+                        string pType = GetComponentPartType(comp);
+                        if (!string.Equals(pType, "Purchased",
+                                StringComparison.OrdinalIgnoreCase))
+                            warnings.Add(compName);
+                    }
+                }
+            }
+            catch { }
+        }
+
         // ── Move old exports to archive before releasing new revision ─
         private static void ArchiveOldExports(string fileIdentifier,
                                                bool isDrawing)
@@ -591,7 +1003,7 @@ namespace PDMLite
                     " REV " + currentRev + ext;
                 string currentArchivePath = Path.Combine(
                     archivePath, currentArchiveName);
-                File.Copy(filePath, currentArchivePath, overwrite: true);
+                ArchiveCopy(filePath, currentArchivePath);
 
                 // ── Step 3: Remove read-only from archived file ───────────
                 SetReadOnly(selectedFile, false);
@@ -619,11 +1031,93 @@ namespace PDMLite
                 DatabaseManager.SetFileStatus(filePath, "Released", user,
                     "Rolled back to " + targetRev);
 
-                MessageBox.Show(
+                // ── Step 9: Offer to roll back the matching drawing ───────
+                // Drawings are archived as a matched pair with the model, so a
+                // drawing archive at the same revision should exist if one was
+                // ever released. Restoring it keeps part + drawing consistent.
+                // Skipped when THIS file is itself a drawing (already restored).
+                string drwSummary = ext == ".slddrw"
+                    ? "n/a (this file is a drawing)"
+                    : "no matching drawing archive found";
+                string targetLetter = targetRev
+                    .Replace("REV", "").Replace("rev", "").Trim();
+                string drwArchiveDir = Path.Combine(ObsFolder, "DRAWINGS");
+                string drwArchiveFile = Path.Combine(drwArchiveDir,
+                    fileName + " REV " + targetLetter + ".slddrw");
+
+                if (ext != ".slddrw" && File.Exists(drwArchiveFile))
+                {
+                    var drwChoice = MessageBox.Show(
+                        "A matching drawing archive was found:\n" +
+                        Path.GetFileName(drwArchiveFile) + "\n\n" +
+                        "Roll the drawing back to " + targetRev + " as well?",
+                        "BCore PDM — Roll Back Drawing",
+                        MessageBoxButtons.YesNo, MessageBoxIcon.Question);
+
+                    if (drwChoice == DialogResult.Yes)
+                    {
+                        try
+                        {
+                            string drwTarget = FindDrawingPath(filePath) ??
+                                Path.Combine(Path.GetDirectoryName(filePath),
+                                    fileName + ".slddrw");
+
+                            // Archive the current drawing before overwriting it.
+                            if (File.Exists(drwTarget))
+                            {
+                                SetReadOnly(drwTarget, false);
+                                ArchiveCopy(drwTarget, Path.Combine(drwArchiveDir,
+                                    fileName + " REV " + currentRev + ".slddrw"));
+                            }
+
+                            // Restore the archived drawing to the WIP path.
+                            SetReadOnly(drwArchiveFile, false);
+                            File.Copy(drwArchiveFile, drwTarget, overwrite: true);
+
+                            // Mirror into the RELEASED folder snapshot.
+                            string drwReleased = Path.Combine(RelFolder,
+                                fileName + ".slddrw");
+                            if (File.Exists(drwReleased))
+                            {
+                                SetReadOnly(drwReleased, false);
+                                File.Copy(drwArchiveFile, drwReleased, overwrite: true);
+                                SetReadOnly(drwReleased, true);
+                            }
+
+                            SetReadOnly(drwTarget, true);
+                            DatabaseManager.LockFile(drwTarget, user);
+                            DatabaseManager.SetFileStatus(drwTarget, "Released",
+                                user, "Drawing rolled back to " + targetRev);
+
+                            drwSummary = Path.GetFileName(drwTarget) +
+                                " → " + targetRev;
+                        }
+                        catch (Exception dex)
+                        {
+                            drwSummary = "drawing rollback failed: " + dex.Message;
+                        }
+                    }
+                    else
+                    {
+                        drwSummary = "drawing left unchanged (you declined)";
+                    }
+                }
+
+                // ── Step 10: Warn about parent assemblies ─────────────────
+                List<string> parents = GetParentAssemblies(filePath);
+
+                string rbMsg =
                     "Rollback Successful!\n\n" +
                     "Restored : " + targetRev + "\n" +
                     "Archived : REV " + currentRev + "\n\n" +
-                    "Please close and reopen the file\nto see the restored version.",
+                    "Drawing: " + drwSummary + "\n\n" +
+                    "Please close and reopen the file\nto see the restored version.";
+
+                if (parents.Count > 0)
+                    rbMsg += "\n\nUsed in these assemblies — review when ready:" +
+                             "\n  • " + string.Join("\n  • ", parents);
+
+                MessageBox.Show(rbMsg,
                     "BCore PDM — Rollback Complete",
                     MessageBoxButtons.OK,
                     MessageBoxIcon.Information);
@@ -638,35 +1132,63 @@ namespace PDMLite
             }
         }
         // ── Get list of unreleased components in an assembly ──────────
-        private static List<string> GetUnreleasedComponents(ModelDoc2 doc)
+        // Disk-based component release check. Reads the assembly's dependency
+        // tree straight from the file via GetDocumentDependencies2 (no UI open
+        // required), so it is independent of how the assembly is loaded — a
+        // lightweight assembly, or one loaded only as a drawing's reference,
+        // would cause the live GetComponents read above to miss WIP children.
+        // Returns "<filename>  —  <status>" for every tracked component that is
+        // not Released. Toolbox/standard hardware is skipped (not vault-managed).
+        // Best-effort: relies on the reference paths stored in the assembly
+        // matching the vault path format the DB tracks (same caveat as
+        // GetParentAssemblies); an unmatched path reads as WIP and blocks.
+        private static List<string> GetUnreleasedComponentsByPath(string asmPath)
         {
             var unreleased = new List<string>();
+            var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             try
             {
-                AssemblyDoc asm = (AssemblyDoc)doc;
-                object[] components = (object[])asm.GetComponents(false);
+                if (string.IsNullOrEmpty(asmPath) || !File.Exists(asmPath))
+                    return unreleased;
 
-                if (components == null) return unreleased;
+                string asmNorm;
+                try { asmNorm = Path.GetFullPath(asmPath); }
+                catch { asmNorm = asmPath; }
 
-                foreach (object obj in components)
+                // Alternating array: name, path, name, path…
+                object depsObj = PDMLiteAddin.SwApp.GetDocumentDependencies2(
+                    asmPath, true, true, false);
+                string[] deps = depsObj as string[];
+                if (deps == null) return unreleased;
+
+                for (int i = 1; i < deps.Length; i += 2)
                 {
-                    Component2 comp = (Component2)obj;
-                    if (comp == null) continue;
-
-                    string path = comp.GetPathName();
+                    string path = deps[i];
                     if (string.IsNullOrEmpty(path)) continue;
 
-                    // Skip suppressed or lightweight components
-                    if (comp.IsSuppressed()) continue;
+                    // Skip Toolbox / standard hardware — not vault-managed.
+                    if (path.IndexOf("\\Toolbox\\",
+                            StringComparison.OrdinalIgnoreCase) >= 0)
+                        continue;
 
-                    string status = DatabaseManager.GetFileStatus(path);
-                    string fileName = Path.GetFileName(path);
+                    string norm;
+                    try { norm = Path.GetFullPath(path); }
+                    catch { norm = path; }
 
+                    // Skip the assembly itself and any duplicate instances.
+                    if (string.Equals(norm, asmNorm,
+                            StringComparison.OrdinalIgnoreCase)) continue;
+                    if (!seen.Add(norm)) continue;
+
+                    string ext = Path.GetExtension(norm).ToLower();
+                    if (ext != ".sldprt" && ext != ".sldasm") continue;
+
+                    string status = DatabaseManager.GetFileStatus(norm);
                     if (status != "Released")
                     {
                         string statusLabel = string.IsNullOrEmpty(status)
                             ? "WIP" : status;
-                        unreleased.Add(fileName + "  —  " + statusLabel);
+                        unreleased.Add(Path.GetFileName(norm) + "  —  " + statusLabel);
                     }
                 }
             }
@@ -1085,6 +1607,23 @@ namespace PDMLite
                         attrs & ~FileAttributes.ReadOnly);
             }
             catch { }
+        }
+
+        // ── Copy a file into an archive/destination, overwriting safely ──
+        // File.Copy(overwrite:true) throws UnauthorizedAccessException
+        // ("Access to the path is denied") when the destination already
+        // exists AND is read-only. Archived and released copies are read-only
+        // (File.Copy preserves the attribute), so re-archiving the same
+        // revision — common during testing or after a rollback — hits this.
+        // Clear the flag and delete the stale file first, then copy.
+        private static void ArchiveCopy(string source, string dest)
+        {
+            if (File.Exists(dest))
+            {
+                SetReadOnly(dest, false);
+                File.Delete(dest);
+            }
+            File.Copy(source, dest);
         }
     }
 }

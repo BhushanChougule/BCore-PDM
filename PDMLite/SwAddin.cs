@@ -123,22 +123,37 @@ namespace PDMLite
             catch { }
         }
 
-        // Called from DocEventHandler.OnDestroy. Removes stale handler then
-        // immediately re-scans open docs so any still-open file gets re-hooked.
+        // Called from DocEventHandler.OnDestroy. Removes the stale handler, then
+        // re-scans open docs and refreshes the task pane — but DEFERRED.
         internal void OnDocDestroyed(string id)
         {
             _docHandlers.Remove(id);
-            // Re-hook: DestroyNotify sometimes fires spuriously (e.g. when the
-            // Custom Properties task pane opens). Re-scanning immediately ensures
-            // the document gets re-registered if it is still open.
-            HookAllOpenDocs();
-            // ActiveDocChangeNotify does not fire when the last document closes,
-            // so refresh here. Must be DEFERRED: at DestroyNotify time the doc is
-            // still mid-close (ActiveDoc and GetDocuments still report it), so a
-            // synchronous refresh would read stale state. RefreshPanelDeferred
-            // re-evaluates ActiveDoc after the close completes — null when no
-            // files remain (clears the panel), or the next open doc.
-            _taskPane?.RefreshPanelDeferred();
+
+            // BOTH the re-hook and the refresh must run AFTER the close settles,
+            // not synchronously here. At DestroyNotify time the doc is still
+            // mid-close: GetDocuments() and ActiveDoc still report it. A
+            // synchronous HookAllOpenDocs() would therefore re-bind the doc's
+            // path id to the DYING doc object. When a vault operation
+            // (Release / New Revision / Rollback / Unlock) immediately reopens
+            // the file via OpenDoc6, TryHookDoc sees the id already present and
+            // SKIPS hooking the fresh doc — leaving it with no DestroyNotify
+            // handler, so closing it later never clears the task pane.
+            //
+            // Deferring runs this after CloseDoc (and any immediate OpenDoc6)
+            // completes: the dead doc is gone, the fresh doc gets hooked, and
+            // ActiveDoc is correct (null when nothing remains → panel clears).
+            if (_taskPane != null)
+            {
+                _taskPane.RunDeferred(() =>
+                {
+                    HookAllOpenDocs();
+                    _taskPane.RefreshPanel();
+                });
+            }
+            else
+            {
+                HookAllOpenDocs();
+            }
         }
 
         // ── Pre-save validation ───────────────────────────────────────────────
