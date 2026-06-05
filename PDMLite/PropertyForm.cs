@@ -24,7 +24,8 @@ namespace PDMLite
             { "DrawnDate",   "Drawn Date"     },
             { "Material",   "Material"       },
             { "FinishType",  "Finish Type"    },
-            { "Revision",    "Revision"       }
+            { "Revision",    "Revision"       },
+            { "PartType",    "Part Type"      }
         };
 
         private static readonly Dictionary<string, string[]> Dropdowns =
@@ -66,6 +67,12 @@ namespace PDMLite
                 "-- Select --",
                 "A","B","C","D","E","F","G","H","J","K","L","M",
                 "N","P","R","T","U","V","W","Y","Z"
+            }},
+            // PartType has NO "-- Select --" sentinel: index 0 (Manufactured)
+            // is a valid default so the field never blocks a save by default.
+            { "PartType", new[] {
+                "Manufactured",
+                "Purchased"
             }}
         };
 
@@ -251,6 +258,19 @@ namespace PDMLite
             this.Height = y + 340;
         }
 
+        // Reads a ComboBox's value. Dropdowns whose first item is the
+        // "-- Select --" sentinel treat index 0 as "not chosen" (empty).
+        // Dropdowns without the sentinel (e.g. PartType) have a valid value
+        // at index 0, so we return the selected item directly.
+        private static string ComboValue(ComboBox cb)
+        {
+            bool hasSentinel = cb.Items.Count > 0 &&
+                string.Equals(cb.Items[0]?.ToString(), "-- Select --",
+                    StringComparison.Ordinal);
+            if (hasSentinel && cb.SelectedIndex <= 0) return "";
+            return cb.SelectedItem?.ToString() ?? "";
+        }
+
         private void OnSaveClick(object sender, EventArgs e)
         {
             var stillEmpty = new List<string>();
@@ -264,7 +284,7 @@ namespace PDMLite
                 if (ctrl is TextBox tb)
                     value = tb.Text.Trim();
                 else if (ctrl is ComboBox cb)
-                    value = cb.SelectedIndex <= 0 ? "" : cb.SelectedItem?.ToString() ?? "";
+                    value = ComboValue(cb);
                 else if (ctrl is DateTimePicker dtp)
                     value = dtp.Value.ToString("MM/dd/yyyy");
 
@@ -299,7 +319,7 @@ namespace PDMLite
                 if (ctrl is TextBox tb)
                     value = tb.Text.Trim();
                 else if (ctrl is ComboBox cb)
-                    value = cb.SelectedItem?.ToString() ?? "";
+                    value = ComboValue(cb);
                 else if (ctrl is DateTimePicker dtp)
                     value = dtp.Value.ToString("MM/dd/yyyy");
 

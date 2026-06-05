@@ -82,7 +82,9 @@ N:\\PDM-SolidWorks\\
 
 \## Required Custom Properties (Configuration-Specific)
 
-PartNo, DrawingNo, Description, DrawnBy, DrawnDate, Material1, FinishType, Revision
+PartNo, DrawingNo, Description, DrawnBy, DrawnDate, Material1, FinishType, Revision, PartType
+
+\- PartType = Manufactured | Purchased (defaults to Manufactured). Drives the assembly drawing-release gate: a Manufactured part with no drawing warns (override); a Purchased part with no drawing is skipped. Applies to parts AND assemblies.
 
 \- PartWeight = auto-filled from mass properties
 
@@ -158,6 +160,10 @@ WinForms dialog for missing properties. Fixed sizes (not DPI-scaled, form is sho
 
 \- Revision uses ComboBox (full revision sequence A through Z, skipping I,O,Q,S,X)
 
+\- PartType uses ComboBox (Manufactured | Purchased) — NO "-- Select --" sentinel, so index 0 (Manufactured) is the valid default
+
+\- ComboValue(cb) helper: dropdowns with a "-- Select --" first item treat index 0 as empty; sentinel-less dropdowns (PartType) return the selected item directly
+
 
 
 \### DatabaseManager.cs
@@ -196,11 +202,23 @@ Core vault operations.
 
 \- UnlockFile(path) → Master only, sets status=WIP, removes read-only
 
-\- ReleaseFile(doc) → validates → exports → copies to RELEASED → sets read-only
+\- ReleaseFile(doc) → validates → (assembly) parts Released + drawing-release gate → exports → copies to RELEASED → sets read-only
 
-\- StartNewRevision(doc) → removes read-only → archives → bumps rev → saves → sets WIP
+\- StartNewRevision(doc) → removes read-only → archives → bumps rev → saves → sets WIP → auto-starts associated drawing revision → warns about parent assemblies
 
-\- RollbackRevision(doc) → shows RollbackDialog → archives current → restores selected
+\- RollbackRevision(doc) → shows RollbackDialog → archives current → restores selected → offers matching drawing rollback (if archive exists) → warns about parent assemblies
+
+\- FindDrawingPath(modelPath) → finds {basename}.slddrw in the model folder or any WIP division; null if none (drawing filename MUST match the model basename)
+
+\- GetParentAssemblies(filePath) → scans tracked .sldasm files via GetDocumentDependencies2 (reads refs without opening); returns filenames of assemblies that reference the file. Best-effort — depends on stored ref paths matching vault path format
+
+\- StartDrawingRevisionWith(modelPath, currentRev, user) → archives the Released drawing at the old rev (matched pair), returns it to WIP, close/reopens if open. Drawing rev LETTER syncs to model at drawing-release time, not here
+
+\- EvaluateAssemblyDrawings(doc, out blockers, out warnings) → per component: Toolbox skipped; drawing exists+not Released → blocker; no drawing + Manufactured → warning; no drawing + Purchased → skipped. Dedupes repeated instances
+
+\- IsToolboxComponent(comp) → heuristic: path contains "\\Toolbox\\". Secondary net; PartType=Purchased is the authoritative mechanism
+
+\- GetComponentPartType(comp) → reads PartType from the loaded component model ("" if unreadable)
 
 \- RequestRevision(doc), RequestUnlock(doc), RequestRelease(doc) → Engineer requests with note dialog
 
@@ -434,9 +452,13 @@ auto-weight → duplicate part number → check refs → allow save → post-sav
 
 \### Master Release (Part/Assembly)
 
-validate properties → check broken refs → check assembly children released →
+validate properties → check broken refs → (assembly) check child parts Released →
 
-archive old exports → export STEP → copy to RELEASED → set read-only → update DB
+(assembly) drawing-release gate: each component with a drawing must have it Released
+
+(blocks); Manufactured components with no drawing warn (override); Purchased/Toolbox
+
+skipped → archive old exports → export STEP → copy to RELEASED → set read-only → update DB
 
 
 
@@ -452,7 +474,27 @@ export PDF (all sheets) → copy to RELEASED → set read-only → update DB
 
 remove read-only → archive SW file to ARCHIVE\\{type}\\ → bump revision letter →
 
-save → reset to WIP in DB
+save → reset to WIP in DB → auto-start associated drawing revision (archive drawing as
+
+matched pair at old rev, return to WIP — drawing rev letter syncs at drawing release) →
+
+warn about parent assemblies that reference this file
+
+
+
+\### Drawing / Assembly linkage (Option B — automatic)
+
+\- Drawing filename MUST match the part/assembly basename ({name}.slddrw). PDF export name still comes from the DrawingNo property.
+
+\- Part rev drives the drawing rev (part is the master). Drawing letter syncs to the model at drawing-release time.
+
+\- New Revision on a part/assembly auto-starts its drawing revision and warns which assemblies use it.
+
+\- Assembly release is gated: every component that HAS a drawing must have it Released first. Manufactured-with-no-drawing warns (override); Purchased/Toolbox with no drawing skipped.
+
+\- Enforced sequence: part drawings → parts → assembly → assembly drawing.
+
+\- Assemblies are NOT auto-revised when a child part revs — they reference parts by path and pick up changes on open; the warning lets the Master decide when to re-release.
 
 
 
@@ -460,9 +502,13 @@ save → reset to WIP in DB
 
 scan ARCHIVE\\{type}\\ for matching files → show RollbackDialog →
 
-archive current → restore selected → update RELEASED folder → 
+archive current → restore selected → update RELEASED folder → cleanup exports →
 
-cleanup exports → set read-only → update DB
+set read-only → update DB → if a matching drawing archive exists at the target rev,
+
+offer to roll the drawing back too (archives current drawing, restores, updates RELEASED) →
+
+warn about parent assemblies
 
 
 
@@ -547,6 +593,12 @@ GetNextRevision() in VaultManager.cs handles this
 \- Email notifications (Mailgun SMTP) on request submit/approve/reject — config at N:\\PDM-SolidWorks\\VAULT\\email.config; "Send Test Email" button sends to the logged-in user to verify the pipeline
 
 \- Duplicate part-number detection on save (warns with Yes/No override when another file already uses the same PartNo) — format validation deemed unfeasible due to 3 divisions with inconsistent numbering
+
+\- PartType property (Manufactured | Purchased, default Manufactured) on parts and assemblies
+
+\- Drawing/Assembly revision linkage: New Revision auto-starts the matching drawing revision and warns about parent assemblies; Rollback offers to roll the drawing back too
+
+\- Assembly drawing-release gate: component drawings must be Released before the assembly (Manufactured-with-no-drawing warns + override; Purchased/Toolbox skipped)
 
 
 

@@ -561,6 +561,25 @@ namespace PDMLite
             return entries;
         }
 
+        // Returns all tracked file paths whose name ends with the given
+        // extension (e.g. ".sldasm"). Used to scan for parent assemblies that
+        // reference a part without opening every file in the vault.
+        public static List<string> GetTrackedFilePathsByExtension(string ext)
+        {
+            var paths = new List<string>();
+            lock (_lock)
+            {
+                var doc = LoadOrCreate();
+                foreach (var el in doc.Root.Element("Files").Elements("File"))
+                {
+                    string fp = (string)el.Element("FilePath") ?? "";
+                    if (fp.EndsWith(ext, StringComparison.OrdinalIgnoreCase))
+                        paths.Add(fp);
+                }
+            }
+            return paths;
+        }
+
         // Returns the canonical (WIP/source) status for a file.
         // Falls back to filename match so RELEASED folder copies reflect correct status.
         public static string GetFileStatusByName(string filePath)

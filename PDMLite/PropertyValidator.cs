@@ -14,7 +14,10 @@ namespace PDMLite
 
     public static class PropertyValidator
     {
-        // Your 9 required properties (PartWeight is auto-filled so excluded)
+        // Required properties (PartWeight is auto-filled so excluded).
+        // PartType (Manufactured/Purchased) drives the assembly drawing-release
+        // gate — Purchased parts with no drawing are skipped, Manufactured ones
+        // are warned. Defaults to Manufactured in PropertyForm.
         public static readonly string[] RequiredProperties = new[]
         {
             "PartNo",
@@ -24,7 +27,8 @@ namespace PDMLite
             "DrawnDate",
             "Material",
             "FinishType",
-            "Revision"
+            "Revision",
+            "PartType"
         };
 
         // Check all required properties on the open document
