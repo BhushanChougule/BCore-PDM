@@ -511,7 +511,7 @@ namespace PDMLite
             // (it was already handled as the primary file above).
             string drwSummary = ext == ".slddrw"
                 ? "n/a (this file is a drawing)"
-                : StartDrawingRevisionWith(filePath, currentRev, user);
+                : StartDrawingRevisionWith(filePath, currentRev, nextRev, user);
 
             // Reopen the drawing if we pre-closed it above. By this point
             // the drawing's read-only flag is cleared and the DB is WIP, so
@@ -658,55 +658,69 @@ namespace PDMLite
         // editing. Returns a human-readable summary line, or null if there is
         // no drawing at all.
         private static string StartDrawingRevisionWith(
-            string modelPath, string currentRev, string user)
+            string modelPath, string currentRev, string nextRev, string user)
         {
             string drwPath = FindDrawingPath(modelPath);
             if (drwPath == null) return null; // no drawing — nothing to do
 
             string drwName = Path.GetFileName(drwPath);
             string drwStatus = DatabaseManager.GetFileStatusByName(drwPath);
-
-            // Only a Released drawing needs archiving + returning to WIP.
-            if (drwStatus != "Released")
-                return drwName + " — already editable (" +
-                       (string.IsNullOrEmpty(drwStatus) ? "WIP" : drwStatus) + ")";
+            string result;
 
             try
             {
-                // Archive the released drawing at the OLD rev as a matched pair
-                // with the model archive.
-                string drwArchive = Path.Combine(ObsFolder, "DRAWINGS");
-                Directory.CreateDirectory(drwArchive);
-                string archiveName =
-                    Path.GetFileNameWithoutExtension(drwPath) +
-                    " REV " + currentRev + Path.GetExtension(drwPath);
-                ArchiveCopy(drwPath, Path.Combine(drwArchive, archiveName));
-
-                // Return the WIP drawing to an editable state.
-                SetReadOnly(drwPath, false);
-                DatabaseManager.UnlockFile(drwPath);
-                DatabaseManager.SetFileStatus(drwPath, "WIP", user,
-                    "New revision started with model (auto)");
-
-                // If the drawing is open, close+reopen so SOLIDWORKS drops its
-                // cached read-only state and reloads the now-writable model.
-                ModelDoc2 openDrw = PDMLiteAddin.SwApp
-                    ?.GetOpenDocumentByName(drwPath) as ModelDoc2;
-                if (openDrw != null)
+                if (drwStatus == "Released")
                 {
-                    try
-                    {
-                        PDMLiteAddin.SwApp.CloseDoc(drwPath);
-                        int e2 = 0, w2 = 0;
-                        PDMLiteAddin.SwApp.OpenDoc6(drwPath,
-                            (int)swDocumentTypes_e.swDocDRAWING,
-                            (int)swOpenDocOptions_e.swOpenDocOptions_Silent,
-                            "", ref e2, ref w2);
-                    }
-                    catch { }
+                    // Archive the released drawing at the OLD rev as a matched pair
+                    // with the model archive.
+                    string drwArchive = Path.Combine(ObsFolder, "DRAWINGS");
+                    Directory.CreateDirectory(drwArchive);
+                    string archiveName =
+                        Path.GetFileNameWithoutExtension(drwPath) +
+                        " REV " + currentRev + Path.GetExtension(drwPath);
+                    ArchiveCopy(drwPath, Path.Combine(drwArchive, archiveName));
+
+                    // Return the WIP drawing to an editable state.
+                    SetReadOnly(drwPath, false);
+                    DatabaseManager.UnlockFile(drwPath);
+                    DatabaseManager.SetFileStatus(drwPath, "WIP", user,
+                        "New revision started with model (auto)");
+                    result = drwName + " — returned to WIP for editing";
+                }
+                else
+                {
+                    result = drwName + " — already editable (" +
+                             (string.IsNullOrEmpty(drwStatus) ? "WIP" : drwStatus) + ")";
                 }
 
-                return drwName + " — returned to WIP for editing";
+                // Bump the drawing's Revision property to match the model's new
+                // revision immediately. The drawing is closed here (pre-closed in
+                // StartNewRevision to prevent the part reopening as a lightweight
+                // reference), so we open it silently, set the property, save, and
+                // close. If the user had it open, StartNewRevision reopens it after.
+                try
+                {
+                    int e2 = 0, w2 = 0;
+                    ModelDoc2 drwDoc = PDMLiteAddin.SwApp.OpenDoc6(drwPath,
+                        (int)swDocumentTypes_e.swDocDRAWING,
+                        (int)swOpenDocOptions_e.swOpenDocOptions_Silent,
+                        "", ref e2, ref w2) as ModelDoc2;
+                    if (drwDoc == null)
+                        drwDoc = PDMLiteAddin.SwApp
+                            .GetOpenDocumentByName(drwPath) as ModelDoc2;
+                    if (drwDoc != null)
+                    {
+                        PropertyValidator.SetProperty(drwDoc, "Revision", nextRev);
+                        PDMLiteAddin.SuppressSaveValidation = true;
+                        try { drwDoc.Save3(
+                            (int)swSaveAsOptions_e.swSaveAsOptions_Silent, 0, 0); }
+                        finally { PDMLiteAddin.SuppressSaveValidation = false; }
+                        PDMLiteAddin.SwApp.CloseDoc(drwPath);
+                    }
+                }
+                catch { }
+
+                return result;
             }
             catch (Exception ex)
             {

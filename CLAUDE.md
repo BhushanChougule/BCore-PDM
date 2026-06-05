@@ -212,7 +212,7 @@ Core vault operations.
 
 \- GetParentAssemblies(filePath) → scans tracked .sldasm files via GetDocumentDependencies2 (reads refs without opening); returns filenames of assemblies that reference the file. Best-effort — depends on stored ref paths matching vault path format
 
-\- StartDrawingRevisionWith(modelPath, currentRev, user) → archives the Released drawing at the old rev (matched pair), returns it to WIP, close/reopens if open. Drawing rev LETTER syncs to model at drawing-release time, not here
+\- StartDrawingRevisionWith(modelPath, currentRev, nextRev, user) → archives the Released drawing at the old rev (matched pair), returns it to WIP, opens it silently to bump the Revision property to nextRev and save, then closes it. StartNewRevision reopens it if the user had it open. Drawing rev LETTER syncs to model immediately at New Revision time.
 
 \- EvaluateAssemblyDrawings(doc, out blockers, out warnings) → per component: Toolbox skipped; drawing exists+not Released → blocker; no drawing + Manufactured → warning; no drawing + Purchased → skipped. Dedupes repeated instances
 
@@ -486,7 +486,7 @@ warn about parent assemblies that reference this file
 
 \- Drawing filename MUST match the part/assembly basename ({name}.slddrw). PDF export name still comes from the DrawingNo property.
 
-\- Part rev drives the drawing rev (part is the master). Drawing letter syncs to the model at drawing-release time.
+\- Part rev drives the drawing rev (part is the master). Drawing letter syncs to the model immediately at New Revision time (StartDrawingRevisionWith opens the drawing, sets Revision = nextRev, saves, closes). The sync at drawing-release time is still a no-op confirmation.
 
 \- New Revision on a part/assembly auto-starts its drawing revision and warns which assemblies use it.
 
