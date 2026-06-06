@@ -804,6 +804,12 @@ namespace PDMLite
                     VaultManager.OpenReferencedModel(doc);
                 else
                     VaultManager.OpenOrCreateDrawing(doc);
+                // Defer refresh — ActiveDocChangeNotify fires during NewDocument
+                // before InsertModelInPredefinedView runs, so the initial refresh
+                // sees a blank drawing. BeginInvoke queues AFTER the full creation
+                // completes, so the views are set up and part no / label are correct.
+                BeginInvoke((Action)(() =>
+                    Refresh(PDMLiteAddin.SwApp?.ActiveDoc as ModelDoc2)));
                 return;
             }
             else if (action == "release") VaultManager.ReleaseFile(doc);

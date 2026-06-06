@@ -1492,6 +1492,31 @@ namespace PDMLite
                 }
             }
 
+            // No drawing found on disk — check if an unsaved new drawing is
+            // already open in memory for this model (prevents duplicate creation
+            // when the user clicks "Open Drawing" multiple times before saving).
+            object[] openDocs = PDMLiteAddin.SwApp.GetDocuments() as object[];
+            if (openDocs != null)
+            {
+                foreach (object obj in openDocs)
+                {
+                    ModelDoc2 openDoc = obj as ModelDoc2;
+                    if (openDoc == null) continue;
+                    if (openDoc.GetType() != (int)swDocumentTypes_e.swDocDRAWING) continue;
+                    if (!string.IsNullOrEmpty(openDoc.GetPathName())) continue;
+                    // Unsaved drawing — check if it was created for this model.
+                    string refModel = GetDrawingReferencedModel(openDoc);
+                    if (string.Equals(refModel, filePath,
+                            StringComparison.OrdinalIgnoreCase))
+                    {
+                        int ae = 0;
+                        PDMLiteAddin.SwApp.ActivateDoc3(openDoc.GetTitle(), false,
+                            (int)swRebuildOnActivation_e.swDontRebuildActiveDoc, ref ae);
+                        return;
+                    }
+                }
+            }
+
             // No drawing found — create one from the model immediately (no
             // prompt), the API equivalent of File > Make Drawing from Part/
             // Assembly. Open the default drawing template and populate its
