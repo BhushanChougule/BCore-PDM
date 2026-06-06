@@ -654,8 +654,18 @@ namespace PDMLite
 
             _statusVal.Text = string.IsNullOrEmpty(status) ? "WIP" : status;
             _statusVal.ForeColor = StatusColor(status);
-            _partNoVal.Text = isDrawing ? "Drawing" :
-                (string.IsNullOrEmpty(partNo) ? "—" : partNo);
+            // Drawings share the PartNo of the part/assembly they document —
+            // pull it from the referenced model so the card matches the part.
+            if (isDrawing)
+            {
+                string drwPartNo = VaultManager.GetDrawingPartNo(doc);
+                _partNoVal.Text = string.IsNullOrEmpty(drwPartNo)
+                    ? "Drawing" : drwPartNo;
+            }
+            else
+            {
+                _partNoVal.Text = string.IsNullOrEmpty(partNo) ? "—" : partNo;
+            }
             _revVal.Text = string.IsNullOrEmpty(rev) ? "—" : "REV " + rev;
             _lockedVal.Text = lockInfo.IsLocked ? lockInfo.LockedBy : "Not Locked";
             _lockedVal.ForeColor = lockInfo.IsLocked ? cRed : cGreen;

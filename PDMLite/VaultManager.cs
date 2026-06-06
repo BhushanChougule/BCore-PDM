@@ -1730,6 +1730,35 @@ namespace PDMLite
             return Path.GetFileNameWithoutExtension(drawingDoc.GetPathName());
         }
 
+        // ── Get PartNo of the model a drawing references ──────────────────
+        // A drawing shares the PartNo of the part/assembly it documents.
+        // Reads it from the referenced model (loaded as the drawing's
+        // reference), falling back to the drawing's own PartNo property, then
+        // "" if neither is available. Used by the task-pane Active File card.
+        public static string GetDrawingPartNo(ModelDoc2 drawingDoc)
+        {
+            try
+            {
+                string referencedPath = GetDrawingReferencedModel(drawingDoc);
+                if (!string.IsNullOrEmpty(referencedPath))
+                {
+                    ModelDoc2 refModel = PDMLiteAddin.SwApp
+                        .GetOpenDocumentByName(referencedPath) as ModelDoc2;
+                    if (refModel != null)
+                    {
+                        string pn = PropertyValidator.GetProperty(
+                            refModel, "PartNo");
+                        if (!string.IsNullOrEmpty(pn)) return pn;
+                    }
+                }
+            }
+            catch { }
+
+            // Fallback to the drawing's own PartNo property (inherited).
+            try { return PropertyValidator.GetProperty(drawingDoc, "PartNo"); }
+            catch { return ""; }
+        }
+
         // ── Get referenced model path from drawing ────────────────────────
         private static string GetDrawingReferencedModel(ModelDoc2 doc)
         {

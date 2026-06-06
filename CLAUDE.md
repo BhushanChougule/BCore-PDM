@@ -246,6 +246,8 @@ Core vault operations.
 
 \- GetDrawingNo(doc) → gets DrawingNo from referenced model
 
+\- GetDrawingPartNo(doc) → gets PartNo from the model a drawing references (falls back to the drawing's own PartNo, then ""); used by the task-pane Active File card so a drawing shows its part/assembly's number instead of literal "Drawing"
+
 \- GetDrawingReferencedModel(doc) → gets path of model referenced by drawing
 
 \- SetReadOnly(path, bool) → sets/removes OS-level FileAttributes.ReadOnly
