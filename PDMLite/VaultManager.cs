@@ -1500,6 +1500,19 @@ namespace PDMLite
                 0, 0, 0);
         }
 
+        // ── Label for the context-aware Open button when a drawing is active ─
+        // Returns "Open Part", "Open Assembly", or the generic fallback when the
+        // referenced model path can't be resolved.
+        public static string GetDrawingOpenLabel(ModelDoc2 drawingDoc)
+        {
+            string refPath = GetDrawingReferencedModel(drawingDoc);
+            if (string.IsNullOrEmpty(refPath)) return "Open Part/Assembly";
+            string ext = Path.GetExtension(refPath).ToLower();
+            if (ext == ".sldasm") return "Open Assembly";
+            if (ext == ".sldprt") return "Open Part";
+            return "Open Part/Assembly";
+        }
+
         // ── OPEN REFERENCED MODEL from a drawing ──────────────────────
         // The drawing → part/assembly counterpart of OpenOrCreateDrawing.
         // Opens (or activates, if already open) the part/assembly that the

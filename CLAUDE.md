@@ -302,6 +302,8 @@ Sections (top to bottom):
 
 Open Drawing button (both roles, cBrand) is CONTEXT-AWARE: DoAction("openlinked") opens the matching .slddrw when a part/assembly is active (creating one if none exists), or opens the referenced part/assembly when a drawing is active. Its label flips between "Open Drawing" and "Open Part/Assembly" in Refresh() based on the active doc type, kept in sync across both role variants by SetOpenLinkedLabel(). Replaced the Master Lock File button and the Engineer Update Drawings button.
 
+Open Drawing button label when a drawing is active: VaultManager.GetDrawingOpenLabel(doc) checks the referenced model's extension — shows "Open Part" for .sldprt, "Open Assembly" for .sldasm, falls back to "Open Part/Assembly" if the reference can't be resolved.
+
 6\. File History — Panel (\_historyPanel) with individual labels per entry, Height=S(300), y+=S(305)
 
 7\. PENDING REQUESTS button (Masters only) — shows count, opens PendingRequestsForm popup

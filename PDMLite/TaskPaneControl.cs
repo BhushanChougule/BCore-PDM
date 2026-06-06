@@ -683,7 +683,9 @@ namespace PDMLite
 
             // Context-aware Open button: a drawing opens its model, a part/
             // assembly opens its drawing. Both role variants stay in sync.
-            SetOpenLinkedLabel(isDrawing ? "Open Part/Assembly" : "Open Drawing");
+            SetOpenLinkedLabel(isDrawing
+                ? VaultManager.GetDrawingOpenLabel(doc)
+                : "Open Drawing");
 
             // File History
             var history = DatabaseManager.GetFileHistory(filePath);
