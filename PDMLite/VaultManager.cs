@@ -272,12 +272,21 @@ namespace PDMLite
         }
 
         // ── RELEASE ───────────────────────────────────────────────────────
-        public static void ReleaseFile(ModelDoc2 doc)
+        // suppressPrompts skips the confirm + success dialogs (used when this
+        // file is being released as part of a chained drawing+model release so
+        // the Master only confirms once). Validation/blocker dialogs still show.
+        public static void ReleaseFile(ModelDoc2 doc, bool suppressPrompts = false)
         {
             string user = PDMLiteAddin.CurrentUser;
             string filePath = doc.GetPathName();
             int docType = doc.GetType();
             bool isDrawing = docType == (int)swDocumentTypes_e.swDocDRAWING;
+
+            // Set when a WIP referenced model was released alongside this drawing
+            // (see the drawing gate below). Suppresses this drawing's own confirm
+            // dialog and swaps the success message for a combined one.
+            bool chainedRelease = false;
+            string chainedModelName = null;
 
             if (!IsMaster(user)) { NotMaster(); return; }
 
@@ -309,11 +318,15 @@ namespace PDMLite
 
                         var chain = MessageBox.Show(
                             "The referenced " + (isRefAsm ? "Assembly" : "Part") +
-                            " is not yet Released.\n\n" +
-                            "File   : " + modelName + "\n" +
-                            "Status : " + statusDisplay + "\n\n" +
-                            "Release it now, then release the Drawing?",
-                            "BCore PDM — Release Referenced Model",
+                            " is still " + statusDisplay + ".\n\n" +
+                            "Release BOTH files now?\n\n" +
+                            "  • " + modelName +
+                                "  (" + (isRefAsm ? "Assembly" : "Part") + ")\n" +
+                            "  • " + Path.GetFileName(filePath) + "  (Drawing)\n\n" +
+                            "Each file's properties and references are still " +
+                            "validated before release.",
+                            "BCore PDM — Release Drawing + " +
+                                (isRefAsm ? "Assembly" : "Part"),
                             MessageBoxButtons.YesNo, MessageBoxIcon.Question);
 
                         if (chain != DialogResult.Yes) return;
@@ -343,14 +356,22 @@ namespace PDMLite
                             return;
                         }
 
-                        // Release through the normal path — all validations apply.
-                        ReleaseFile(refDoc);
+                        // Release through the normal path — all validations apply,
+                        // but suppress its confirm/success dialogs: the Master
+                        // already confirmed both files in the prompt above.
+                        ReleaseFile(refDoc, suppressPrompts: true);
 
-                        // If the model release was blocked or cancelled by the user,
-                        // abort the drawing release too (no extra message needed —
-                        // ReleaseFile already explained what blocked it).
+                        // If the model release was blocked by a validation issue
+                        // (missing properties, broken refs, unreleased children),
+                        // abort the drawing release too — ReleaseFile already
+                        // explained what blocked it.
                         if (DatabaseManager.GetFileStatus(referencedModel) != "Released")
                             return;
+
+                        // Both files confirmed at once — skip this drawing's own
+                        // confirm dialog and show a single combined success.
+                        chainedRelease = true;
+                        chainedModelName = modelName;
 
                         // The model release closes/reopens the drawing (because the
                         // drawing is open and holds a reference to the model).
@@ -555,23 +576,28 @@ namespace PDMLite
             }
 
             // ── Confirm ───────────────────────────────────────────────────
+            // Skipped when suppressPrompts (chained model release) or chained
+            // (the Master already confirmed both files in the chain prompt).
             string fileTypeLabel = isDrawing ? "Drawing No" : "Part No";
-            var confirm = MessageBox.Show(
-                "Release this file?\n\n" +
-                fileTypeLabel + "  : " + partNo + "\n" +
-                "Revision      : REV " + rev + "\n" +
-                "File          : " + Path.GetFileName(filePath) + "\n\n" +
-                "This will:\n" +
-                (isDrawing
-                    ? "  • Export PDF\n"
-                    : "  • Auto-fill Part Weight\n  • Export STEP file\n") +
-                "  • Lock file as Released\n" +
-                "  • Log the revision",
-                "BCore PDM — Confirm Release",
-                MessageBoxButtons.YesNo,
-                MessageBoxIcon.Question);
+            if (!suppressPrompts && !chainedRelease)
+            {
+                var confirm = MessageBox.Show(
+                    "Release this file?\n\n" +
+                    fileTypeLabel + "  : " + partNo + "\n" +
+                    "Revision      : REV " + rev + "\n" +
+                    "File          : " + Path.GetFileName(filePath) + "\n\n" +
+                    "This will:\n" +
+                    (isDrawing
+                        ? "  • Export PDF\n"
+                        : "  • Auto-fill Part Weight\n  • Export STEP file\n") +
+                    "  • Lock file as Released\n" +
+                    "  • Log the revision",
+                    "BCore PDM — Confirm Release",
+                    MessageBoxButtons.YesNo,
+                    MessageBoxIcon.Question);
 
-            if (confirm != DialogResult.Yes) return;
+                if (confirm != DialogResult.Yes) return;
+            }
 
             // ── Auto-fill fields ──────────────────────────────────────────
             PropertyValidator.SetProperty(doc, "CheckedBy",
@@ -653,13 +679,29 @@ namespace PDMLite
             AuditLogger.Log("Release", user, Path.GetFileName(filePath),
                 partNo, rev);
 
-            MessageBox.Show(
-                "File Released Successfully!\n\n" +
-                fileTypeLabel + " : " + partNo + "  REV " + rev + "\n" +
-                "Exports saved to:\n" + ExportRoot,
-                "BCore PDM — Released",
-                MessageBoxButtons.OK,
-                MessageBoxIcon.Information);
+            if (chainedRelease)
+            {
+                // One combined dialog for the model + drawing released together.
+                MessageBox.Show(
+                    "Both files Released Successfully!\n\n" +
+                    "  • " + chainedModelName + "\n" +
+                    "  • " + Path.GetFileName(filePath) + "  (Drawing)\n\n" +
+                    "Revision : REV " + rev + "\n" +
+                    "Exports saved to:\n" + ExportRoot,
+                    "BCore PDM — Released",
+                    MessageBoxButtons.OK,
+                    MessageBoxIcon.Information);
+            }
+            else if (!suppressPrompts)
+            {
+                MessageBox.Show(
+                    "File Released Successfully!\n\n" +
+                    fileTypeLabel + " : " + partNo + "  REV " + rev + "\n" +
+                    "Exports saved to:\n" + ExportRoot,
+                    "BCore PDM — Released",
+                    MessageBoxButtons.OK,
+                    MessageBoxIcon.Information);
+            }
 
             // Close and reopen the WIP copy so SOLIDWORKS immediately adopts
             // the OS read-only flag. Without this, SW keeps its cached writable

@@ -212,7 +212,7 @@ Core vault operations.
 
 \- UnlockFile(path) → Master only, sets status=WIP, removes read-only
 
-\- ReleaseFile(doc) → validates → (assembly) parts Released + drawing-release gate → exports → copies to RELEASED → sets read-only
+\- ReleaseFile(doc, suppressPrompts=false) → validates → (assembly) parts Released + drawing-release gate → exports → copies to RELEASED → sets read-only. Releasing a Drawing whose model is still WIP offers ONE prompt to release both; on Yes the model is released via ReleaseFile(model, suppressPrompts:true) so the pair needs only a single confirm + single combined success. suppressPrompts skips the confirm + success dialogs only (blocker/validation dialogs still show)
 
 \- StartNewRevision(doc) → removes read-only → archives → bumps rev → saves → sets WIP → auto-starts associated drawing revision → warns about parent assemblies
 
@@ -504,17 +504,29 @@ skipped → archive old exports → export STEP → copy to RELEASED → set rea
 
 \### Master Release (Drawing)
 
-check referenced part is Released → if NOT Released: offer Yes/No to release it now →
+check referenced part is Released → if NOT Released: ONE Yes/No prompt to release BOTH
 
-Yes: open model if needed → ReleaseFile(model) (all validations apply, two success
+files now (lists model + drawing) → Yes: open model if needed → ReleaseFile(model,
 
-dialogs shown) → if model still not Released after that, abort drawing release; re-fetch
+suppressPrompts:true) (all validations still apply, but its own confirm + success
 
-drawing doc (model release closes/reopens the drawing) → (if referenced model is an
+dialogs are suppressed) → if model still not Released after that, abort drawing release;
 
-assembly) check all assembly components are Released → sync drawing revision with part
+re-fetch drawing doc (model release closes/reopens the drawing) → (if referenced model is
 
-revision → export PDF (all sheets) → copy to RELEASED → set read-only → update DB
+an assembly) check all assembly components are Released → sync drawing revision with part
+
+revision → export PDF (all sheets) → copy to RELEASED → set read-only → update DB → ONE
+
+combined success dialog ("Both files Released Successfully")
+
+\- Chained release = exactly one confirmation + one success popup for the model+drawing
+
+pair (no per-file confirm/success). ReleaseFile(doc, suppressPrompts=false) — when true,
+
+skips its confirm + success dialogs (used for the chained model release); validation and
+
+blocker dialogs still show.
 
 
 
