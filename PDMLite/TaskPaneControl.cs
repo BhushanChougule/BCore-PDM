@@ -48,6 +48,7 @@ namespace PDMLite
         private readonly Color cDark = Color.FromArgb(75, 80, 90);
         private readonly Color cRed = Color.FromArgb(180, 75, 75);
         private readonly Color cMaroon = Color.FromArgb(140, 60, 60);
+        private readonly Color cSwRed = Color.FromArgb(227, 30, 36); // SOLIDWORKS brand red
 
         public TaskPaneControl()
         {
@@ -382,7 +383,7 @@ namespace PDMLite
                 Width = w,
                 Height = S(24),
                 Location = new Point(x, y),
-                BackColor = cMaroon,
+                BackColor = cSwRed,
                 ForeColor = Color.White,
                 FlatStyle = FlatStyle.Flat,
                 Cursor = Cursors.Hand,

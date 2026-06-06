@@ -278,7 +278,7 @@ Color palette:
 
 \- cOrange(185,115,55), cPurple(105,100,165), cDark(75,80,90)
 
-\- cRed(180,75,75), cMaroon(140,60,60)
+\- cRed(180,75,75), cMaroon(140,60,60), cSwRed(227,30,36) — SOLIDWORKS brand red
 
 
 
@@ -300,7 +300,7 @@ Sections (top to bottom):
 
 8\. Send Test Email button (all users) — calls EmailManager.SendTestEmail, shows success/error in MessageBox
 
-9\. Remove from Vault button (Masters only, cMaroon) — DoAction("remove") → VaultManager.RemoveFromVault on the active file (moves to SCRAP + deletes record; blocked if Released)
+9\. Remove from Vault button (Masters only, cSwRed — SOLIDWORKS brand red) — DoAction("remove") → VaultManager.RemoveFromVault on the active file (moves to SCRAP + deletes record; blocked if Released)
 
 Search results are capped at 50; when SearchFiles reports truncated=true a "Showing first N — refine your search" hint is rendered below the cards.
 
