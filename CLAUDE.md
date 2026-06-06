@@ -182,7 +182,7 @@ Methods:
 
 \- GetUserRole, AddUser
 
-\- SearchFiles(term) → searches PartNumber + Description + FileName (all statuses: WIP, Locked, Released); returns the canonical WIP path; dedupes by filename as a safety net
+\- SearchFiles(term) → searches PartNumber + Description + FileName (all statuses: WIP, Locked, Released); returns the canonical WIP path; dedupes by filename as a safety net; skips orphaned records whose file no longer exists on disk (deleted outside PDM) — non-destructive, the DB entry is kept so a transient network outage can't drop vault history
 
 \- FindPartNumberConflict(partNo, excludeFilePath) → returns filename of another file using same PartNo (case-insensitive, trimmed), or null. Excludes the file being saved so it never conflicts with itself.
 

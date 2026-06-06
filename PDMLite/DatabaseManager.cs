@@ -370,24 +370,36 @@ namespace PDMLite
                     if (string.IsNullOrEmpty(status)) continue;
 
                     string fileName = (string)el.Element("FileName") ?? "";
-                    if (!seenFileNames.Add(fileName)) continue;
-
                     string partNo = ((string)el.Element("PartNumber") ?? "").ToLower();
                     string desc = ((string)el.Element("Description") ?? "").ToLower();
                     string fileNameLower = fileName.ToLower();
 
-                    if (partNo.Contains(term) || desc.Contains(term) || fileNameLower.Contains(term))
+                    if (!(partNo.Contains(term) || desc.Contains(term) ||
+                          fileNameLower.Contains(term)))
+                        continue;
+
+                    // Skip orphaned records whose file was deleted on disk
+                    // (e.g. removed straight from Explorer, outside PDM). The DB
+                    // entry is left intact — a transient network outage must not
+                    // permanently hide or drop vault history — we just don't show
+                    // a result that would fail with "File not found" on Open.
+                    string filePath = (string)el.Element("FilePath") ?? "";
+                    if (string.IsNullOrEmpty(filePath) || !System.IO.File.Exists(filePath))
+                        continue;
+
+                    // Deduplicate by filename as a safety net against legacy
+                    // vault.xml entries that have more than one record per file.
+                    if (!seenFileNames.Add(fileName)) continue;
+
+                    results.Add(new VaultFile
                     {
-                        results.Add(new VaultFile
-                        {
-                            FilePath = (string)el.Element("FilePath") ?? "",
-                            FileName = fileName,
-                            PartNumber = (string)el.Element("PartNumber") ?? "",
-                            Description = (string)el.Element("Description") ?? "",
-                            Status = status,
-                            Revision = (string)el.Element("Revision") ?? ""
-                        });
-                    }
+                        FilePath = filePath,
+                        FileName = fileName,
+                        PartNumber = (string)el.Element("PartNumber") ?? "",
+                        Description = (string)el.Element("Description") ?? "",
+                        Status = status,
+                        Revision = (string)el.Element("Revision") ?? ""
+                    });
                 }
             }
 
