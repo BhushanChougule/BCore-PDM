@@ -139,42 +139,24 @@ namespace PDMLite
             string rev = PropertyValidator.GetProperty(doc, "Revision");
             string drawingNo = PropertyValidator.GetProperty(doc, "DrawingNo");
 
-            // Associated drawing (models only). A Released drawing can't be
-            // removed (same guard as above) — warn and keep it; otherwise offer.
+            // Associated drawing (models only). Always scrapped together with
+            // the model — a drawing without its referenced model is blank and
+            // useless. Released drawings are NOT exempt: the Released status
+            // becomes meaningless without the model they document.
             string drwPath = isDrawing ? null : FindDrawingPath(filePath);
-            bool removeDrawing = false;
-            string drwReleasedWarn = null;
-            if (drwPath != null)
-            {
-                string drwStatus = DatabaseManager.GetFileStatusByName(drwPath);
-                if (string.Equals(drwStatus, "Released",
-                        StringComparison.OrdinalIgnoreCase))
-                {
-                    drwReleasedWarn = Path.GetFileName(drwPath);
-                }
-                else
-                {
-                    removeDrawing = MessageBox.Show(
-                        "Found matching drawing " + Path.GetFileName(drwPath) +
-                        ".\n\nRemove it too?",
-                        "BCore PDM — Remove from Vault",
-                        MessageBoxButtons.YesNo, MessageBoxIcon.Question)
-                        == DialogResult.Yes;
-                }
-            }
+            bool removeDrawing = drwPath != null;
 
             string confirmMsg =
                 "Remove " + fileName + " from the vault?\n\n" +
                 "Status : " + status + "\n\n" +
-                "The file" + (removeDrawing ? ", its drawing," : "") +
-                " its released copy and exports will be MOVED to:\n" +
+                "The file" +
+                (removeDrawing
+                    ? " and its drawing (" + Path.GetFileName(drwPath) + "),"
+                    : "") +
+                " their released copies and exports will be MOVED to:\n" +
                 ScrapFolder + "\n\n" +
                 "The vault record will be deleted. Files stay recoverable in " +
                 "SCRAP until purged.";
-            if (drwReleasedWarn != null)
-                confirmMsg += "\n\nNOTE: drawing " + drwReleasedWarn +
-                    " is Released and will be KEPT — Unlock or New Revision it " +
-                    "first to remove it.";
 
             if (MessageBox.Show(confirmMsg, "BCore PDM — Remove from Vault",
                     MessageBoxButtons.YesNo, MessageBoxIcon.Warning)
@@ -195,8 +177,8 @@ namespace PDMLite
             // Move the primary file's artifacts to SCRAP.
             MoveToScrap(filePath);
             MoveToScrap(Path.Combine(RelFolder, fileName));
-            if (isDrawing) ScrapExports(null, drawingNo); // drawing → PDF only
-            else ScrapExports(partNo, null);              // model   → STEP only
+            if (isDrawing) ScrapExports(null, drawingNo);      // drawing → PDF only
+            else ScrapExports(partNo, drawingNo);             // model   → STEP + PDF
             DatabaseManager.RemoveFileRecord(filePath);
             AuditLogger.Log("RemoveFromVault", user, fileName, partNo, rev,
                 "moved to SCRAP");
@@ -216,9 +198,6 @@ namespace PDMLite
             MessageBox.Show(
                 fileName + " removed from the vault." +
                 (removeDrawing ? "\nAssociated drawing also removed." : "") +
-                (drwReleasedWarn != null
-                    ? "\n\nDrawing " + drwReleasedWarn + " was KEPT (Released)."
-                    : "") +
                 "\n\nFiles moved to SCRAP:\n" + ScrapFolder,
                 "BCore PDM — Remove from Vault",
                 MessageBoxButtons.OK, MessageBoxIcon.Information);

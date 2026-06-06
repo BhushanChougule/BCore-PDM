@@ -228,7 +228,7 @@ Core vault operations.
 
 \- GetComponentPartType(comp) → reads PartType from the loaded component model ("" if unreadable)
 
-\- RemoveFromVault(doc) → Master only; retires the active file — MOVES its WIP copy, RELEASED snapshot and exports to SCRAP (timestamped) and deletes the vault record; BLOCKED while Released (Unlock/New Revision first); offers to take the matching drawing too (but a Released drawing is KEPT with a warning); confirmation dialog; audit-logged. Orphans are NOT handled here (can't open a deleted file) — SearchFiles auto-purges them instead
+\- RemoveFromVault(doc) → Master only; retires the active file — MOVES its WIP copy, RELEASED snapshot and exports (STEP + PDF) to SCRAP (timestamped) and deletes the vault record; BLOCKED while Released (Unlock/New Revision first); matching drawing is ALWAYS scrapped automatically (even if Released — a drawing without its model is blank and useless); confirmation dialog; audit-logged. Orphans are NOT handled here (can't open a deleted file) — SearchFiles auto-purges them instead
 
 \- MoveToScrap(filePath) → moves one file to SCRAP with a yyyyMMdd_HHmmss suffix (clears read-only first; no-op if missing). ScrapExports(partNo, drawingNo) → moves matching STEP (by dotless partNo) + PDF (by drawingNo) exports to SCRAP
 
@@ -630,7 +630,7 @@ GetNextRevision() in VaultManager.cs handles this
 
 \- Orphaned records auto-purged by search when the file is gone on disk (network-down guarded so a transient outage never deletes records; audit-logged)
 
-\- Remove from Vault (Master, active file, blocked if Released) — MOVES the file + RELEASED snapshot + exports to SCRAP and deletes the record; offers to take the matching drawing (Released drawing kept with a warning)
+\- Remove from Vault (Master, active file, blocked if Released) — MOVES the file + RELEASED snapshot + STEP + PDF exports to SCRAP and deletes the record; matching drawing always scrapped automatically (no prompt, Released drawing is not exempt — blank without its model)
 
 \- SCRAP folder for retired files (separate from ARCHIVE; recoverable until bulk-purged)
 
