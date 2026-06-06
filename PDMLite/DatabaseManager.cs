@@ -50,6 +50,11 @@ namespace PDMLite
         private const string VaultFolder = @"N:\PDM-SolidWorks\VAULT";
         private const string DataFile = @"N:\PDM-SolidWorks\VAULT\vault.xml";
         private const string WipRoot = @"N:\PDM-SolidWorks\WIP";
+        private const string ScrapRoot = @"N:\PDM-SolidWorks\SCRAP";
+
+        // Cap search results so a broad term at full scale (~50k files) can
+        // never render thousands of cards into the task pane and freeze it.
+        private const int MaxSearchResults = 50;
 
         // Division subfolders under WIP — one per product line.
         // Initialize() creates these on first addin load so engineers
@@ -113,6 +118,11 @@ namespace PDMLite
             {
                 foreach (string div in WipDivisions)
                     Directory.CreateDirectory(Path.Combine(WipRoot, div));
+
+                // SCRAP holds files retired via Remove from Vault — kept
+                // separate from ARCHIVE (old revisions) and recoverable until
+                // a Master bulk-purges it.
+                Directory.CreateDirectory(ScrapRoot);
             }
             catch { }
         }
@@ -122,6 +132,7 @@ namespace PDMLite
         // ════════════════════════════════════════════════════════════════
         public static void UpsertFile(VaultFile f)
         {
+            bool wasCreate;
             lock (_lock)
             {
                 var doc = LoadOrCreate();
@@ -136,6 +147,7 @@ namespace PDMLite
                         break;
                     }
                 }
+                wasCreate = existing == null;
 
                 if (existing != null)
                 {
@@ -166,6 +178,10 @@ namespace PDMLite
 
                 Save(doc);
             }
+
+            // Log outside the DB lock — AuditLogger holds its own file lock.
+            AuditLogger.Log(wasCreate ? "Create" : "Save",
+                f.ModifiedBy ?? "", f.FileName, f.PartNumber ?? "");
         }
 
         public static string GetFileStatus(string filePath)
@@ -262,69 +278,6 @@ namespace PDMLite
                 }
 
                 foreach (var el in toRemove) el.Remove();
-                if (toRemove.Count > 0) Save(doc);
-                return toRemove.Count;
-            }
-        }
-
-        // Return every tracked file whose underlying file no longer exists on
-        // disk (orphaned records — e.g. files deleted from Explorer outside PDM).
-        // Deduped by filename. Used by the Master "Clean Orphaned Records" tool.
-        public static List<VaultFile> GetOrphanedFiles()
-        {
-            var orphans = new List<VaultFile>();
-            var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-            lock (_lock)
-            {
-                var doc = LoadOrCreate();
-                foreach (var el in doc.Root.Element("Files").Elements("File"))
-                {
-                    string status = (string)el.Element("Status") ?? "";
-                    if (string.IsNullOrEmpty(status)) continue;
-
-                    string fileName = (string)el.Element("FileName") ?? "";
-                    if (!seen.Add(fileName)) continue;
-
-                    string filePath = (string)el.Element("FilePath") ?? "";
-                    if (!string.IsNullOrEmpty(filePath) && File.Exists(filePath))
-                        continue;
-
-                    orphans.Add(new VaultFile
-                    {
-                        FilePath = filePath,
-                        FileName = fileName,
-                        PartNumber = (string)el.Element("PartNumber") ?? "",
-                        Status = status,
-                        Revision = (string)el.Element("Revision") ?? ""
-                    });
-                }
-            }
-            return orphans;
-        }
-
-        // Remove ALL orphaned records (file missing on disk) in one pass.
-        // Status is ignored — the file is already gone, so the Released guard
-        // (which protects existing published files) does not apply. Returns the
-        // count removed and fills 'removed' with the purged filenames.
-        public static int RemoveOrphanedRecords(out List<string> removed)
-        {
-            removed = new List<string>();
-            lock (_lock)
-            {
-                var doc = LoadOrCreate();
-                var toRemove = new List<XElement>();
-                foreach (var el in doc.Root.Element("Files").Elements("File"))
-                {
-                    string filePath = (string)el.Element("FilePath") ?? "";
-                    if (string.IsNullOrEmpty(filePath) || !File.Exists(filePath))
-                        toRemove.Add(el);
-                }
-
-                foreach (var el in toRemove)
-                {
-                    removed.Add((string)el.Element("FileName") ?? "(unknown)");
-                    el.Remove();
-                }
                 if (toRemove.Count > 0) Save(doc);
                 return toRemove.Count;
             }
@@ -449,56 +402,109 @@ namespace PDMLite
         // state at a glance. WIP files must be findable after a revision bump.
         public static List<VaultFile> SearchFiles(string searchTerm)
         {
+            bool truncated;
+            return SearchFiles(searchTerm, out truncated);
+        }
+
+        // Search PartNumber + Description + FileName across all statuses.
+        // Two behaviours matter at full scale (~50k files):
+        //   1. Results are capped at MaxSearchResults; 'truncated' is set true
+        //      when more matches existed, so the UI can prompt to refine.
+        //   2. Records whose file no longer exists on disk are auto-purged —
+        //      a manually deleted file disappears from search AND its dead
+        //      record is removed, so nothing junk accumulates. Guarded: purge
+        //      ONLY when the vault share is reachable (WIP root exists). If the
+        //      network is down File.Exists returns false for everything, so we
+        //      must never delete records in that state.
+        public static List<VaultFile> SearchFiles(string searchTerm,
+            out bool truncated)
+        {
+            truncated = false;
             var results = new List<VaultFile>();
             if (string.IsNullOrWhiteSpace(searchTerm)) return results;
 
             string term = searchTerm.ToLower().Trim();
-            // Deduplicate by filename as a safety net against legacy vault.xml
-            // entries that have more than one record per file.
-            var seenFileNames = new System.Collections.Generic.HashSet<string>(
-                StringComparer.OrdinalIgnoreCase);
+            var seenFileNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            var purged = new List<VaultFile>();
 
             lock (_lock)
             {
                 var doc = LoadOrCreate();
+
+                // Network-down guard for the auto-purge (see method summary).
+                bool vaultOnline = false;
+                try { vaultOnline = Directory.Exists(WipRoot); } catch { }
+
+                var toPurge = new List<XElement>();
+
                 foreach (var el in doc.Root.Element("Files").Elements("File"))
                 {
                     string status = (string)el.Element("Status") ?? "";
                     if (string.IsNullOrEmpty(status)) continue;
 
                     string fileName = (string)el.Element("FileName") ?? "";
-                    string partNo = ((string)el.Element("PartNumber") ?? "").ToLower();
-                    string desc = ((string)el.Element("Description") ?? "").ToLower();
-                    string fileNameLower = fileName.ToLower();
+                    string partNoRaw = (string)el.Element("PartNumber") ?? "";
+                    string descRaw = (string)el.Element("Description") ?? "";
 
-                    if (!(partNo.Contains(term) || desc.Contains(term) ||
-                          fileNameLower.Contains(term)))
+                    if (!(partNoRaw.ToLower().Contains(term) ||
+                          descRaw.ToLower().Contains(term) ||
+                          fileName.ToLower().Contains(term)))
                         continue;
 
-                    // Skip orphaned records whose file was deleted on disk
-                    // (e.g. removed straight from Explorer, outside PDM). The DB
-                    // entry is left intact — a transient network outage must not
-                    // permanently hide or drop vault history — we just don't show
-                    // a result that would fail with "File not found" on Open.
+                    // Orphan check: file gone on disk → never show it, and purge
+                    // its record when we can prove the share is online.
                     string filePath = (string)el.Element("FilePath") ?? "";
-                    if (string.IsNullOrEmpty(filePath) || !System.IO.File.Exists(filePath))
+                    bool missing = string.IsNullOrEmpty(filePath) ||
+                                   !File.Exists(filePath);
+                    if (missing)
+                    {
+                        if (vaultOnline)
+                        {
+                            toPurge.Add(el);
+                            purged.Add(new VaultFile
+                            {
+                                FileName = fileName,
+                                PartNumber = partNoRaw,
+                                Status = status,
+                                Revision = (string)el.Element("Revision") ?? ""
+                            });
+                        }
                         continue;
+                    }
 
-                    // Deduplicate by filename as a safety net against legacy
-                    // vault.xml entries that have more than one record per file.
+                    // Dedupe by filename (legacy double-records / RELEASED copies).
                     if (!seenFileNames.Add(fileName)) continue;
+
+                    // Cap reached — note there were more and stop scanning so a
+                    // broad term can't walk the whole 50k vault on every search.
+                    if (results.Count >= MaxSearchResults)
+                    {
+                        truncated = true;
+                        break;
+                    }
 
                     results.Add(new VaultFile
                     {
                         FilePath = filePath,
                         FileName = fileName,
-                        PartNumber = (string)el.Element("PartNumber") ?? "",
-                        Description = (string)el.Element("Description") ?? "",
+                        PartNumber = partNoRaw,
+                        Description = descRaw,
                         Status = status,
                         Revision = (string)el.Element("Revision") ?? ""
                     });
                 }
+
+                if (toPurge.Count > 0)
+                {
+                    foreach (var el in toPurge) el.Remove();
+                    Save(doc);
+                }
             }
+
+            // Audit the auto-purges outside the DB lock.
+            foreach (var p in purged)
+                AuditLogger.Log("AutoPurgeOrphan", "system", p.FileName,
+                    p.PartNumber, p.Revision, "file missing on disk");
 
             return results;
         }

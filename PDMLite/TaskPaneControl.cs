@@ -370,11 +370,11 @@ namespace PDMLite
             this.Controls.Add(btnTestEmail);
             y += S(28);
 
-            // ── Vault maintenance (Master only) ───────────────────────
-            // Remove from Vault → drops the active file's DB record (blocked
-            // while Released). Clean Orphaned Records → purges records whose
-            // file was deleted on disk outside PDM. DB record only; no file
-            // on disk is ever deleted by either action.
+            // ── Remove from Vault (Master only) ───────────────────────
+            // Retires the active file: moves its WIP copy, RELEASED snapshot and
+            // exports to SCRAP and deletes the vault record (blocked while
+            // Released). Orphans (file already deleted on disk) are auto-purged
+            // by search, so there's no separate cleanup button.
             Button btnRemove = new Button
             {
                 Text = "Remove from Vault",
@@ -391,28 +391,6 @@ namespace PDMLite
             btnRemove.FlatAppearance.BorderSize = 0;
             btnRemove.Click += (s, e) => DoAction("remove");
             this.Controls.Add(btnRemove);
-            if (isMaster) y += S(28);
-
-            Button btnCleanOrphans = new Button
-            {
-                Text = "Clean Orphaned Records",
-                Font = fBtn,
-                Width = w,
-                Height = S(24),
-                Location = new Point(x, y),
-                BackColor = cDark,
-                ForeColor = Color.White,
-                FlatStyle = FlatStyle.Flat,
-                Cursor = Cursors.Hand,
-                Visible = isMaster
-            };
-            btnCleanOrphans.FlatAppearance.BorderSize = 0;
-            btnCleanOrphans.Click += (s, e) =>
-            {
-                VaultManager.CleanOrphanedRecords();
-                Refresh(PDMLiteAddin.SwApp?.ActiveDoc as ModelDoc2);
-            };
-            this.Controls.Add(btnCleanOrphans);
             if (isMaster) y += S(28);
 
             // 1px sentinel — pins the AutoScroll virtual bottom to remove gap
@@ -468,7 +446,8 @@ namespace PDMLite
                 return;
             }
 
-            List<VaultFile> results = DatabaseManager.SearchFiles(term);
+            bool truncated;
+            List<VaultFile> results = DatabaseManager.SearchFiles(term, out truncated);
 
             if (results.Count == 0)
             {
@@ -572,6 +551,23 @@ namespace PDMLite
 
                 _resultsPanel.Controls.Add(card);
                 ry += S(70);
+            }
+
+            // Show first N only — prompt the user to narrow a broad search.
+            if (truncated)
+            {
+                _resultsPanel.Controls.Add(new Label
+                {
+                    Text = "Showing first " + results.Count +
+                           " — refine your search to narrow results.",
+                    Font = new Font("Segoe UI", 3.3f * _scale, FontStyle.Italic),
+                    ForeColor = cTextLight,
+                    Location = new Point(0, ry + S(2)),
+                    AutoSize = false,
+                    Width = rw,
+                    Height = S(22)
+                });
+                ry += S(26);
             }
 
             _resultsPanel.Height = ry;
