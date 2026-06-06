@@ -48,7 +48,7 @@ namespace PDMLite
         private readonly Color cDark = Color.FromArgb(75, 80, 90);
         private readonly Color cRed = Color.FromArgb(180, 75, 75);
         private readonly Color cMaroon = Color.FromArgb(140, 60, 60);
-        private readonly Color cSwRed = Color.FromArgb(227, 30, 36); // SOLIDWORKS brand red
+        private readonly Color cSwRed = Color.FromArgb(190, 55, 50); // muted SOLIDWORKS red
 
         public TaskPaneControl()
         {
