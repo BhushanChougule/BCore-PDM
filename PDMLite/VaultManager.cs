@@ -1492,19 +1492,52 @@ namespace PDMLite
                 }
             }
 
-            // No drawing found — prompt user
-            var result = MessageBox.Show(
-                "No drawing found for:\n" + name +
-                "\n\nWould you like to create a new drawing in SOLIDWORKS?",
-                "BCore PDM — Open Drawing",
-                MessageBoxButtons.YesNo, MessageBoxIcon.Question);
+            // No drawing found — create a new one immediately (no prompt).
+            PDMLiteAddin.SwApp.NewDocument(
+                PDMLiteAddin.SwApp.GetUserPreferenceStringValue(
+                    (int)swUserPreferenceStringValue_e
+                        .swDefaultTemplateDrawing),
+                0, 0, 0);
+        }
 
-            if (result == DialogResult.Yes)
-                PDMLiteAddin.SwApp.NewDocument(
-                    PDMLiteAddin.SwApp.GetUserPreferenceStringValue(
-                        (int)swUserPreferenceStringValue_e
-                            .swDefaultTemplateDrawing),
-                    0, 0, 0);
+        // ── OPEN REFERENCED MODEL from a drawing ──────────────────────
+        // The drawing → part/assembly counterpart of OpenOrCreateDrawing.
+        // Opens (or activates, if already open) the part/assembly that the
+        // active drawing documents. Used by the context-aware Open button.
+        public static void OpenReferencedModel(ModelDoc2 drawingDoc)
+        {
+            string refPath = GetDrawingReferencedModel(drawingDoc);
+            if (string.IsNullOrEmpty(refPath) || !File.Exists(refPath))
+            {
+                MessageBox.Show(
+                    "Could not find the part or assembly this drawing " +
+                    "references.\n\nIt may have been removed from the vault or " +
+                    "moved outside the WIP folder.",
+                    "BCore PDM — Open Part/Assembly",
+                    MessageBoxButtons.OK, MessageBoxIcon.Information);
+                return;
+            }
+
+            // Already open → just bring it to the front.
+            ModelDoc2 already = PDMLiteAddin.SwApp
+                .GetOpenDocumentByName(refPath) as ModelDoc2;
+            if (already != null)
+            {
+                int e = 0;
+                PDMLiteAddin.SwApp.ActivateDoc3(refPath, false,
+                    (int)swRebuildOnActivation_e.swDontRebuildActiveDoc, ref e);
+                return;
+            }
+
+            string ext = Path.GetExtension(refPath).ToLower();
+            int docType = ext == ".sldasm"
+                ? (int)swDocumentTypes_e.swDocASSEMBLY
+                : (int)swDocumentTypes_e.swDocPART;
+
+            int errs = 0, warnings = 0;
+            PDMLiteAddin.SwApp.OpenDoc6(refPath, docType,
+                (int)swOpenDocOptions_e.swOpenDocOptions_Silent,
+                "", ref errs, ref warnings);
         }
 
         // ── VIEW MY REQUESTS — Engineer sees their submitted requests ──

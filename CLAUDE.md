@@ -208,7 +208,7 @@ Methods:
 
 Core vault operations.
 
-\- LockFile(path) → Master only, sets status=Locked
+\- LockFile(path) → Master only, sets status=Locked. NOTE: no longer wired to any task-pane button (the Lock File button was replaced by the context-aware Open Drawing / Open Part-Assembly button); kept as an available method
 
 \- UnlockFile(path) → Master only, sets status=WIP, removes read-only
 
@@ -242,7 +242,9 @@ Core vault operations.
 
 \- ViewMyRequests() → Engineer views their own requests (MessageBox)
 
-\- OpenOrCreateDrawing(doc) → searches for matching .slddrw, prompts to create if not found
+\- OpenOrCreateDrawing(doc) → searches for matching .slddrw (model folder + every WIP division); opens it if found, else creates a new drawing immediately (no prompt). The part/assembly side of the context-aware Open button
+
+\- OpenReferencedModel(doc) → from a drawing, opens (or activates if already open) the part/assembly it references; warns if the referenced model can't be found. The drawing side of the context-aware Open button
 
 \- GetUnreleasedComponentsByPath(asmPath) → checks all assembly children are Released by reading the dependency tree from disk via GetDocumentDependencies2 (independent of load mode — a lightweight assembly, or one loaded only as a drawing reference, still reports its WIP children). Skips Toolbox; dedupes; non-Released tracked components block. Used by both the assembly-release gate and the assembly-drawing-release gate
 
@@ -294,9 +296,11 @@ Sections (top to bottom):
 
 3\. Active File card (filename, status, partNo, revision, lockedBy)
 
-4\. Master Actions (Lock/Unlock/Release/New Revision/Rollback) — Masters only
+4\. Master Actions (Open Drawing/Unlock/Release/New Revision/Rollback) — Masters only
 
-5\. Engineer Actions (Request Unlock/Revision/Release, Update Drawings, My Requests) — Engineers only, same y-position as Master Actions via engY = y - S(5\*28)
+5\. Engineer Actions (Request Unlock/Revision/Release, Open Drawing, My Requests) — Engineers only, same y-position as Master Actions via engY = y - S(5\*28)
+
+Open Drawing button (both roles, cBrand) is CONTEXT-AWARE: DoAction("openlinked") opens the matching .slddrw when a part/assembly is active (creating one if none exists), or opens the referenced part/assembly when a drawing is active. Its label flips between "Open Drawing" and "Open Part/Assembly" in Refresh() based on the active doc type, kept in sync across both role variants by SetOpenLinkedLabel(). Replaced the Master Lock File button and the Engineer Update Drawings button.
 
 6\. File History — Panel (\_historyPanel) with individual labels per entry, Height=S(300), y+=S(305)
 
@@ -620,7 +624,9 @@ GetNextRevision() in VaultManager.cs handles this
 
 \- BCore PDM branding with BC icon
 
-\- Engineer Actions section: Request Unlock, Request Revision, Request Release, Update Drawings, My Requests
+\- Engineer Actions section: Request Unlock, Request Revision, Request Release, Open Drawing (context-aware), My Requests
+
+\- Context-aware Open button (both roles): one button that opens the matching drawing from a part/assembly (creates one if none exists, no prompt) or opens the referenced part/assembly from a drawing; label flips between "Open Drawing" and "Open Part/Assembly". Replaced the Master Lock File button and the Engineer Update Drawings button
 
 \- Master Pending Requests popup (PendingRequestsForm) with 3-column Unlock/Revision/Release view
 
