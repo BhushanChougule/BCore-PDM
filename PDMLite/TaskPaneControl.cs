@@ -370,6 +370,51 @@ namespace PDMLite
             this.Controls.Add(btnTestEmail);
             y += S(28);
 
+            // ── Vault maintenance (Master only) ───────────────────────
+            // Remove from Vault → drops the active file's DB record (blocked
+            // while Released). Clean Orphaned Records → purges records whose
+            // file was deleted on disk outside PDM. DB record only; no file
+            // on disk is ever deleted by either action.
+            Button btnRemove = new Button
+            {
+                Text = "Remove from Vault",
+                Font = fBtn,
+                Width = w,
+                Height = S(24),
+                Location = new Point(x, y),
+                BackColor = cMaroon,
+                ForeColor = Color.White,
+                FlatStyle = FlatStyle.Flat,
+                Cursor = Cursors.Hand,
+                Visible = isMaster
+            };
+            btnRemove.FlatAppearance.BorderSize = 0;
+            btnRemove.Click += (s, e) => DoAction("remove");
+            this.Controls.Add(btnRemove);
+            if (isMaster) y += S(28);
+
+            Button btnCleanOrphans = new Button
+            {
+                Text = "Clean Orphaned Records",
+                Font = fBtn,
+                Width = w,
+                Height = S(24),
+                Location = new Point(x, y),
+                BackColor = cDark,
+                ForeColor = Color.White,
+                FlatStyle = FlatStyle.Flat,
+                Cursor = Cursors.Hand,
+                Visible = isMaster
+            };
+            btnCleanOrphans.FlatAppearance.BorderSize = 0;
+            btnCleanOrphans.Click += (s, e) =>
+            {
+                VaultManager.CleanOrphanedRecords();
+                Refresh(PDMLiteAddin.SwApp?.ActiveDoc as ModelDoc2);
+            };
+            this.Controls.Add(btnCleanOrphans);
+            if (isMaster) y += S(28);
+
             // 1px sentinel — pins the AutoScroll virtual bottom to remove gap
             this.Controls.Add(new Panel
             {
@@ -733,6 +778,7 @@ namespace PDMLite
                 return;
             }
             else if (action == "rollback") VaultManager.RollbackRevision(doc);
+            else if (action == "remove") VaultManager.RemoveFromVault(doc);
             else if (action == "requestrev") VaultManager.RequestRevision(doc);
             else if (action == "requnlock") VaultManager.RequestUnlock(doc);
             else if (action == "reqrelease") VaultManager.RequestRelease(doc);

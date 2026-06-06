@@ -180,6 +180,12 @@ Methods:
 
 \- SetBrokenRefFlag, LockFile, UnlockFile, GetLockInfo
 
+\- RemoveFileRecord(filePath) → removes vault.xml record(s) for a file (matches FilePath then FileName for dupes/RELEASED-copy entries); DB record ONLY, never touches files on disk; returns count removed
+
+\- GetOrphanedFiles() → returns tracked files whose file is missing on disk (deduped by filename); feeds the Master "Clean Orphaned Records" tool
+
+\- RemoveOrphanedRecords(out removed) → purges all records whose file is missing on disk in one pass (status ignored — file already gone); returns count + filenames
+
 \- GetUserRole, AddUser
 
 \- SearchFiles(term) → searches PartNumber + Description + FileName (all statuses: WIP, Locked, Released); returns the canonical WIP path; dedupes by filename as a safety net; skips orphaned records whose file no longer exists on disk (deleted outside PDM) — non-destructive, the DB entry is kept so a transient network outage can't drop vault history
@@ -219,6 +225,10 @@ Core vault operations.
 \- IsToolboxComponent(comp) → heuristic: path contains "\\Toolbox\\". Secondary net; PartType=Purchased is the authoritative mechanism
 
 \- GetComponentPartType(comp) → reads PartType from the loaded component model ("" if unreadable)
+
+\- RemoveFromVault(doc) → Master only; drops the active file's vault record (DB only, file on disk untouched); BLOCKED while Released (Unlock/New Revision first); confirmation dialog
+
+\- CleanOrphanedRecords() → Master only; lists + purges vault records whose file is missing on disk (deleted outside PDM); Released guard does NOT apply (file already gone)
 
 \- RequestRevision(doc), RequestUnlock(doc), RequestRelease(doc) → Engineer requests with note dialog
 
@@ -287,6 +297,10 @@ Sections (top to bottom):
 7\. PENDING REQUESTS button (Masters only) — shows count, opens PendingRequestsForm popup
 
 8\. Send Test Email button (all users) — calls EmailManager.SendTestEmail, shows success/error in MessageBox
+
+9\. Remove from Vault button (Masters only, cMaroon) — DoAction("remove") → VaultManager.RemoveFromVault on the active file (blocked if Released)
+
+10\. Clean Orphaned Records button (Masters only, cDark) — VaultManager.CleanOrphanedRecords → purges DB records whose file is missing on disk
 
 
 
@@ -597,6 +611,10 @@ GetNextRevision() in VaultManager.cs handles this
 \- Email notifications (Mailgun SMTP) on request submit/approve/reject — config at N:\\PDM-SolidWorks\\VAULT\\email.config; "Send Test Email" button sends to the logged-in user to verify the pipeline
 
 \- Duplicate part-number detection on save (warns with Yes/No override when another file already uses the same PartNo) — format validation deemed unfeasible due to 3 divisions with inconsistent numbering
+
+\- Search hides orphaned records whose file was deleted on disk (non-destructive — DB entry kept so a transient network outage can't drop history)
+
+\- Remove from Vault (Master, active file, blocked if Released) + Clean Orphaned Records (Master, purges missing-file records) — both DB-record-only, never delete files on disk
 
 \- PartType property (Manufactured | Purchased, default Manufactured) on parts and assemblies
 

@@ -234,6 +234,103 @@ namespace PDMLite
         }
 
         // ════════════════════════════════════════════════════════════════
+        // Remove from vault (DB record only — never touches files on disk)
+        // ════════════════════════════════════════════════════════════════
+
+        // Remove the vault.xml record(s) for a single file. Matches by FilePath
+        // first, falling back to FileName so legacy duplicate records and the
+        // RELEASED-copy entry are cleaned up too. The file(s) on disk are left
+        // untouched. Returns the number of records removed.
+        public static int RemoveFileRecord(string filePath)
+        {
+            if (string.IsNullOrWhiteSpace(filePath)) return 0;
+            string fileName = Path.GetFileName(filePath);
+
+            lock (_lock)
+            {
+                var doc = LoadOrCreate();
+                var toRemove = new List<XElement>();
+                foreach (var el in doc.Root.Element("Files").Elements("File"))
+                {
+                    bool pathMatch = string.Equals(
+                        (string)el.Element("FilePath"), filePath,
+                        StringComparison.OrdinalIgnoreCase);
+                    bool nameMatch = string.Equals(
+                        (string)el.Element("FileName"), fileName,
+                        StringComparison.OrdinalIgnoreCase);
+                    if (pathMatch || nameMatch) toRemove.Add(el);
+                }
+
+                foreach (var el in toRemove) el.Remove();
+                if (toRemove.Count > 0) Save(doc);
+                return toRemove.Count;
+            }
+        }
+
+        // Return every tracked file whose underlying file no longer exists on
+        // disk (orphaned records — e.g. files deleted from Explorer outside PDM).
+        // Deduped by filename. Used by the Master "Clean Orphaned Records" tool.
+        public static List<VaultFile> GetOrphanedFiles()
+        {
+            var orphans = new List<VaultFile>();
+            var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            lock (_lock)
+            {
+                var doc = LoadOrCreate();
+                foreach (var el in doc.Root.Element("Files").Elements("File"))
+                {
+                    string status = (string)el.Element("Status") ?? "";
+                    if (string.IsNullOrEmpty(status)) continue;
+
+                    string fileName = (string)el.Element("FileName") ?? "";
+                    if (!seen.Add(fileName)) continue;
+
+                    string filePath = (string)el.Element("FilePath") ?? "";
+                    if (!string.IsNullOrEmpty(filePath) && File.Exists(filePath))
+                        continue;
+
+                    orphans.Add(new VaultFile
+                    {
+                        FilePath = filePath,
+                        FileName = fileName,
+                        PartNumber = (string)el.Element("PartNumber") ?? "",
+                        Status = status,
+                        Revision = (string)el.Element("Revision") ?? ""
+                    });
+                }
+            }
+            return orphans;
+        }
+
+        // Remove ALL orphaned records (file missing on disk) in one pass.
+        // Status is ignored — the file is already gone, so the Released guard
+        // (which protects existing published files) does not apply. Returns the
+        // count removed and fills 'removed' with the purged filenames.
+        public static int RemoveOrphanedRecords(out List<string> removed)
+        {
+            removed = new List<string>();
+            lock (_lock)
+            {
+                var doc = LoadOrCreate();
+                var toRemove = new List<XElement>();
+                foreach (var el in doc.Root.Element("Files").Elements("File"))
+                {
+                    string filePath = (string)el.Element("FilePath") ?? "";
+                    if (string.IsNullOrEmpty(filePath) || !File.Exists(filePath))
+                        toRemove.Add(el);
+                }
+
+                foreach (var el in toRemove)
+                {
+                    removed.Add((string)el.Element("FileName") ?? "(unknown)");
+                    el.Remove();
+                }
+                if (toRemove.Count > 0) Save(doc);
+                return toRemove.Count;
+            }
+        }
+
+        // ════════════════════════════════════════════════════════════════
         // Lock / Unlock
         // ════════════════════════════════════════════════════════════════
         public static void LockFile(string filePath, string lockedBy)

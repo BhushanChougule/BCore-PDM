@@ -82,6 +82,106 @@ namespace PDMLite
             }
         }
 
+        // ── REMOVE FROM VAULT ──────────────────────────────────────────────
+        // Master-only. Drops the vault.xml record for a file (DB record ONLY —
+        // the file on disk is left untouched). Blocked while the file is
+        // Released: a published file must be Unlocked / New-Revisioned first so
+        // its frozen snapshot is never orphaned from its DB record by accident.
+        public static void RemoveFromVault(ModelDoc2 doc)
+        {
+            string user = PDMLiteAddin.CurrentUser;
+            if (!IsMaster(user)) { NotMaster(); return; }
+
+            string filePath = doc?.GetPathName();
+            if (string.IsNullOrEmpty(filePath))
+            {
+                MessageBox.Show("Please open and save the file first.",
+                    "BCore PDM", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                return;
+            }
+
+            string fileName = Path.GetFileName(filePath);
+            string status = DatabaseManager.GetFileStatus(filePath);
+
+            if (string.IsNullOrEmpty(status))
+            {
+                MessageBox.Show(
+                    fileName + " is not tracked in the vault — nothing to remove.",
+                    "BCore PDM — Remove from Vault",
+                    MessageBoxButtons.OK, MessageBoxIcon.Information);
+                return;
+            }
+
+            if (string.Equals(status, "Released", StringComparison.OrdinalIgnoreCase))
+            {
+                MessageBox.Show(
+                    "Cannot remove a Released file from the vault.\n\n" +
+                    "File : " + fileName + "\n\n" +
+                    "Unlock or start a New Revision first, then remove it.",
+                    "BCore PDM — Remove Blocked",
+                    MessageBoxButtons.OK, MessageBoxIcon.Stop);
+                return;
+            }
+
+            var confirm = MessageBox.Show(
+                "Remove this file's vault record?\n\n" +
+                "File   : " + fileName + "\n" +
+                "Status : " + status + "\n\n" +
+                "The file on disk is NOT deleted — only its vault tracking " +
+                "record is removed. Re-saving the file will track it again.",
+                "BCore PDM — Remove from Vault",
+                MessageBoxButtons.YesNo, MessageBoxIcon.Warning);
+            if (confirm != DialogResult.Yes) return;
+
+            int removed = DatabaseManager.RemoveFileRecord(filePath);
+            MessageBox.Show(
+                removed > 0
+                    ? "Removed " + removed + " vault record(s) for " + fileName + "."
+                    : "No vault record found for " + fileName + ".",
+                "BCore PDM — Remove from Vault",
+                MessageBoxButtons.OK, MessageBoxIcon.Information);
+        }
+
+        // ── CLEAN ORPHANED RECORDS ─────────────────────────────────────────
+        // Master-only. Purges vault.xml records whose underlying file no longer
+        // exists on disk (e.g. files deleted from Explorer outside PDM). The
+        // Released guard does NOT apply here — the file is already gone, so
+        // there is no published snapshot left to protect.
+        public static void CleanOrphanedRecords()
+        {
+            string user = PDMLiteAddin.CurrentUser;
+            if (!IsMaster(user)) { NotMaster(); return; }
+
+            var orphans = DatabaseManager.GetOrphanedFiles();
+            if (orphans.Count == 0)
+            {
+                MessageBox.Show(
+                    "No orphaned records found — every vault file exists on disk.",
+                    "BCore PDM — Clean Orphaned Records",
+                    MessageBoxButtons.OK, MessageBoxIcon.Information);
+                return;
+            }
+
+            var names = new List<string>();
+            foreach (var o in orphans)
+                names.Add(o.FileName + "  —  " + o.Status);
+
+            var confirm = MessageBox.Show(
+                "These vault records point to files that no longer exist on " +
+                "disk:\n\n• " + string.Join("\n• ", names) + "\n\n" +
+                "Remove their vault records? (Nothing on disk is affected.)",
+                "BCore PDM — Clean Orphaned Records",
+                MessageBoxButtons.YesNo, MessageBoxIcon.Warning);
+            if (confirm != DialogResult.Yes) return;
+
+            List<string> removed;
+            int count = DatabaseManager.RemoveOrphanedRecords(out removed);
+            MessageBox.Show(
+                "Removed " + count + " orphaned vault record(s).",
+                "BCore PDM — Clean Orphaned Records",
+                MessageBoxButtons.OK, MessageBoxIcon.Information);
+        }
+
         // ── RELEASE ───────────────────────────────────────────────────────
         public static void ReleaseFile(ModelDoc2 doc)
         {
