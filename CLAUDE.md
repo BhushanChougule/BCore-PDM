@@ -30,6 +30,8 @@ N:\\PDM-SolidWorks\\
 
 \- VAULT\\vault.xml        → XML database (System.Xml.Linq, no SQLite)
 
+\- VAULT\\audit.csv        → append-only audit trail (AuditLogger), separate from vault.xml so the DB stays lean; opens in Excel
+
 \- WIP\\                   → work in progress files — THE single canonical home for every vault file. Engineers always save here. The DB tracks the WIP path.
 
   Division subfolders (auto-created by Initialize on first addin load):
@@ -65,6 +67,8 @@ N:\\PDM-SolidWorks\\
 \- EXPORTS\\PDF\\           → current released PDFs
 
 \- EXPORTS\\STEP\\          → current released STEP files
+
+\- SCRAP\\                 → files retired via Remove from Vault (WIP copy, RELEASED snapshot, exports MOVED here, timestamped). Separate from ARCHIVE (old revisions). Recoverable until a Master bulk-purges it. Auto-created by Initialize.
 
 \- ADDIN\\                 → DLL and registration files
 
@@ -176,13 +180,17 @@ RevisionRequest.RequestType = "Unlock" | "Revision" | "Release"
 
 Methods:
 
-\- Initialize, UpsertFile, GetFileStatus, SetFileStatus
+\- Initialize, UpsertFile (audit-logs Create vs Save), GetFileStatus, SetFileStatus
 
 \- SetBrokenRefFlag, LockFile, UnlockFile, GetLockInfo
 
+\- RemoveFileRecord(filePath) → removes vault.xml record(s) for a file (matches FilePath then FileName for dupes/RELEASED-copy entries); DB record ONLY, never touches files on disk; returns count removed
+
+\- Initialize() → creates WIP division subfolders + SCRAP folder on first addin load
+
 \- GetUserRole, AddUser
 
-\- SearchFiles(term) → searches PartNumber + Description + FileName (all statuses: WIP, Locked, Released); returns the canonical WIP path; dedupes by filename as a safety net
+\- SearchFiles(term) / SearchFiles(term, out truncated) → searches PartNumber + Description + FileName (all statuses); returns canonical WIP path; dedupes by filename; capped at MaxSearchResults=50 (truncated=true when more matched, so UI can prompt to refine — prevents rendering thousands of cards at 50k scale); AUTO-PURGES orphaned records whose file is missing on disk, but ONLY when the WIP root is reachable (network-down guard so a transient outage never deletes records); auto-purges are audit-logged as "AutoPurgeOrphan"
 
 \- FindPartNumberConflict(partNo, excludeFilePath) → returns filename of another file using same PartNo (case-insensitive, trimmed), or null. Excludes the file being saved so it never conflicts with itself.
 
@@ -220,6 +228,10 @@ Core vault operations.
 
 \- GetComponentPartType(comp) → reads PartType from the loaded component model ("" if unreadable)
 
+\- RemoveFromVault(doc) → Master only; retires the active file — MOVES its WIP copy, RELEASED snapshot and exports (STEP + PDF) to SCRAP (timestamped) and deletes the vault record; BLOCKED while Released (Unlock/New Revision first); matching drawing is ALWAYS scrapped automatically (even if Released — a drawing without its model is blank and useless); confirmation dialog; audit-logged. Orphans are NOT handled here (can't open a deleted file) — SearchFiles auto-purges them instead
+
+\- MoveToScrap(filePath) → moves one file to SCRAP with a yyyyMMdd_HHmmss suffix (clears read-only first; no-op if missing). ScrapExports(partNo, drawingNo) → moves matching STEP (by dotless partNo) + PDF (by drawingNo) exports to SCRAP
+
 \- RequestRevision(doc), RequestUnlock(doc), RequestRelease(doc) → Engineer requests with note dialog
 
 \- ApproveRequest(request) → Master approves, calls StartNewRevision
@@ -233,6 +245,8 @@ Core vault operations.
 \- GetUnreleasedComponentsByPath(asmPath) → checks all assembly children are Released by reading the dependency tree from disk via GetDocumentDependencies2 (independent of load mode — a lightweight assembly, or one loaded only as a drawing reference, still reports its WIP children). Skips Toolbox; dedupes; non-Released tracked components block. Used by both the assembly-release gate and the assembly-drawing-release gate
 
 \- GetDrawingNo(doc) → gets DrawingNo from referenced model
+
+\- GetDrawingPartNo(doc) → gets PartNo from the model a drawing references (falls back to the drawing's own PartNo, then ""); used by the task-pane Active File card so a drawing shows its part/assembly's number instead of literal "Drawing"
 
 \- GetDrawingReferencedModel(doc) → gets path of model referenced by drawing
 
@@ -266,7 +280,7 @@ Color palette:
 
 \- cOrange(185,115,55), cPurple(105,100,165), cDark(75,80,90)
 
-\- cRed(180,75,75), cMaroon(140,60,60)
+\- cRed(180,75,75), cMaroon(140,60,60), cSwRed(190,55,50) — muted SOLIDWORKS red
 
 
 
@@ -287,6 +301,10 @@ Sections (top to bottom):
 7\. PENDING REQUESTS button (Masters only) — shows count, opens PendingRequestsForm popup
 
 8\. Send Test Email button (all users) — calls EmailManager.SendTestEmail, shows success/error in MessageBox
+
+9\. Remove from Vault button (Masters only, cSwRed — muted SOLIDWORKS red) — DoAction("remove") → VaultManager.RemoveFromVault on the active file (moves to SCRAP + deletes record; blocked if Released)
+
+Search results are capped at 50; when SearchFiles reports truncated=true a "Showing first N — refine your search" hint is rendered below the cards.
 
 
 
@@ -363,6 +381,18 @@ Trigger points:
 \- VaultManager.RejectRequest → NotifyRequestRejected
 
 \- PendingRequestsForm Unlock/Release direct approve paths → NotifyRequestApproved
+
+
+
+\### AuditLogger.cs
+
+Append-only CSV audit trail at N:\\PDM-SolidWorks\\VAULT\\audit.csv (separate from vault.xml so the DB stays lean; opens directly in Excel).
+
+\- Log(action, user, fileName, partNo="", revision="", note="") → appends one row. Columns: Timestamp,User,Action,FileName,PartNo,Revision,Note
+
+\- Append-only (never rewrites the whole file) → stays fast at any size. Cross-process safe: opens with an exclusive write handle (FileShare.Read) and retries 5×100ms on a sharing violation (two machines writing at once). Non-fatal — every failure swallowed so logging never blocks a workflow. CSV fields RFC-4180 escaped.
+
+\- Actions logged: Create, Save (UpsertFile), Lock, Unlock, Release, NewRevision, Rollback, RemoveFromVault, AutoPurgeOrphan (user="system"), RequestRevision/Unlock/Release, ApproveRequest, RejectRequest
 
 
 
@@ -597,6 +627,16 @@ GetNextRevision() in VaultManager.cs handles this
 \- Email notifications (Mailgun SMTP) on request submit/approve/reject — config at N:\\PDM-SolidWorks\\VAULT\\email.config; "Send Test Email" button sends to the logged-in user to verify the pipeline
 
 \- Duplicate part-number detection on save (warns with Yes/No override when another file already uses the same PartNo) — format validation deemed unfeasible due to 3 divisions with inconsistent numbering
+
+\- Search results capped at 50 with a "refine your search" hint (prevents UI freeze rendering thousands of cards at 50k-file scale)
+
+\- Orphaned records auto-purged by search when the file is gone on disk (network-down guarded so a transient outage never deletes records; audit-logged)
+
+\- Remove from Vault (Master, active file, blocked if Released) — MOVES the file + RELEASED snapshot + STEP + PDF exports to SCRAP and deletes the record; matching drawing always scrapped automatically (no prompt, Released drawing is not exempt — blank without its model)
+
+\- SCRAP folder for retired files (separate from ARCHIVE; recoverable until bulk-purged)
+
+\- Audit trail (AuditLogger → VAULT\\audit.csv, append-only CSV, Excel-friendly): logs create/save/lock/unlock/release/new-rev/rollback/remove/requests/approve/reject/auto-purge
 
 \- PartType property (Manufactured | Purchased, default Manufactured) on parts and assemblies
 

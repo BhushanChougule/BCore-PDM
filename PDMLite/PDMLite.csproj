@@ -57,6 +57,7 @@
     <Reference Include="System.Xml" />
   </ItemGroup>
   <ItemGroup>
+    <Compile Include="AuditLogger.cs" />
     <Compile Include="DatabaseManager.cs" />
     <Compile Include="EmailManager.cs" />
     <Compile Include="ExportManager.cs" />

@@ -48,6 +48,7 @@ namespace PDMLite
         private readonly Color cDark = Color.FromArgb(75, 80, 90);
         private readonly Color cRed = Color.FromArgb(180, 75, 75);
         private readonly Color cMaroon = Color.FromArgb(140, 60, 60);
+        private readonly Color cSwRed = Color.FromArgb(190, 55, 50); // muted SOLIDWORKS red
 
         public TaskPaneControl()
         {
@@ -370,6 +371,29 @@ namespace PDMLite
             this.Controls.Add(btnTestEmail);
             y += S(28);
 
+            // ── Remove from Vault (Master only) ───────────────────────
+            // Retires the active file: moves its WIP copy, RELEASED snapshot and
+            // exports to SCRAP and deletes the vault record (blocked while
+            // Released). Orphans (file already deleted on disk) are auto-purged
+            // by search, so there's no separate cleanup button.
+            Button btnRemove = new Button
+            {
+                Text = "Remove from Vault",
+                Font = fBtn,
+                Width = w,
+                Height = S(24),
+                Location = new Point(x, y),
+                BackColor = cSwRed,
+                ForeColor = Color.White,
+                FlatStyle = FlatStyle.Flat,
+                Cursor = Cursors.Hand,
+                Visible = isMaster
+            };
+            btnRemove.FlatAppearance.BorderSize = 0;
+            btnRemove.Click += (s, e) => DoAction("remove");
+            this.Controls.Add(btnRemove);
+            if (isMaster) y += S(28);
+
             // 1px sentinel — pins the AutoScroll virtual bottom to remove gap
             this.Controls.Add(new Panel
             {
@@ -423,7 +447,8 @@ namespace PDMLite
                 return;
             }
 
-            List<VaultFile> results = DatabaseManager.SearchFiles(term);
+            bool truncated;
+            List<VaultFile> results = DatabaseManager.SearchFiles(term, out truncated);
 
             if (results.Count == 0)
             {
@@ -529,6 +554,23 @@ namespace PDMLite
                 ry += S(70);
             }
 
+            // Show first N only — prompt the user to narrow a broad search.
+            if (truncated)
+            {
+                _resultsPanel.Controls.Add(new Label
+                {
+                    Text = "Showing first " + results.Count +
+                           " — refine your search to narrow results.",
+                    Font = new Font("Segoe UI", 3.3f * _scale, FontStyle.Italic),
+                    ForeColor = cTextLight,
+                    Location = new Point(0, ry + S(2)),
+                    AutoSize = false,
+                    Width = rw,
+                    Height = S(22)
+                });
+                ry += S(26);
+            }
+
             _resultsPanel.Height = ry;
         }
 
@@ -612,8 +654,18 @@ namespace PDMLite
 
             _statusVal.Text = string.IsNullOrEmpty(status) ? "WIP" : status;
             _statusVal.ForeColor = StatusColor(status);
-            _partNoVal.Text = isDrawing ? "Drawing" :
-                (string.IsNullOrEmpty(partNo) ? "—" : partNo);
+            // Drawings share the PartNo of the part/assembly they document —
+            // pull it from the referenced model so the card matches the part.
+            if (isDrawing)
+            {
+                string drwPartNo = VaultManager.GetDrawingPartNo(doc);
+                _partNoVal.Text = string.IsNullOrEmpty(drwPartNo)
+                    ? "Drawing" : drwPartNo;
+            }
+            else
+            {
+                _partNoVal.Text = string.IsNullOrEmpty(partNo) ? "—" : partNo;
+            }
             _revVal.Text = string.IsNullOrEmpty(rev) ? "—" : "REV " + rev;
             _lockedVal.Text = lockInfo.IsLocked ? lockInfo.LockedBy : "Not Locked";
             _lockedVal.ForeColor = lockInfo.IsLocked ? cRed : cGreen;
@@ -733,6 +785,7 @@ namespace PDMLite
                 return;
             }
             else if (action == "rollback") VaultManager.RollbackRevision(doc);
+            else if (action == "remove") VaultManager.RemoveFromVault(doc);
             else if (action == "requestrev") VaultManager.RequestRevision(doc);
             else if (action == "requnlock") VaultManager.RequestUnlock(doc);
             else if (action == "reqrelease") VaultManager.RequestRelease(doc);

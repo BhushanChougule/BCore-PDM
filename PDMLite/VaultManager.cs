@@ -14,6 +14,7 @@ namespace PDMLite
         private const string RelFolder = @"N:\PDM-SolidWorks\RELEASED";
         private const string ObsFolder = @"N:\PDM-SolidWorks\ARCHIVE";
         private const string ExportRoot = @"N:\PDM-SolidWorks\EXPORTS";
+        private const string ScrapFolder = @"N:\PDM-SolidWorks\SCRAP";
 
         // ── LOCK ─────────────────────────────────────────────────────────
         public static void LockFile(string filePath)
@@ -35,6 +36,7 @@ namespace PDMLite
             DatabaseManager.LockFile(filePath, user);
             DatabaseManager.SetFileStatus(filePath, "Locked", user,
                 "File locked by Master");
+            AuditLogger.Log("Lock", user, Path.GetFileName(filePath));
 
             MessageBox.Show(
                 "File locked successfully.\nOther users will open this file as read-only.",
@@ -54,6 +56,8 @@ namespace PDMLite
             DatabaseManager.UnlockFile(filePath);
             DatabaseManager.SetFileStatus(filePath, "WIP",
                 PDMLiteAddin.CurrentUser, "Unlocked by Master");
+            AuditLogger.Log("Unlock", PDMLiteAddin.CurrentUser,
+                Path.GetFileName(filePath));
 
             // Check if the file is open before showing the message so we can
             // close-and-reopen it after the user clicks OK.
@@ -80,6 +84,191 @@ namespace PDMLite
                 }
                 catch { }
             }
+        }
+
+        // ── REMOVE FROM VAULT ──────────────────────────────────────────────
+        // Master-only. Retires a file: moves its on-disk artifacts (WIP copy,
+        // RELEASED snapshot, exports) to the SCRAP folder and deletes the
+        // vault.xml record. Files are MOVED, not deleted, so a mistaken removal
+        // is recoverable from SCRAP until a Master bulk-purges it.
+        //
+        // Blocked while Released — a published file must be Unlocked / New-
+        // Revisioned first. Orphans (file already deleted on disk) are NOT
+        // handled here; they are auto-purged by SearchFiles when encountered,
+        // because a deleted file can't be opened to click this button.
+        public static void RemoveFromVault(ModelDoc2 doc)
+        {
+            string user = PDMLiteAddin.CurrentUser;
+            if (!IsMaster(user)) { NotMaster(); return; }
+
+            string filePath = doc?.GetPathName();
+            if (string.IsNullOrEmpty(filePath))
+            {
+                MessageBox.Show("Please open and save the file first.",
+                    "BCore PDM", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                return;
+            }
+
+            string fileName = Path.GetFileName(filePath);
+            string status = DatabaseManager.GetFileStatus(filePath);
+
+            if (string.IsNullOrEmpty(status))
+            {
+                MessageBox.Show(
+                    fileName + " is not tracked in the vault — nothing to remove.",
+                    "BCore PDM — Remove from Vault",
+                    MessageBoxButtons.OK, MessageBoxIcon.Information);
+                return;
+            }
+
+            if (string.Equals(status, "Released", StringComparison.OrdinalIgnoreCase))
+            {
+                MessageBox.Show(
+                    "Cannot remove a Released file from the vault.\n\n" +
+                    "File : " + fileName + "\n\n" +
+                    "Unlock or start a New Revision first, then remove it.",
+                    "BCore PDM — Remove Blocked",
+                    MessageBoxButtons.OK, MessageBoxIcon.Stop);
+                return;
+            }
+
+            // Capture properties NOW — the doc is closed before files are moved.
+            string ext = Path.GetExtension(filePath).ToLower();
+            bool isDrawing = ext == ".slddrw";
+            string partNo = PropertyValidator.GetProperty(doc, "PartNo");
+            string rev = PropertyValidator.GetProperty(doc, "Revision");
+            string drawingNo = PropertyValidator.GetProperty(doc, "DrawingNo");
+
+            // Associated drawing (models only). Always scrapped together with
+            // the model — a drawing without its referenced model is blank and
+            // useless. Released drawings are NOT exempt: the Released status
+            // becomes meaningless without the model they document.
+            string drwPath = isDrawing ? null : FindDrawingPath(filePath);
+            bool removeDrawing = drwPath != null;
+
+            string confirmMsg =
+                "Remove " + fileName + " from the vault?\n\n" +
+                "Status : " + status + "\n\n" +
+                "The file" +
+                (removeDrawing
+                    ? " and its drawing (" + Path.GetFileName(drwPath) + "),"
+                    : "") +
+                " their released copies and exports will be MOVED to:\n" +
+                ScrapFolder + "\n\n" +
+                "The vault record will be deleted. Files stay recoverable in " +
+                "SCRAP until purged.";
+
+            if (MessageBox.Show(confirmMsg, "BCore PDM — Remove from Vault",
+                    MessageBoxButtons.YesNo, MessageBoxIcon.Warning)
+                    != DialogResult.Yes) return;
+
+            // Close open documents before moving files on disk (Windows holds a
+            // lock on an open file). Close the drawing first — it references the
+            // model, so the model can't close while the drawing is open.
+            if (drwPath != null)
+            {
+                var openDrw = PDMLiteAddin.SwApp
+                    ?.GetOpenDocumentByName(drwPath) as ModelDoc2;
+                if (openDrw != null)
+                    try { PDMLiteAddin.SwApp.CloseDoc(drwPath); } catch { }
+            }
+            try { PDMLiteAddin.SwApp.CloseDoc(filePath); } catch { }
+
+            // Move the primary file's artifacts to SCRAP.
+            MoveToScrap(filePath);
+            MoveToScrap(Path.Combine(RelFolder, fileName));
+            if (isDrawing) ScrapExports(null, drawingNo);      // drawing → PDF only
+            else ScrapExports(partNo, drawingNo);             // model   → STEP + PDF
+            DatabaseManager.RemoveFileRecord(filePath);
+            AuditLogger.Log("RemoveFromVault", user, fileName, partNo, rev,
+                "moved to SCRAP");
+
+            // Move the associated drawing's artifacts if the user opted in.
+            if (removeDrawing && drwPath != null)
+            {
+                string drwName = Path.GetFileName(drwPath);
+                MoveToScrap(drwPath);
+                MoveToScrap(Path.Combine(RelFolder, drwName));
+                ScrapExports(null, drawingNo);
+                DatabaseManager.RemoveFileRecord(drwPath);
+                AuditLogger.Log("RemoveFromVault", user, drwName, partNo, rev,
+                    "drawing of " + fileName + ", moved to SCRAP");
+            }
+
+            MessageBox.Show(
+                fileName + " removed from the vault." +
+                (removeDrawing ? "\nAssociated drawing also removed." : "") +
+                "\n\nFiles moved to SCRAP:\n" + ScrapFolder,
+                "BCore PDM — Remove from Vault",
+                MessageBoxButtons.OK, MessageBoxIcon.Information);
+        }
+
+        // Move a single file into SCRAP, timestamped so repeated removals of
+        // the same name never collide. Clears read-only first (RELEASED copies
+        // are read-only). No-op if the file isn't there. Returns dest or null.
+        private static string MoveToScrap(string filePath)
+        {
+            try
+            {
+                if (string.IsNullOrEmpty(filePath) || !File.Exists(filePath))
+                    return null;
+                Directory.CreateDirectory(ScrapFolder);
+                string stamp = DateTime.Now.ToString("yyyyMMdd_HHmmss");
+                string baseName = Path.GetFileNameWithoutExtension(filePath)
+                    + "_" + stamp;
+                string ext = Path.GetExtension(filePath);
+
+                // Guarantee a unique destination — the WIP copy and RELEASED
+                // snapshot share a basename and hit the same 1-second stamp in
+                // one removal; never overwrite, append a counter instead.
+                string dest = Path.Combine(ScrapFolder, baseName + ext);
+                int n = 1;
+                while (File.Exists(dest))
+                    dest = Path.Combine(ScrapFolder, baseName + "_" + (n++) + ext);
+
+                SetReadOnly(filePath, false);
+
+                // SOLIDWORKS may not release the file handle the instant
+                // CloseDoc returns; retry the move briefly so the file doesn't
+                // get stranded in WIP with its record already gone.
+                for (int attempt = 0; attempt < 4; attempt++)
+                {
+                    try { File.Move(filePath, dest); return dest; }
+                    catch (IOException)
+                    {
+                        if (attempt == 3) throw;
+                        System.Threading.Thread.Sleep(200);
+                    }
+                }
+                return dest;
+            }
+            catch { return null; }
+        }
+
+        // Move a file's current exports to SCRAP. STEP files are named by the
+        // dotless part number; PDFs by the drawing number — match the same
+        // prefixes the exporter uses.
+        private static void ScrapExports(string partNo, string drawingNo)
+        {
+            try
+            {
+                string stepExport = Path.Combine(ExportRoot, "STEP");
+                string pdfExport = Path.Combine(ExportRoot, "PDF");
+
+                string partNoClean = (partNo ?? "").Replace(".", "");
+                if (!string.IsNullOrEmpty(partNoClean) &&
+                    Directory.Exists(stepExport))
+                    foreach (string f in Directory.GetFiles(
+                        stepExport, partNoClean + "*.step"))
+                        MoveToScrap(f);
+
+                if (!string.IsNullOrEmpty(drawingNo) &&
+                    Directory.Exists(pdfExport))
+                    foreach (string f in Directory.GetFiles(
+                        pdfExport, drawingNo + "*.pdf"))
+                        MoveToScrap(f);
+            }
+            catch { }
         }
 
         // ── RELEASE ───────────────────────────────────────────────────────
@@ -398,6 +587,8 @@ namespace PDMLite
             DatabaseManager.LockFile(filePath, user);
             DatabaseManager.SetFileStatus(filePath, "Released", user,
                 "Released REV " + rev);
+            AuditLogger.Log("Release", user, Path.GetFileName(filePath),
+                partNo, rev);
 
             MessageBox.Show(
                 "File Released Successfully!\n\n" +
@@ -563,6 +754,8 @@ namespace PDMLite
             DatabaseManager.UnlockFile(filePath);
             DatabaseManager.SetFileStatus(filePath, "WIP", user,
                 "New revision started: REV " + nextRev);
+            AuditLogger.Log("NewRevision", user, Path.GetFileName(filePath),
+                partNo, nextRev);
 
             // ── Auto-start the associated drawing revision (Option B) ─────
             // Done AFTER the model is writable/bumped so the drawing reopens
@@ -1030,6 +1223,8 @@ namespace PDMLite
                 DatabaseManager.LockFile(filePath, user);
                 DatabaseManager.SetFileStatus(filePath, "Released", user,
                     "Rolled back to " + targetRev);
+                AuditLogger.Log("Rollback", user, Path.GetFileName(filePath),
+                    partNo, targetRev);
 
                 // ── Step 9: Offer to roll back the matching drawing ───────
                 // Drawings are archived as a matched pair with the model, so a
@@ -1210,6 +1405,7 @@ namespace PDMLite
 
             DatabaseManager.AddRevisionRequest(filePath, user, note);
             EmailManager.NotifyRequestSubmitted("Revision", fileName, partNo, rev, user, note);
+            AuditLogger.Log("RequestRevision", user, fileName, partNo, rev, note);
             MessageBox.Show(
                 "Revision request submitted!\n\nFile    : " + fileName +
                 "\nPart No : " + partNo + "\nRev     : REV " + rev +
@@ -1230,6 +1426,7 @@ namespace PDMLite
 
             DatabaseManager.AddUnlockRequest(filePath, user, note);
             EmailManager.NotifyRequestSubmitted("Unlock", fileName, "", "", user, note);
+            AuditLogger.Log("RequestUnlock", user, fileName, "", "", note);
             MessageBox.Show(
                 "Unlock request submitted!\n\nFile : " + fileName +
                 "\n\nThe Master will be notified.",
@@ -1251,6 +1448,7 @@ namespace PDMLite
 
             DatabaseManager.AddReleaseRequest(filePath, user, note);
             EmailManager.NotifyRequestSubmitted("Release", fileName, partNo, rev, user, note);
+            AuditLogger.Log("RequestRelease", user, fileName, partNo, rev, note);
             MessageBox.Show(
                 "Release request submitted!\n\nFile    : " + fileName +
                 "\nPart No : " + partNo + "\nRev     : REV " + rev +
@@ -1471,6 +1669,8 @@ namespace PDMLite
             EmailManager.NotifyRequestApproved(
                 string.IsNullOrEmpty(request.RequestType) ? "Revision" : request.RequestType,
                 request.FileName, request.RequestedBy);
+            AuditLogger.Log("ApproveRequest", user, request.FileName, "", "",
+                "requested by " + request.RequestedBy);
             StartNewRevision(doc);
         }
 
@@ -1495,6 +1695,8 @@ namespace PDMLite
             EmailManager.NotifyRequestRejected(
                 string.IsNullOrEmpty(request.RequestType) ? "Revision" : request.RequestType,
                 request.FileName, request.RequestedBy, request.Note);
+            AuditLogger.Log("RejectRequest", user, request.FileName, "", "",
+                "requested by " + request.RequestedBy);
 
             MessageBox.Show(
                 "Request rejected and removed from pending list.",
@@ -1526,6 +1728,35 @@ namespace PDMLite
 
             // Fallback: use drawing filename
             return Path.GetFileNameWithoutExtension(drawingDoc.GetPathName());
+        }
+
+        // ── Get PartNo of the model a drawing references ──────────────────
+        // A drawing shares the PartNo of the part/assembly it documents.
+        // Reads it from the referenced model (loaded as the drawing's
+        // reference), falling back to the drawing's own PartNo property, then
+        // "" if neither is available. Used by the task-pane Active File card.
+        public static string GetDrawingPartNo(ModelDoc2 drawingDoc)
+        {
+            try
+            {
+                string referencedPath = GetDrawingReferencedModel(drawingDoc);
+                if (!string.IsNullOrEmpty(referencedPath))
+                {
+                    ModelDoc2 refModel = PDMLiteAddin.SwApp
+                        .GetOpenDocumentByName(referencedPath) as ModelDoc2;
+                    if (refModel != null)
+                    {
+                        string pn = PropertyValidator.GetProperty(
+                            refModel, "PartNo");
+                        if (!string.IsNullOrEmpty(pn)) return pn;
+                    }
+                }
+            }
+            catch { }
+
+            // Fallback to the drawing's own PartNo property (inherited).
+            try { return PropertyValidator.GetProperty(drawingDoc, "PartNo"); }
+            catch { return ""; }
         }
 
         // ── Get referenced model path from drawing ────────────────────────
