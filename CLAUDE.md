@@ -504,11 +504,17 @@ skipped → archive old exports → export STEP → copy to RELEASED → set rea
 
 \### Master Release (Drawing)
 
-check referenced part is Released → (if referenced model is an assembly) check all
+check referenced part is Released → if NOT Released: offer Yes/No to release it now →
 
-assembly components are Released → sync drawing revision with part revision →
+Yes: open model if needed → ReleaseFile(model) (all validations apply, two success
 
-export PDF (all sheets) → copy to RELEASED → set read-only → update DB
+dialogs shown) → if model still not Released after that, abort drawing release; re-fetch
+
+drawing doc (model release closes/reopens the drawing) → (if referenced model is an
+
+assembly) check all assembly components are Released → sync drawing revision with part
+
+revision → export PDF (all sheets) → copy to RELEASED → set read-only → update DB
 
 
 

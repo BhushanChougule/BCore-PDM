@@ -301,17 +301,80 @@ namespace PDMLite
                     string modelStatus = DatabaseManager.GetFileStatus(referencedModel);
                     if (modelStatus != "Released")
                     {
-                        MessageBox.Show(
-                            "Cannot release Drawing — the referenced Part or Assembly " +
-                            "is not yet Released.\n\n" +
-                            "Referenced file : " + Path.GetFileName(referencedModel) + "\n" +
-                            "Current status  : " +
-                            (string.IsNullOrEmpty(modelStatus) ? "WIP" : modelStatus) + "\n\n" +
-                            "Release the Part or Assembly first, then release the Drawing.",
-                            "BCore PDM — Release Blocked",
-                            MessageBoxButtons.OK,
-                            MessageBoxIcon.Stop);
-                        return;
+                        string modelName = Path.GetFileName(referencedModel);
+                        bool isRefAsm = Path.GetExtension(referencedModel)
+                            .Equals(".sldasm", StringComparison.OrdinalIgnoreCase);
+                        string statusDisplay =
+                            string.IsNullOrEmpty(modelStatus) ? "WIP" : modelStatus;
+
+                        var chain = MessageBox.Show(
+                            "The referenced " + (isRefAsm ? "Assembly" : "Part") +
+                            " is not yet Released.\n\n" +
+                            "File   : " + modelName + "\n" +
+                            "Status : " + statusDisplay + "\n\n" +
+                            "Release it now, then release the Drawing?",
+                            "BCore PDM — Release Referenced Model",
+                            MessageBoxButtons.YesNo, MessageBoxIcon.Question);
+
+                        if (chain != DialogResult.Yes) return;
+
+                        // Open the model if it isn't already.
+                        ModelDoc2 refDoc = PDMLiteAddin.SwApp
+                            .GetOpenDocumentByName(referencedModel) as ModelDoc2;
+                        if (refDoc == null)
+                        {
+                            int openType = isRefAsm
+                                ? (int)swDocumentTypes_e.swDocASSEMBLY
+                                : (int)swDocumentTypes_e.swDocPART;
+                            int oErrs = 0, oWarn = 0;
+                            refDoc = PDMLiteAddin.SwApp.OpenDoc6(
+                                referencedModel, openType,
+                                (int)swOpenDocOptions_e.swOpenDocOptions_Silent,
+                                "", ref oErrs, ref oWarn) as ModelDoc2;
+                        }
+
+                        if (refDoc == null)
+                        {
+                            MessageBox.Show(
+                                "Could not open " + modelName + ".\n" +
+                                "Open it manually and release it first.",
+                                "BCore PDM — Release Blocked",
+                                MessageBoxButtons.OK, MessageBoxIcon.Stop);
+                            return;
+                        }
+
+                        // Release through the normal path — all validations apply.
+                        ReleaseFile(refDoc);
+
+                        // If the model release was blocked or cancelled by the user,
+                        // abort the drawing release too (no extra message needed —
+                        // ReleaseFile already explained what blocked it).
+                        if (DatabaseManager.GetFileStatus(referencedModel) != "Released")
+                            return;
+
+                        // The model release closes/reopens the drawing (because the
+                        // drawing is open and holds a reference to the model).
+                        // Re-fetch doc so the rest of this function has a live object.
+                        doc = PDMLiteAddin.SwApp.GetOpenDocumentByName(filePath)
+                            as ModelDoc2;
+                        if (doc == null)
+                        {
+                            int rErrs = 0, rWarn = 0;
+                            doc = PDMLiteAddin.SwApp.OpenDoc6(filePath,
+                                (int)swDocumentTypes_e.swDocDRAWING,
+                                (int)swOpenDocOptions_e.swOpenDocOptions_Silent,
+                                "", ref rErrs, ref rWarn) as ModelDoc2;
+                        }
+                        if (doc == null)
+                        {
+                            MessageBox.Show(
+                                "The " + (isRefAsm ? "Assembly" : "Part") +
+                                " was released, but the Drawing could not be " +
+                                "reopened.\n\nPlease try releasing the Drawing again.",
+                                "BCore PDM — Reopen Failed",
+                                MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                            return;
+                        }
                     }
 
                     // If the drawing's model is an ASSEMBLY, the assembly can be
