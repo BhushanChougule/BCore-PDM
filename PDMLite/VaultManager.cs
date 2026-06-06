@@ -1504,13 +1504,12 @@ namespace PDMLite
             DrawingDoc draw = newDrw as DrawingDoc;
             if (draw != null)
             {
-                // Fill the template's predefined views with the model. If the
-                // template has none, fall back to standard 3rd-angle views so
-                // the engineer still gets populated geometry, not a blank sheet.
-                var res = (swInsertModelInPredefinedViewError_e)
-                    draw.InsertModelInPredefinedView(filePath);
-                if (res != swInsertModelInPredefinedViewError_e
-                        .swInsertModelInPredefinedView_NoError)
+                // Fill the template's predefined views with the model. The call
+                // returns 0 on success; any non-zero result (e.g. the template
+                // has no predefined views) falls back to standard 3rd-angle
+                // views so the engineer never gets a blank sheet.
+                int res = (int)draw.InsertModelInPredefinedView(filePath);
+                if (res != 0)
                     draw.Create3rdAngleViews2(filePath);
 
                 newDrw.ViewZoomtofit2();
