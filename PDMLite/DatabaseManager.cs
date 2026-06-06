@@ -726,5 +726,32 @@ namespace PDMLite
             }
             return "";
         }
+
+        // Returns the PartNumber stored in the vault for the part or assembly
+        // that shares the same base filename as the given drawing path.
+        // e.g. "TEST 1.SLDDRW" → looks for "TEST 1.SLDPRT" or "TEST 1.SLDASM"
+        // and returns its PartNumber. Returns "" if not found.
+        public static string GetDrawingModelPartNo(string drawingFilePath)
+        {
+            string baseName = System.IO.Path.GetFileNameWithoutExtension(
+                drawingFilePath);
+            lock (_lock)
+            {
+                var doc = LoadOrCreate();
+                foreach (var el in doc.Root.Element("Files").Elements("File"))
+                {
+                    string fn = (string)el.Element("FileName") ?? "";
+                    string fnBase = System.IO.Path.GetFileNameWithoutExtension(fn);
+                    string fnExt = System.IO.Path.GetExtension(fn).ToLower();
+                    if (string.Equals(fnBase, baseName,
+                            StringComparison.OrdinalIgnoreCase) &&
+                        (fnExt == ".sldprt" || fnExt == ".sldasm"))
+                    {
+                        return (string)el.Element("PartNumber") ?? "";
+                    }
+                }
+            }
+            return "";
+        }
     }
 }

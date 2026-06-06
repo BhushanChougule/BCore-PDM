@@ -513,10 +513,20 @@ namespace PDMLite
                     AutoSize = true
                 });
 
+                // Drawings have no PartNo of their own — look up the matching
+                // part/assembly record from the DB by shared base filename.
+                string displayPartNo = file.PartNumber;
+                if (string.IsNullOrEmpty(displayPartNo) &&
+                    string.Equals(
+                        Path.GetExtension(file.FilePath),
+                        ".slddrw", StringComparison.OrdinalIgnoreCase))
+                    displayPartNo = DatabaseManager.GetDrawingModelPartNo(
+                        file.FilePath);
+
                 card.Controls.Add(new Label
                 {
-                    Text = string.IsNullOrEmpty(file.PartNumber)
-                                ? "No Part No" : file.PartNumber,
+                    Text = string.IsNullOrEmpty(displayPartNo)
+                                ? "No Part No" : displayPartNo,
                     Font = new Font("Segoe UI", 3.5f * _scale),
                     ForeColor = cTextGray,
                     Location = new Point(S(8), S(33)),

@@ -196,6 +196,8 @@ Methods:
 
 \- GetFileHistory(filePath) → returns List<HistoryEntry> reversed (most recent first)
 
+\- GetDrawingModelPartNo(drawingFilePath) → looks up PartNumber of the part/assembly sharing the same base filename as the given drawing (e.g. "TEST 1.SLDDRW" → finds "TEST 1.SLDPRT" record and returns its PartNumber); returns "" if not found. Used by search result cards so drawings show the associated part number.
+
 \- AddRevisionRequest, AddUnlockRequest, AddReleaseRequest → all call private AddRequest(type,...)
 
 \- GetPendingRequests, GetRequestsByUser(user), ResolveRequest
