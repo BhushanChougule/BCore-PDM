@@ -1492,12 +1492,29 @@ namespace PDMLite
                 }
             }
 
-            // No drawing found — create a new one immediately (no prompt).
-            PDMLiteAddin.SwApp.NewDocument(
-                PDMLiteAddin.SwApp.GetUserPreferenceStringValue(
-                    (int)swUserPreferenceStringValue_e
-                        .swDefaultTemplateDrawing),
-                0, 0, 0);
+            // No drawing found — create one from the model immediately (no
+            // prompt), the API equivalent of File > Make Drawing from Part/
+            // Assembly. Open the default drawing template and populate its
+            // predefined views with this model so the new drawing isn't blank.
+            string drwTemplate = PDMLiteAddin.SwApp.GetUserPreferenceStringValue(
+                (int)swUserPreferenceStringValue_e.swDefaultTemplateDrawing);
+            ModelDoc2 newDrw = PDMLiteAddin.SwApp
+                .NewDocument(drwTemplate, 0, 0, 0) as ModelDoc2;
+
+            DrawingDoc draw = newDrw as DrawingDoc;
+            if (draw != null)
+            {
+                // Fill the template's predefined views with the model. If the
+                // template has none, fall back to standard 3rd-angle views so
+                // the engineer still gets populated geometry, not a blank sheet.
+                var res = (swInsertModelInPredefinedViewError_e)
+                    draw.InsertModelInPredefinedView(filePath);
+                if (res != swInsertModelInPredefinedViewError_e
+                        .swInsertModelInPredefinedView_NoError)
+                    draw.Create3rdAngleViews2(filePath);
+
+                newDrw.ViewZoomtofit2();
+            }
         }
 
         // ── Label for the context-aware Open button when a drawing is active ─
