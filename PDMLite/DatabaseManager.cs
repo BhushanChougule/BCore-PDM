@@ -783,6 +783,9 @@ namespace PDMLite
                         break;
                     }
 
+                    DateTime modDate;
+                    DateTime.TryParse((string)el.Element("ModifiedDate"), out modDate);
+
                     results.Add(new VaultFile
                     {
                         FilePath = filePath,
@@ -790,7 +793,9 @@ namespace PDMLite
                         PartNumber = partNoRaw,
                         Description = descRaw,
                         Status = string.IsNullOrEmpty(status) ? "WIP" : status,
-                        Revision = (string)el.Element("Revision") ?? ""
+                        Revision = (string)el.Element("Revision") ?? "",
+                        ModifiedBy = (string)el.Element("ModifiedBy") ?? "",
+                        ModifiedDate = modDate
                     });
                 }
             }

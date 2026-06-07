@@ -51,13 +51,17 @@ namespace PDMLite
         private void BuildForm()
         {
             this.Text = "BCore PDM — Pending Requests";
-            this.Width = S(680);
-            this.Height = S(560);
             this.StartPosition = FormStartPosition.CenterScreen;
             this.FormBorderStyle = FormBorderStyle.FixedDialog;
             this.MaximizeBox = false;
             this.MinimizeBox = false;
             this.BackColor = cBg;
+            // Size the CLIENT area so bottom controls never fall under the OS
+            // title bar / borders.
+            this.ClientSize = new Size(S(680), S(560));
+
+            int cW = this.ClientSize.Width;
+            int cH = this.ClientSize.Height;
 
             Font fHeader = new Font("Segoe UI", 6f * _scale, FontStyle.Bold);
             Font fSection = new Font("Segoe UI", 4f * _scale, FontStyle.Bold);
@@ -69,7 +73,7 @@ namespace PDMLite
             {
                 BackColor = cBrandDark,
                 Location = new Point(0, 0),
-                Width = this.Width,
+                Width = cW,
                 Height = S(32)
             };
             titleBar.Controls.Add(new Label
@@ -79,18 +83,18 @@ namespace PDMLite
                 ForeColor = Color.White,
                 Location = new Point(0, 0),
                 AutoSize = false,
-                Width = this.Width,
+                Width = cW,
                 Height = S(32),
                 TextAlign = ContentAlignment.MiddleCenter
             });
             this.Controls.Add(titleBar);
 
-            int colW = (this.Width - S(40)) / 3;
+            int colW = (cW - S(40)) / 3;
             int[] colX = { S(10), S(10) + colW + S(5), S(10) + (colW + S(5)) * 2 };
             int colY = S(40);
 
             // Bottom action area reserved below the columns.
-            int bottomBarTop = this.Height - S(96);
+            int bottomBarTop = cH - S(96);
             int panelTop = colY + S(22);
             int panelH = bottomBarTop - panelTop - S(6);
 
