@@ -149,6 +149,14 @@ namespace PDMLite
                 }
                 wasCreate = existing == null;
 
+                // A brand-new file must never inherit history left behind by a
+                // previously-removed file of the same name/path (e.g. removed
+                // before the remove-purge fix shipped). Wipe any stale entries
+                // so the new file starts with a clean timeline. The Save at the
+                // end of this method persists the purge.
+                if (wasCreate)
+                    PurgeHistoryFor(doc, f.FilePath, f.FileName);
+
                 if (existing != null)
                 {
                     existing.Element("FileName").Value = f.FileName;
@@ -278,9 +286,40 @@ namespace PDMLite
                 }
 
                 foreach (var el in toRemove) el.Remove();
-                if (toRemove.Count > 0) Save(doc);
+
+                // Also purge history entries for this file so a new file
+                // created with the same name never inherits old history.
+                bool historyPurged = PurgeHistoryFor(doc, filePath, fileName);
+
+                if (toRemove.Count > 0 || historyPurged) Save(doc);
                 return toRemove.Count;
             }
+        }
+
+        // Removes every RevisionHistory entry that belongs to the given file,
+        // matched by exact FilePath or by filename (so RELEASED-copy entries and
+        // legacy duplicates are caught too). Caller holds _lock and Saves.
+        // Returns true if any entry was removed.
+        private static bool PurgeHistoryFor(XDocument doc, string filePath,
+            string fileName)
+        {
+            var history = doc.Root.Element("RevisionHistory");
+            if (history == null) return false;
+
+            var toRemove = new List<XElement>();
+            foreach (var el in history.Elements("Entry"))
+            {
+                string entryPath = (string)el.Element("FilePath") ?? "";
+                bool pathMatch = !string.IsNullOrEmpty(filePath) &&
+                    string.Equals(entryPath, filePath,
+                        StringComparison.OrdinalIgnoreCase);
+                bool nameMatch = !string.IsNullOrEmpty(fileName) &&
+                    string.Equals(Path.GetFileName(entryPath), fileName,
+                        StringComparison.OrdinalIgnoreCase);
+                if (pathMatch || nameMatch) toRemove.Add(el);
+            }
+            foreach (var el in toRemove) el.Remove();
+            return toRemove.Count > 0;
         }
 
         // ════════════════════════════════════════════════════════════════
@@ -727,11 +766,13 @@ namespace PDMLite
             return "";
         }
 
-        // Returns the PartNumber stored in the vault for the part or assembly
-        // that shares the same base filename as the given drawing path.
-        // e.g. "TEST 1.SLDDRW" → looks for "TEST 1.SLDPRT" or "TEST 1.SLDASM"
-        // and returns its PartNumber. Returns "" if not found.
-        public static string GetDrawingModelPartNo(string drawingFilePath)
+        // Returns the part/assembly VaultFile that shares the same base filename
+        // as the given drawing (PartNo, Description, Status etc. live on the
+        // model, not the drawing). e.g. "TEST 1.SLDDRW" → finds "TEST 1.SLDPRT"
+        // or "TEST 1.SLDASM" and returns its record. Returns null if not found.
+        // Used by the merged search card to populate the model's details when a
+        // search matched the drawing.
+        public static VaultFile GetModelForDrawing(string drawingFilePath)
         {
             string baseName = System.IO.Path.GetFileNameWithoutExtension(
                 drawingFilePath);
@@ -747,11 +788,47 @@ namespace PDMLite
                             StringComparison.OrdinalIgnoreCase) &&
                         (fnExt == ".sldprt" || fnExt == ".sldasm"))
                     {
-                        return (string)el.Element("PartNumber") ?? "";
+                        return new VaultFile
+                        {
+                            FilePath = (string)el.Element("FilePath") ?? "",
+                            FileName = fn,
+                            PartNumber = (string)el.Element("PartNumber") ?? "",
+                            Description = (string)el.Element("Description") ?? "",
+                            Revision = (string)el.Element("Revision") ?? "",
+                            Status = (string)el.Element("Status") ?? ""
+                        };
                     }
                 }
             }
-            return "";
+            return null;
+        }
+
+        // Returns the WIP path of the .slddrw that shares the same base filename
+        // as the given part/assembly (the drawing that documents it), or null if
+        // no drawing is tracked. Used by the merged search card to wire the
+        // "Open Drawing" button when a search matched only the model.
+        public static string GetDrawingPathForModel(string modelFilePath)
+        {
+            string baseName = System.IO.Path.GetFileNameWithoutExtension(
+                modelFilePath);
+            lock (_lock)
+            {
+                var doc = LoadOrCreate();
+                foreach (var el in doc.Root.Element("Files").Elements("File"))
+                {
+                    string fn = (string)el.Element("FileName") ?? "";
+                    string fnBase = System.IO.Path.GetFileNameWithoutExtension(fn);
+                    string fnExt = System.IO.Path.GetExtension(fn).ToLower();
+                    if (string.Equals(fnBase, baseName,
+                            StringComparison.OrdinalIgnoreCase) &&
+                        fnExt == ".slddrw")
+                    {
+                        string fp = (string)el.Element("FilePath") ?? "";
+                        return string.IsNullOrEmpty(fp) ? null : fp;
+                    }
+                }
+            }
+            return null;
         }
     }
 }

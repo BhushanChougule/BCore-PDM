@@ -196,7 +196,9 @@ Methods:
 
 \- GetFileHistory(filePath) → returns List<HistoryEntry> reversed (most recent first)
 
-\- GetDrawingModelPartNo(drawingFilePath) → looks up PartNumber of the part/assembly sharing the same base filename as the given drawing (e.g. "TEST 1.SLDDRW" → finds "TEST 1.SLDPRT" record and returns its PartNumber); returns "" if not found. Used by search result cards so drawings show the associated part number.
+\- GetModelForDrawing(drawingFilePath) → returns the part/assembly VaultFile sharing the same base filename as the given drawing (PartNo/Description/Status live on the model, not the drawing); null if not found. Used by the merged search card to populate model details when a search matched the drawing.
+
+\- GetDrawingPathForModel(modelFilePath) → returns the WIP path of the .slddrw sharing the same base filename as the given part/assembly (the drawing that documents it); null if none tracked. Used by the merged search card to wire "Open Drawing" when a search matched only the model.
 
 \- AddRevisionRequest, AddUnlockRequest, AddReleaseRequest → all call private AddRequest(type,...)
 
@@ -322,7 +324,9 @@ No longer uses StringBuilder/AppendLine — individual labels prevent text overl
 
 
 
-Search results: file cards with status color bar, part number, Open in SOLIDWORKS button.
+Search results: MERGED cards — a part/assembly and its drawing collapse into ONE card keyed by shared base filename (the model is primary; it owns PartNo + Description). RunSearch groups the flat SearchFiles list by basename, then fills in the counterpart that did NOT match the term (GetModelForDrawing / GetDrawingPathForModel) so both buttons can be offered. Each card shows: thick left status bar with the status text painted VERTICALLY (rotated -90°, custom Panel.Paint), file name (no extension), part number, description, and TWO buttons side by side — "Open PRT"/"Open ASM" (cBrand; disabled+greyed when no model record, e.g. orphan drawing) and "Open DRW" (cBrandDark); abbreviated so labels don't clip at the narrow task-pane width. SearchGroup is a private nested class in TaskPaneControl.
+
+Open PRT/ASM → OpenFile(modelPath). Open DRW → OpenDrawingResult(modelPath, drawingPath): opens the drawing if it exists, else opens the model and calls VaultManager.OpenOrCreateDrawing to make one (same as the task-pane Open Drawing button).
 
 Uses ActivateDoc3 if file already open, OpenDoc6 with correct type if not. Opens the canonical WIP copy (read-only when Released), never the RELEASED snapshot.
 
