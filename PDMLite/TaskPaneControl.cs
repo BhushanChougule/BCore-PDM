@@ -469,99 +469,224 @@ namespace PDMLite
             int ry = 0;
             int rw = S(188);
 
+            // Merge each part/assembly with its drawing into ONE card, keyed by
+            // shared base filename. The model is primary (it owns PartNo and
+            // Description); the drawing is the secondary file.
+            var order = new List<string>();
+            var groups = new Dictionary<string, SearchGroup>(
+                StringComparer.OrdinalIgnoreCase);
+
             foreach (var file in results)
             {
-                Color statusColor = file.Status == "Released" ? cGreen
-                                  : file.Status == "Locked" ? cOrange
+                string baseName = Path.GetFileNameWithoutExtension(file.FilePath);
+                string ext = Path.GetExtension(file.FilePath).ToLower();
+
+                SearchGroup g;
+                if (!groups.TryGetValue(baseName, out g))
+                {
+                    g = new SearchGroup { DisplayName = baseName };
+                    groups[baseName] = g;
+                    order.Add(baseName);
+                }
+
+                if (ext == ".slddrw")
+                {
+                    g.DrawingPath = file.FilePath;
+                    if (string.IsNullOrEmpty(g.Status)) g.Status = file.Status;
+                }
+                else
+                {
+                    g.ModelPath = file.FilePath;
+                    g.ModelExt = ext;
+                    g.PartNumber = file.PartNumber;
+                    g.Description = file.Description;
+                    g.Status = file.Status;          // model status is authoritative
+                    g.DisplayName = baseName;
+                }
+            }
+
+            // Fill in the counterpart file that did NOT match the term so each
+            // card can offer both buttons (a part-number search matches only the
+            // model; the drawing carries no PartNo of its own).
+            foreach (string baseName in order)
+            {
+                SearchGroup g = groups[baseName];
+                if (g.ModelPath == null && g.DrawingPath != null)
+                {
+                    VaultFile model =
+                        DatabaseManager.GetModelForDrawing(g.DrawingPath);
+                    if (model != null)
+                    {
+                        g.ModelPath = model.FilePath;
+                        g.ModelExt = Path.GetExtension(model.FileName).ToLower();
+                        g.PartNumber = model.PartNumber;
+                        g.Description = model.Description;
+                        g.Status = model.Status;
+                        g.DisplayName =
+                            Path.GetFileNameWithoutExtension(model.FileName);
+                    }
+                }
+                else if (g.DrawingPath == null && g.ModelPath != null)
+                {
+                    g.DrawingPath =
+                        DatabaseManager.GetDrawingPathForModel(g.ModelPath);
+                }
+            }
+
+            int barW = S(15);
+            int cardH = S(74);
+            int contentLeft = barW + S(6);
+            int contentW = rw - contentLeft - S(3);
+
+            foreach (string baseName in order)
+            {
+                SearchGroup g = groups[baseName];
+
+                Color statusColor = g.Status == "Released" ? cGreen
+                                  : g.Status == "Locked" ? cOrange
                                   : cBrand;
+                string statusText = (string.IsNullOrEmpty(g.Status)
+                                        ? "WIP" : g.Status).ToUpper();
+
+                string modelPath = g.ModelPath;
+                string drawingPath = g.DrawingPath;
+                bool hasModel = !string.IsNullOrEmpty(modelPath);
 
                 Panel card = new Panel
                 {
                     Location = new Point(0, ry),
                     Width = rw,
-                    Height = S(68),
+                    Height = cardH,
                     BackColor = cCard,
                     BorderStyle = BorderStyle.None
                 };
 
-                card.Controls.Add(new Panel
+                // ── Thick status bar with vertical (rotated) status text ──
+                Panel bar = new Panel
                 {
                     BackColor = statusColor,
                     Location = new Point(0, 0),
-                    Width = S(4),
-                    Height = S(68)
-                });
+                    Width = barW,
+                    Height = cardH
+                };
+                bar.Paint += (s, e) =>
+                {
+                    var gr = e.Graphics;
+                    gr.SmoothingMode =
+                        System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
+                    gr.TextRenderingHint =
+                        System.Drawing.Text.TextRenderingHint.AntiAliasGridFit;
+                    using (var bf = new Font("Segoe UI",
+                        3.1f * _scale, FontStyle.Bold))
+                    using (var br = new SolidBrush(Color.White))
+                    {
+                        var sf = new StringFormat
+                        {
+                            Alignment = StringAlignment.Center,
+                            LineAlignment = StringAlignment.Center
+                        };
+                        gr.TranslateTransform(barW / 2f, cardH / 2f);
+                        gr.RotateTransform(-90f);
+                        gr.DrawString(statusText, bf, br, 0, 0, sf);
+                    }
+                };
+                card.Controls.Add(bar);
 
+                // ── File name (no extension) ──────────────────────────────
                 card.Controls.Add(new Label
                 {
-                    Text = Path.GetFileName(file.FilePath),
+                    Text = g.DisplayName,
                     Font = new Font("Segoe UI", 3.8f * _scale, FontStyle.Bold),
                     ForeColor = cTextDark,
-                    Location = new Point(S(8), S(5)),
+                    Location = new Point(contentLeft, S(6)),
                     AutoSize = false,
-                    Width = rw - S(12),
-                    Height = S(15),
+                    Width = contentW,
+                    Height = S(14),
                     AutoEllipsis = true
                 });
 
+                // ── Part number ───────────────────────────────────────────
                 card.Controls.Add(new Label
                 {
-                    Text = file.Status ?? "WIP",
-                    Font = new Font("Segoe UI", 3.2f * _scale, FontStyle.Bold),
-                    ForeColor = statusColor,
-                    Location = new Point(S(8), S(21)),
-                    AutoSize = true
-                });
-
-                // Drawings have no PartNo of their own — look up the matching
-                // part/assembly record from the DB by shared base filename.
-                string displayPartNo = file.PartNumber;
-                if (string.IsNullOrEmpty(displayPartNo) &&
-                    string.Equals(
-                        Path.GetExtension(file.FilePath),
-                        ".slddrw", StringComparison.OrdinalIgnoreCase))
-                    displayPartNo = DatabaseManager.GetDrawingModelPartNo(
-                        file.FilePath);
-
-                card.Controls.Add(new Label
-                {
-                    Text = string.IsNullOrEmpty(displayPartNo)
-                                ? "No Part No" : displayPartNo,
-                    Font = new Font("Segoe UI", 3.5f * _scale),
-                    ForeColor = cTextGray,
-                    Location = new Point(S(8), S(33)),
-                    AutoSize = false,
-                    Width = rw - S(12),
-                    Height = S(13)
-                });
-
-                string filePath = file.FilePath;
-                Button btnOpen = new Button
-                {
-                    Text = "Open in SOLIDWORKS",
+                    Text = string.IsNullOrEmpty(g.PartNumber)
+                                ? "No Part No" : g.PartNumber,
                     Font = new Font("Segoe UI", 3.5f * _scale, FontStyle.Bold),
-                    Width = rw - S(8),
-                    Height = S(18),
-                    Location = new Point(S(4), S(50)),
-                    BackColor = cBrand,
+                    ForeColor = cTextGray,
+                    Location = new Point(contentLeft, S(21)),
+                    AutoSize = false,
+                    Width = contentW,
+                    Height = S(13),
+                    AutoEllipsis = true
+                });
+
+                // ── Description ───────────────────────────────────────────
+                card.Controls.Add(new Label
+                {
+                    Text = string.IsNullOrEmpty(g.Description)
+                                ? "(no description)" : g.Description,
+                    Font = new Font("Segoe UI", 3.3f * _scale),
+                    ForeColor = cTextLight,
+                    Location = new Point(contentLeft, S(34)),
+                    AutoSize = false,
+                    Width = contentW,
+                    Height = S(13),
+                    AutoEllipsis = true
+                });
+
+                // ── Two buttons: Open Part/Assembly + Open Drawing ────────
+                int gap = S(4);
+                int btnW = (contentW - gap) / 2;
+                int btnY = S(52);
+                int btnH = S(18);
+
+                string partLabel = g.ModelExt == ".sldasm"
+                                    ? "Open Assembly" : "Open Part";
+                Button btnModel = new Button
+                {
+                    Text = partLabel,
+                    Font = new Font("Segoe UI", 3.4f * _scale, FontStyle.Bold),
+                    Width = btnW,
+                    Height = btnH,
+                    Location = new Point(contentLeft, btnY),
+                    BackColor = hasModel ? cBrand : cTextLight,
+                    ForeColor = Color.White,
+                    FlatStyle = FlatStyle.Flat,
+                    Enabled = hasModel,
+                    Cursor = Cursors.Hand
+                };
+                btnModel.FlatAppearance.BorderSize = 0;
+                if (hasModel)
+                    btnModel.Click += (s, e) => OpenFile(modelPath);
+                card.Controls.Add(btnModel);
+
+                Button btnDrawing = new Button
+                {
+                    Text = "Open Drawing",
+                    Font = new Font("Segoe UI", 3.4f * _scale, FontStyle.Bold),
+                    Width = btnW,
+                    Height = btnH,
+                    Location = new Point(contentLeft + btnW + gap, btnY),
+                    BackColor = cBrandDark,
                     ForeColor = Color.White,
                     FlatStyle = FlatStyle.Flat,
                     Cursor = Cursors.Hand
                 };
-                btnOpen.FlatAppearance.BorderSize = 0;
-                btnOpen.Click += (s, e) => OpenFile(filePath);
-                card.Controls.Add(btnOpen);
+                btnDrawing.FlatAppearance.BorderSize = 0;
+                btnDrawing.Click += (s, e) =>
+                    OpenDrawingResult(modelPath, drawingPath);
+                card.Controls.Add(btnDrawing);
 
+                // ── Divider ───────────────────────────────────────────────
                 card.Controls.Add(new Panel
                 {
                     BackColor = cBorder,
-                    Location = new Point(0, S(67)),
+                    Location = new Point(0, cardH - S(1)),
                     Width = rw,
                     Height = S(1)
                 });
 
                 _resultsPanel.Controls.Add(card);
-                ry += S(70);
+                ry += cardH + S(2);
             }
 
             // Show first N only — prompt the user to narrow a broad search.
@@ -569,7 +694,7 @@ namespace PDMLite
             {
                 _resultsPanel.Controls.Add(new Label
                 {
-                    Text = "Showing first " + results.Count +
+                    Text = "Showing first " + order.Count +
                            " — refine your search to narrow results.",
                     Font = new Font("Segoe UI", 3.3f * _scale, FontStyle.Italic),
                     ForeColor = cTextLight,
@@ -630,6 +755,44 @@ namespace PDMLite
                 MessageBox.Show("Could not open file:\n" + filePath,
                     "BCore PDM", MessageBoxButtons.OK, MessageBoxIcon.Error);
             }
+        }
+
+        // Open Drawing from a search card. If the drawing exists, open it; if
+        // none exists yet, open the part/assembly and create one from it (the
+        // same behaviour as the task-pane Open Drawing button).
+        private void OpenDrawingResult(string modelPath, string drawingPath)
+        {
+            if (!string.IsNullOrEmpty(drawingPath))
+            {
+                OpenFile(drawingPath);
+                return;
+            }
+
+            if (string.IsNullOrEmpty(modelPath))
+            {
+                MessageBox.Show(
+                    "No part or assembly is associated with this drawing.",
+                    "BCore PDM", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                return;
+            }
+
+            // No drawing yet — open the model, then make one from it.
+            OpenFile(modelPath);
+            ModelDoc2 model = PDMLiteAddin.SwApp
+                ?.GetOpenDocumentByName(modelPath) as ModelDoc2;
+            if (model != null) VaultManager.OpenOrCreateDrawing(model);
+        }
+
+        // One merged search result: a part/assembly grouped with its drawing.
+        private class SearchGroup
+        {
+            public string DisplayName;   // base filename, no extension
+            public string ModelPath;     // part/assembly path, or null
+            public string ModelExt;      // ".sldprt" / ".sldasm", or null
+            public string DrawingPath;   // .slddrw path, or null
+            public string PartNumber;
+            public string Description;
+            public string Status;        // model status if present, else drawing
         }
 
         // ── Refresh ───────────────────────────────────────────────────
