@@ -149,6 +149,14 @@ namespace PDMLite
                 }
                 wasCreate = existing == null;
 
+                // A brand-new file must never inherit history left behind by a
+                // previously-removed file of the same name/path (e.g. removed
+                // before the remove-purge fix shipped). Wipe any stale entries
+                // so the new file starts with a clean timeline. The Save at the
+                // end of this method persists the purge.
+                if (wasCreate)
+                    PurgeHistoryFor(doc, f.FilePath, f.FileName);
+
                 if (existing != null)
                 {
                     existing.Element("FileName").Value = f.FileName;
@@ -281,22 +289,37 @@ namespace PDMLite
 
                 // Also purge history entries for this file so a new file
                 // created with the same name never inherits old history.
-                var historyToRemove = new List<XElement>();
-                foreach (var el in doc.Root.Element("RevisionHistory").Elements("Entry"))
-                {
-                    string entryPath = (string)el.Element("FilePath") ?? "";
-                    bool pathMatch = string.Equals(entryPath, filePath,
-                        StringComparison.OrdinalIgnoreCase);
-                    bool nameMatch = string.Equals(
-                        Path.GetFileName(entryPath), fileName,
-                        StringComparison.OrdinalIgnoreCase);
-                    if (pathMatch || nameMatch) historyToRemove.Add(el);
-                }
-                foreach (var el in historyToRemove) el.Remove();
+                bool historyPurged = PurgeHistoryFor(doc, filePath, fileName);
 
-                if (toRemove.Count > 0 || historyToRemove.Count > 0) Save(doc);
+                if (toRemove.Count > 0 || historyPurged) Save(doc);
                 return toRemove.Count;
             }
+        }
+
+        // Removes every RevisionHistory entry that belongs to the given file,
+        // matched by exact FilePath or by filename (so RELEASED-copy entries and
+        // legacy duplicates are caught too). Caller holds _lock and Saves.
+        // Returns true if any entry was removed.
+        private static bool PurgeHistoryFor(XDocument doc, string filePath,
+            string fileName)
+        {
+            var history = doc.Root.Element("RevisionHistory");
+            if (history == null) return false;
+
+            var toRemove = new List<XElement>();
+            foreach (var el in history.Elements("Entry"))
+            {
+                string entryPath = (string)el.Element("FilePath") ?? "";
+                bool pathMatch = !string.IsNullOrEmpty(filePath) &&
+                    string.Equals(entryPath, filePath,
+                        StringComparison.OrdinalIgnoreCase);
+                bool nameMatch = !string.IsNullOrEmpty(fileName) &&
+                    string.Equals(Path.GetFileName(entryPath), fileName,
+                        StringComparison.OrdinalIgnoreCase);
+                if (pathMatch || nameMatch) toRemove.Add(el);
+            }
+            foreach (var el in toRemove) el.Remove();
+            return toRemove.Count > 0;
         }
 
         // ════════════════════════════════════════════════════════════════
