@@ -4,10 +4,40 @@ using System;
 using System.Collections.Generic;
 using System.Drawing;
 using System.IO;
+using System.Linq;
+using System.Text;
 using System.Windows.Forms;
 
 namespace PDMLite
 {
+    // Outcome of a batch operation (bulk release / bulk approve). Names of files
+    // that succeeded vs. were skipped (with a short reason), for one summary
+    // dialog at the end instead of a popup per file.
+    public class BatchResult
+    {
+        public List<string> Succeeded = new List<string>();
+        public List<string> Skipped   = new List<string>();
+        public int Total => Succeeded.Count + Skipped.Count;
+
+        public string BuildSummary(string heading)
+        {
+            var sb = new StringBuilder();
+            sb.AppendLine(heading);
+            sb.AppendLine();
+            sb.AppendLine("Done  (" + Succeeded.Count + "):");
+            sb.AppendLine(Succeeded.Count == 0
+                ? "   (none)"
+                : "   • " + string.Join("\n   • ", Succeeded));
+            if (Skipped.Count > 0)
+            {
+                sb.AppendLine();
+                sb.AppendLine("Skipped  (" + Skipped.Count + "):");
+                sb.AppendLine("   • " + string.Join("\n   • ", Skipped));
+            }
+            return sb.ToString();
+        }
+    }
+
     public static class VaultManager
     {
         private const string WipFolder = @"N:\PDM-SolidWorks\WIP";
@@ -373,9 +403,11 @@ namespace PDMLite
                         chainedRelease = true;
                         chainedModelName = modelName;
 
-                        // The model release closes/reopens the drawing (because the
-                        // drawing is open and holds a reference to the model).
-                        // Re-fetch doc so the rest of this function has a live object.
+                        // The model release closed the drawing (it referenced the
+                        // model, blocking CloseDoc(model)) and — being a suppressed
+                        // release — did not reopen it. Re-fetch, reopening the
+                        // drawing if needed, so the rest of this function has a
+                        // live object to finish releasing.
                         doc = PDMLiteAddin.SwApp.GetOpenDocumentByName(filePath)
                             as ModelDoc2;
                         if (doc == null)
@@ -703,40 +735,40 @@ namespace PDMLite
                     MessageBoxIcon.Information);
             }
 
-            // Close and reopen the WIP copy so SOLIDWORKS immediately adopts
-            // the OS read-only flag. Without this, SW keeps its cached writable
-            // state until the user manually closes and reopens the file.
+            // A Released file is pure output — there is no point reopening it
+            // read-only afterwards (it only wastes load time and memory and
+            // makes the user wait). So we CLOSE the released file instead of
+            // reopening it. It opens read-only on demand the next time it is
+            // genuinely needed.
             try
             {
-                // If this is a part/assembly and its drawing is open, the open
+                // If this is a part/assembly with its drawing open, the open
                 // drawing holds a reference to the model, so CloseDoc(model) is
-                // refused — the model never closes and never adopts the read-only
-                // flag. Pre-close the drawing first, then reopen it afterwards.
-                bool drwWasOpen = false;
-                string drwPreClose = !isDrawing ? FindDrawingPath(filePath) : null;
-                if (drwPreClose != null)
+                // refused. Close the drawing first so the model can close.
+                // For an interactive single release we then reopen that drawing
+                // — but only if it is still WIP (the user's working file). A
+                // Released drawing is never reopened, and in bulk/chained
+                // releases (suppressPrompts) nothing is reopened.
+                bool reopenWipDrawing = false;
+                string drwPath = !isDrawing ? FindDrawingPath(filePath) : null;
+                if (drwPath != null)
                 {
                     ModelDoc2 openDrwCheck = PDMLiteAddin.SwApp
-                        ?.GetOpenDocumentByName(drwPreClose) as ModelDoc2;
+                        ?.GetOpenDocumentByName(drwPath) as ModelDoc2;
                     if (openDrwCheck != null)
                     {
-                        drwWasOpen = true;
-                        try { PDMLiteAddin.SwApp.CloseDoc(drwPreClose); } catch { }
+                        reopenWipDrawing = !suppressPrompts &&
+                            DatabaseManager.GetFileStatus(drwPath) != "Released";
+                        try { PDMLiteAddin.SwApp.CloseDoc(drwPath); } catch { }
                     }
                 }
 
                 PDMLiteAddin.SwApp.CloseDoc(filePath);
-                int errs = 0, warnings = 0;
-                PDMLiteAddin.SwApp.OpenDoc6(filePath, docType,
-                    (int)swOpenDocOptions_e.swOpenDocOptions_Silent,
-                    "", ref errs, ref warnings);
 
-                // Reopen the drawing if we pre-closed it. It is also Released
-                // (or will be released next), so it opens read-only too.
-                if (drwWasOpen && drwPreClose != null)
+                if (reopenWipDrawing && drwPath != null)
                 {
                     int eDrw = 0, wDrw = 0;
-                    PDMLiteAddin.SwApp.OpenDoc6(drwPreClose,
+                    PDMLiteAddin.SwApp.OpenDoc6(drwPath,
                         (int)swDocumentTypes_e.swDocDRAWING,
                         (int)swOpenDocOptions_e.swOpenDocOptions_Silent,
                         "", ref eDrw, ref wDrw);
@@ -746,7 +778,9 @@ namespace PDMLite
         }
 
         // ── NEW REVISION ──────────────────────────────────────────────────
-        public static void StartNewRevision(ModelDoc2 doc)
+        // suppressPrompts (used by bulk approve): skips the confirm prompt and
+        // the final summary dialog only. Blocker/failure dialogs still show.
+        public static void StartNewRevision(ModelDoc2 doc, bool suppressPrompts = false)
         {
             string user = PDMLiteAddin.CurrentUser;
             if (!IsMaster(user)) { NotMaster(); return; }
@@ -767,17 +801,20 @@ namespace PDMLite
             string nextRev = GetNextRevision(currentRev);
             string partNo = PropertyValidator.GetProperty(doc, "PartNo");
 
-            var confirm = MessageBox.Show(
-                "Start a new revision?\n\n" +
-                "Current : REV " + currentRev + "\n" +
-                "New     : REV " + nextRev + "\n\n" +
-                "The current released file will be archived.\n" +
-                "A new WIP revision will begin.",
-                "BCore PDM — New Revision",
-                MessageBoxButtons.YesNo,
-                MessageBoxIcon.Question);
+            if (!suppressPrompts)
+            {
+                var confirm = MessageBox.Show(
+                    "Start a new revision?\n\n" +
+                    "Current : REV " + currentRev + "\n" +
+                    "New     : REV " + nextRev + "\n\n" +
+                    "The current released file will be archived.\n" +
+                    "A new WIP revision will begin.",
+                    "BCore PDM — New Revision",
+                    MessageBoxButtons.YesNo,
+                    MessageBoxIcon.Question);
 
-            if (confirm != DialogResult.Yes) return;
+                if (confirm != DialogResult.Yes) return;
+            }
 
             int reopenType = doc.GetType();
 
@@ -899,8 +936,9 @@ namespace PDMLite
                 msg += "\n\nUsed in these assemblies — review and re-release " +
                        "when ready:\n  • " + string.Join("\n  • ", parents);
 
-            MessageBox.Show(msg, "BCore PDM",
-                MessageBoxButtons.OK, MessageBoxIcon.Information);
+            if (!suppressPrompts)
+                MessageBox.Show(msg, "BCore PDM",
+                    MessageBoxButtons.OK, MessageBoxIcon.Information);
         }
 
         // ── HELPERS ───────────────────────────────────────────────────────
@@ -1847,6 +1885,158 @@ namespace PDMLite
             noteForm.Controls.Add(noteCancel);
 
             return noteForm.ShowDialog() == DialogResult.OK ? note : null;
+        }
+
+        // ── Batch helpers (bulk release / bulk approve) ───────────────────
+
+        // Open a vault file by path, choosing the doc type from its extension.
+        // Returns the already-open doc if SOLIDWORKS has it; null on failure.
+        public static ModelDoc2 OpenByPath(string filePath)
+        {
+            if (string.IsNullOrEmpty(filePath) || !File.Exists(filePath)) return null;
+
+            ModelDoc2 existing = PDMLiteAddin.SwApp
+                ?.GetOpenDocumentByName(filePath) as ModelDoc2;
+            if (existing != null) return existing;
+
+            string ext = Path.GetExtension(filePath).ToLower();
+            int type = ext == ".sldasm" ? (int)swDocumentTypes_e.swDocASSEMBLY
+                     : ext == ".slddrw" ? (int)swDocumentTypes_e.swDocDRAWING
+                     : (int)swDocumentTypes_e.swDocPART;
+            int e = 0, w = 0;
+            return PDMLiteAddin.SwApp.OpenDoc6(filePath, type,
+                (int)swOpenDocOptions_e.swOpenDocOptions_Silent,
+                "", ref e, ref w) as ModelDoc2;
+        }
+
+        // Release ordering: parts before assemblies (assembly gate needs its
+        // children Released) before drawings (drawing gate needs its model
+        // Released). Keeps batch gates passing without manual ordering.
+        private static int ReleaseOrderKey(string filePath)
+        {
+            string ext = Path.GetExtension(filePath ?? "").ToLower();
+            if (ext == ".sldprt") return 0;
+            if (ext == ".sldasm") return 1;
+            return 2; // .slddrw and anything else last
+        }
+
+        // Release a batch of WIP files in one pass. Opens each, runs the normal
+        // ReleaseFile with its confirm/success popups suppressed (blocker and
+        // validation dialogs still show so the Master sees why anything is
+        // skipped). Returns a per-file result for one summary at the end.
+        public static BatchResult BulkRelease(IEnumerable<string> filePaths)
+        {
+            var result = new BatchResult();
+            string user = PDMLiteAddin.CurrentUser;
+            if (!IsMaster(user)) { NotMaster(); return result; }
+
+            var ordered = (filePaths ?? Enumerable.Empty<string>())
+                .Where(p => !string.IsNullOrEmpty(p))
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .OrderBy(ReleaseOrderKey)
+                .ToList();
+
+            foreach (string path in ordered)
+            {
+                string name = Path.GetFileName(path);
+
+                if (DatabaseManager.GetFileStatus(path) == "Released")
+                {
+                    result.Skipped.Add(name + " — already Released");
+                    continue;
+                }
+
+                ModelDoc2 doc = OpenByPath(path);
+                if (doc == null)
+                {
+                    result.Skipped.Add(name + " — could not open");
+                    continue;
+                }
+
+                ReleaseFile(doc, suppressPrompts: true);
+
+                if (DatabaseManager.GetFileStatus(path) == "Released")
+                    result.Succeeded.Add(name);
+                else
+                    result.Skipped.Add(name + " — blocked (see message)");
+            }
+
+            return result;
+        }
+
+        // Approve a batch of pending requests, each by its own type: Unlock →
+        // UnlockFile, Revision → StartNewRevision, Release → ReleaseFile. Done
+        // silently with one summary at the end. A request is only resolved when
+        // its action actually succeeded, so a blocked release stays pending for
+        // the Master to retry after fixing it.
+        public static BatchResult BulkApprove(IEnumerable<RevisionRequest> requests)
+        {
+            var result = new BatchResult();
+            string user = PDMLiteAddin.CurrentUser;
+            if (!IsMaster(user)) { NotMaster(); return result; }
+
+            var list = (requests ?? Enumerable.Empty<RevisionRequest>()).ToList();
+
+            // 1) Unlocks — pure DB/read-only ops, always succeed.
+            foreach (var r in list.Where(r => r.RequestType == "Unlock"))
+            {
+                UnlockFile(r.FilePath);
+                DatabaseManager.ResolveRequest(r.Id, "Approved");
+                EmailManager.NotifyRequestApproved("Unlock", r.FileName, r.RequestedBy);
+                AuditLogger.Log("ApproveRequest", user, r.FileName, "", "",
+                    "bulk unlock (requested by " + r.RequestedBy + ")");
+                result.Succeeded.Add(r.FileName + "  (unlock)");
+            }
+
+            // 2) Revisions.
+            foreach (var r in list.Where(r => r.RequestType == "Revision" ||
+                                              string.IsNullOrEmpty(r.RequestType)))
+            {
+                ModelDoc2 doc = OpenByPath(r.FilePath);
+                if (doc == null)
+                {
+                    result.Skipped.Add(r.FileName + " — could not open (revision)");
+                    continue;
+                }
+                StartNewRevision(doc, suppressPrompts: true);
+                if (DatabaseManager.GetFileStatus(r.FilePath) == "WIP")
+                {
+                    DatabaseManager.ResolveRequest(r.Id, "Approved");
+                    EmailManager.NotifyRequestApproved("Revision", r.FileName, r.RequestedBy);
+                    AuditLogger.Log("ApproveRequest", user, r.FileName, "", "",
+                        "bulk revision (requested by " + r.RequestedBy + ")");
+                    result.Succeeded.Add(r.FileName + "  (revision)");
+                }
+                else
+                {
+                    result.Skipped.Add(r.FileName + " — revision did not complete");
+                }
+            }
+
+            // 3) Releases — ordered parts→assemblies→drawings.
+            foreach (var r in list.Where(r => r.RequestType == "Release")
+                                  .OrderBy(r => ReleaseOrderKey(r.FilePath)))
+            {
+                ModelDoc2 doc = OpenByPath(r.FilePath);
+                if (doc == null)
+                {
+                    result.Skipped.Add(r.FileName + " — could not open (release)");
+                    continue;
+                }
+                ReleaseFile(doc, suppressPrompts: true);
+                if (DatabaseManager.GetFileStatus(r.FilePath) == "Released")
+                {
+                    DatabaseManager.ResolveRequest(r.Id, "Approved");
+                    EmailManager.NotifyRequestApproved("Release", r.FileName, r.RequestedBy);
+                    result.Succeeded.Add(r.FileName + "  (release)");
+                }
+                else
+                {
+                    result.Skipped.Add(r.FileName + " — blocked (see message)");
+                }
+            }
+
+            return result;
         }
 
         // ── APPROVE REQUEST — Master approves and starts new revision ─

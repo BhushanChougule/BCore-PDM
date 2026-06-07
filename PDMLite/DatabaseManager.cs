@@ -737,6 +737,71 @@ namespace PDMLite
             return results;
         }
 
+        // Returns WIP (releasable) files for the Bulk Release picker, optionally
+        // filtered by PartNumber/Description/FileName. Released/Locked files are
+        // excluded (a Released file can't be re-released). Deduped by filename,
+        // capped at MaxSearchResults (truncated=true when more matched), and the
+        // file must exist on disk (orphan records are skipped, not shown). Unlike
+        // SearchFiles this does NOT purge orphans — the picker only reads.
+        public static List<VaultFile> GetReleasableFiles(string filter,
+            out bool truncated)
+        {
+            truncated = false;
+            var results = new List<VaultFile>();
+            string term = (filter ?? "").ToLower().Trim();
+            var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+            lock (_lock)
+            {
+                var doc = LoadOrCreate();
+                foreach (var el in doc.Root.Element("Files").Elements("File"))
+                {
+                    string status = (string)el.Element("Status") ?? "";
+                    // Releasable = WIP (or legacy blank). Skip Released/Locked.
+                    if (!(status == "WIP" || status == ""))
+                        continue;
+
+                    string fileName  = (string)el.Element("FileName") ?? "";
+                    string partNoRaw = (string)el.Element("PartNumber") ?? "";
+                    string descRaw   = (string)el.Element("Description") ?? "";
+
+                    if (term.Length > 0 &&
+                        !(partNoRaw.ToLower().Contains(term) ||
+                          descRaw.ToLower().Contains(term) ||
+                          fileName.ToLower().Contains(term)))
+                        continue;
+
+                    string filePath = (string)el.Element("FilePath") ?? "";
+                    if (string.IsNullOrEmpty(filePath) || !File.Exists(filePath))
+                        continue;
+
+                    if (!seen.Add(fileName)) continue;
+
+                    if (results.Count >= MaxSearchResults)
+                    {
+                        truncated = true;
+                        break;
+                    }
+
+                    DateTime modDate;
+                    DateTime.TryParse((string)el.Element("ModifiedDate"), out modDate);
+
+                    results.Add(new VaultFile
+                    {
+                        FilePath = filePath,
+                        FileName = fileName,
+                        PartNumber = partNoRaw,
+                        Description = descRaw,
+                        Status = string.IsNullOrEmpty(status) ? "WIP" : status,
+                        Revision = (string)el.Element("Revision") ?? "",
+                        ModifiedBy = (string)el.Element("ModifiedBy") ?? "",
+                        ModifiedDate = modDate
+                    });
+                }
+            }
+            return results;
+        }
+
         // Find another file already using the given part number.
         // Returns the conflicting file's name, or null if no conflict.
         // Comparison is case-insensitive and trimmed; the file at

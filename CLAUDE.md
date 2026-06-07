@@ -204,6 +204,8 @@ Methods:
 
 \- GetDrawingPathForModel(modelFilePath) → returns the WIP path of the .slddrw sharing the same base filename as the given part/assembly (the drawing that documents it); null if none tracked. Used by the merged search card to wire "Open Drawing" when a search matched only the model.
 
+\- GetReleasableFiles(filter, out truncated) → returns WIP (releasable) files for the Bulk Release picker, optionally filtered by PartNumber/Description/FileName; excludes Released/Locked; deduped by filename; capped at MaxSearchResults; file must exist on disk (orphans skipped, NOT purged — read-only picker)
+
 \- AddRevisionRequest, AddUnlockRequest, AddReleaseRequest → all call private AddRequest(type,...)
 
 \- GetPendingRequests, GetRequestsByUser(user), ResolveRequest
@@ -230,7 +232,15 @@ Core vault operations.
 
 \- ReleaseFile(doc, suppressPrompts=false) → validates → (assembly) parts Released + drawing-release gate → exports → copies to RELEASED → sets read-only. Releasing a Drawing whose model is still WIP offers ONE prompt to release both; on Yes the model is released via ReleaseFile(model, suppressPrompts:true) so the pair needs only a single confirm + single combined success. suppressPrompts skips the confirm + success dialogs only (blocker/validation dialogs still show)
 
-\- StartNewRevision(doc) → removes read-only → archives → bumps rev → saves → sets WIP → auto-starts associated drawing revision → warns about parent assemblies
+\- StartNewRevision(doc, suppressPrompts=false) → removes read-only → archives → bumps rev → saves → sets WIP → auto-starts associated drawing revision → warns about parent assemblies. suppressPrompts (bulk approve) skips the confirm + final summary dialogs only; blocker/failure dialogs still show
+
+\- OpenByPath(filePath) → opens a vault file choosing doc type from extension (returns already-open doc if SOLIDWORKS has it; null on failure). Used by the batch helpers
+
+\- BulkRelease(filePaths) → releases a batch of WIP files in one pass, ordered parts→assemblies→drawings (so gates pass); each: OpenByPath + ReleaseFile(suppressPrompts:true) + check status; returns a BatchResult (Succeeded/Skipped names). Blocker/validation dialogs still show so the Master sees why anything is skipped
+
+\- BulkApprove(requests) → approves a batch of pending requests, each by type: Unlock→UnlockFile, Revision→StartNewRevision, Release→ReleaseFile (releases ordered parts→assemblies→drawings); only resolves a request when its action actually succeeded (a blocked release stays pending); returns a BatchResult
+
+\- BatchResult (top-level class in VaultManager.cs) = Succeeded + Skipped name lists + BuildSummary(heading) for one summary dialog
 
 \- RollbackRevision(doc) → shows RollbackDialog → archives current → restores selected → offers matching drawing rollback (if archive exists) → warns about parent assemblies
 
@@ -348,17 +358,39 @@ Uses ActivateDoc3 if file already open, OpenDoc6 with correct type if not. Opens
 
 \### PendingRequestsForm.cs
 
-DPI-aware Form (680×500 scaled). S(v)=v\*\_scale. Opened from PENDING REQUESTS button in task pane.
+DPI-aware Form (680×560 scaled). S(v)=v\*\_scale. Opened from PENDING REQUESTS button in task pane. Doubles as the Master batch-action hub (keeps the task pane uncluttered).
 
 \- Three scrollable columns: Unlock | Revision | Release (categorised by RevisionRequest.RequestType)
 
 \- Each column has a coloured header (orange/purple/green) and scrollable card list
 
-\- Card: filename, requested-by, date, optional note, Approve + Reject buttons
+\- Card: selection checkbox (top-right, Tag=request), filename, requested-by, date, optional note, Approve + Reject buttons
 
-\- Approve logic by type: Unlock→UnlockFile, Revision→ApproveRequest/StartNewRevision, Release→ReleaseFile
+\- Single Approve logic by type (ApproveSingle): Unlock→UnlockFile, Revision→ApproveRequest/StartNewRevision, Release→ReleaseFile
 
 \- Legacy requests with no RequestType default to Revision column
+
+\- Batch actions:
+
+  \- Per-column "All" select-all checkbox in each header + per-column "Approve Selected" button → VaultManager.BulkApprove(checked requests of that column). Label is "Approve Selected" (type-aware via BulkApprove), NOT "Release" — the Unlock/Revision columns approve their own action
+
+  \- Green "Approve All Pending" (spans cols 1-2) → confirms counts, then BulkApprove(all pending)
+
+  \- Blue "Bulk Release…" (col 3) → opens BulkReleaseForm (releases any WIP file, not request-based)
+
+  \- Every batch action ends with ONE summary dialog (BatchResult.BuildSummary) then LoadRequests() refresh
+
+
+
+\### BulkReleaseForm.cs
+
+DPI-aware Form (560×560 scaled), Master-only. Opened from the blue "Bulk Release…" button in PendingRequestsForm.
+
+\- Lists WIP (releasable) files from DatabaseManager.GetReleasableFiles(filter, out truncated) — filter box (Enter or Filter button), "Select all" checkbox, scrollable cards (checkbox + filename + PN/description), count label with "(first 50)" when truncated
+
+\- "Release Selected" → confirms, then VaultManager.BulkRelease(checked paths) → one summary dialog → reloads (released files drop out, no longer WIP)
+
+\- Distinct from request-based approve: these files need not have any pending request
 
 
 
@@ -460,7 +492,7 @@ DPI-aware Form. S(v)=v\*\_scale.
 
 \- Release copies the SW file to RELEASED via delete-then-copy (overwriting a read-only file on the network share fails and left stale copies); copy failures are surfaced, not swallowed
 
-\- Release closes and reopens the WIP file so SOLIDWORKS adopts the OS read-only flag immediately. If the model's drawing is open, the open drawing holds a reference to the model and CloseDoc(model) is refused — so Release pre-closes the drawing first, reopens the model read-only, then reopens the drawing (same pattern as New Revision)
+\- Release CLOSES the released file afterwards (does NOT reopen it read-only) — a released file is pure output, so reopening it only wastes load time/memory and makes the user wait. It opens read-only on demand next time it's actually needed. Applies to single AND bulk release. If a part/assembly's drawing is open it holds a reference and blocks CloseDoc(model), so Release closes the drawing first; for an interactive single release it then reopens that drawing ONLY if it is still WIP (the user's working file) — a Released drawing is never reopened, and in bulk/chained releases (suppressPrompts) nothing is reopened. New Revision still closes+reopens (the file must stay open and writable to keep editing)
 
 \- No COM auto-registration (no admin rights) — manual IT registration
 
@@ -692,6 +724,8 @@ GetNextRevision() in VaultManager.cs handles this
 
 \- Multi-user conflict detection: opening a WIP file already open by another engineer warns "FILE ALREADY OPEN — last save wins" (soft presence in vault.xml <OpenSessions>, distinct from the Master Lock). Presence follows the active doc (assembly/drawing components don't register), warns once per open, cleared on close; per-machine sessions wiped on addin load/unload + 24h staleness backstop so a crash never leaves a false warning
 
+\- Bulk operations (all in PendingRequestsForm, so the task pane stays uncluttered): per-column checkboxes + "Approve Selected" (type-aware via VaultManager.BulkApprove), green "Approve All Pending", and blue "Bulk Release…" → BulkReleaseForm (pick any WIP files, release in one pass). Batch releases ordered parts→assemblies→drawings; one summary dialog reports done/skipped; blocked files stay pending
+
 
 
 \## Remaining Features (in priority order)
@@ -701,8 +735,6 @@ GetNextRevision() in VaultManager.cs handles this
 5\. Watermark on released PDFs
 
 6\. Vault Dashboard (full screen file status view)
-
-7\. Bulk Release
 
 8\. Audit Report (export history to Excel)
 
