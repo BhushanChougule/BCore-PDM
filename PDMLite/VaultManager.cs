@@ -1588,11 +1588,23 @@ namespace PDMLite
                 string candidate = Path.Combine(searchDir, name + ".slddrw");
                 if (File.Exists(candidate))
                 {
-                    int errs = 0, warnings = 0;
-                    PDMLiteAddin.SwApp.OpenDoc6(candidate,
-                        (int)swDocumentTypes_e.swDocDRAWING,
-                        (int)swOpenDocOptions_e.swOpenDocOptions_Silent,
-                        "", ref errs, ref warnings);
+                    // Already open → bring it to the front without reopening.
+                    ModelDoc2 already = PDMLiteAddin.SwApp
+                        .GetOpenDocumentByName(candidate) as ModelDoc2;
+                    if (already != null)
+                    {
+                        int ae = 0;
+                        PDMLiteAddin.SwApp.ActivateDoc3(candidate, false,
+                            (int)swRebuildOnActivation_e.swDontRebuildActiveDoc, ref ae);
+                    }
+                    else
+                    {
+                        int errs = 0, warnings = 0;
+                        PDMLiteAddin.SwApp.OpenDoc6(candidate,
+                            (int)swDocumentTypes_e.swDocDRAWING,
+                            (int)swOpenDocOptions_e.swOpenDocOptions_Silent,
+                            "", ref errs, ref warnings);
+                    }
                     return;
                 }
             }
