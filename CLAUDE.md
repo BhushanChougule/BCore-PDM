@@ -132,6 +132,8 @@ Main entry point, ISwAddin implementation.
 
 \- SwApp = static ISldWorks reference
 
+\- Multi-user conflict detection: OnActiveDocChange (and once at ConnectToSW for an already-open file) calls UpdateActivePresence() — presence follows the ACTIVE doc, NOT the per-file hook, so a part loaded only as an assembly/drawing component never registers. _presenceChecked (HashSet) ensures the warning shows ONCE per open, not on every window switch. For a WIP active file: warns if GetOtherOpenSessions finds another user has it open ("FILE ALREADY OPEN — last save wins"), then RegisterOpenSession. Released files skipped (read-only, no save conflict). OnDocDestroyed clears the in-memory check + ClearOpenSession. ConnectToSW/DisconnectFromSW call ClearMachineSessions(MachineName) to wipe crash leftovers.
+
 
 
 \### PropertyValidator.cs
@@ -184,7 +186,9 @@ Methods:
 
 \- SetBrokenRefFlag, LockFile, UnlockFile, GetLockInfo
 
-\- RemoveFileRecord(filePath) → removes vault.xml record(s) for a file (matches FilePath then FileName for dupes/RELEASED-copy entries); DB record ONLY, never touches files on disk; returns count removed
+\- RemoveFileRecord(filePath) → removes vault.xml record(s) for a file (matches FilePath then FileName for dupes/RELEASED-copy entries) AND purges that file's RevisionHistory entries via PurgeHistoryFor (so a new file of the same name never inherits the removed file's timeline); DB record ONLY, never touches files on disk; returns count of File records removed
+
+\- PurgeHistoryFor(doc, filePath, fileName) → private helper; removes all RevisionHistory <Entry> nodes matching the file by exact FilePath or by filename. Also called by UpsertFile on CREATE (wasCreate) so a brand-new file always starts with a clean history, even if a same-named file was removed before the purge fix shipped
 
 \- Initialize() → creates WIP division subfolders + SCRAP folder on first addin load
 
@@ -203,6 +207,16 @@ Methods:
 \- AddRevisionRequest, AddUnlockRequest, AddReleaseRequest → all call private AddRequest(type,...)
 
 \- GetPendingRequests, GetRequestsByUser(user), ResolveRequest
+
+\- Open sessions (multi-user conflict detection) — <OpenSessions> section in vault.xml, distinct from the hard Master Lock (soft presence). OpenSession class = FilePath, User, Machine, OpenedDate.
+
+  \- RegisterOpenSession(path, user, machine) → records/refreshes that user@machine has the file open
+
+  \- GetOtherOpenSessions(path, currentUser) → sessions held by OTHER users (excludes currentUser, who may have it open in several windows); skips + purges entries older than StaleSessionHours (24h) in the same pass
+
+  \- ClearOpenSession(path, user, machine) → removes one session on file close
+
+  \- ClearMachineSessions(machine) → removes ALL sessions for a PC; called on addin load AND unload so a crashed SOLIDWORKS never leaves a session that falsely warns others
 
 
 
@@ -676,13 +690,13 @@ GetNextRevision() in VaultManager.cs handles this
 
 \- Assembly drawing-release gate: component drawings must be Released before the assembly (Manufactured-with-no-drawing warns + override; Purchased/Toolbox skipped)
 
+\- Multi-user conflict detection: opening a WIP file already open by another engineer warns "FILE ALREADY OPEN — last save wins" (soft presence in vault.xml <OpenSessions>, distinct from the Master Lock). Presence follows the active doc (assembly/drawing components don't register), warns once per open, cleared on close; per-machine sessions wiped on addin load/unload + 24h staleness backstop so a crash never leaves a false warning
+
 
 
 \## Remaining Features (in priority order)
 
 1\. BOM Export to Excel on assembly release
-
-4\. Multi-user conflict detection (warn when two engineers open same WIP)
 
 5\. Watermark on released PDFs
 

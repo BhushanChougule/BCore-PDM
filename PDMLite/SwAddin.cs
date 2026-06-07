@@ -37,11 +37,15 @@ namespace PDMLite
                 SwApp = (ISldWorks)thisSW;
                 _addinId = cookie;
                 DatabaseManager.Initialize();
+                // Clear any open-session entries this PC left behind after a
+                // crash/forced-close so they never falsely warn other engineers.
+                DatabaseManager.ClearMachineSessions(System.Environment.MachineName);
                 EmailManager.EnsureConfigTemplate();
                 _taskPane = new TaskPaneHost();
                 _taskPane.Register(SwApp);
                 ((SldWorks)SwApp).ActiveDocChangeNotify += OnActiveDocChange;
                 HookAllOpenDocs();
+                UpdateActivePresence();
                 return true;
             }
             catch (Exception ex)
@@ -55,6 +59,7 @@ namespace PDMLite
         public bool DisconnectFromSW()
         {
             _taskPane?.Unregister(SwApp);
+            try { DatabaseManager.ClearMachineSessions(System.Environment.MachineName); } catch { }
             ((SldWorks)SwApp).ActiveDocChangeNotify -= OnActiveDocChange;
             foreach (var h in _docHandlers.Values)
                 try { h.Detach(); } catch { }
@@ -66,7 +71,7 @@ namespace PDMLite
         // On every active-doc change, re-scan ALL open documents.
         // This catches new files and any document that lost its handler
         // (e.g. due to a spurious DestroyNotify from the Custom Properties tab).
-        private int OnActiveDocChange() { HookAllOpenDocs(); return 0; }
+        private int OnActiveDocChange() { HookAllOpenDocs(); UpdateActivePresence(); return 0; }
 
         internal void HookAllOpenDocs()
         {
@@ -123,11 +128,64 @@ namespace PDMLite
             catch { }
         }
 
+        // ── Multi-user conflict detection ─────────────────────────────────────
+        // Presence follows the ACTIVE document, not the one-time hook: a part
+        // pulled in as an assembly/drawing component is loaded but not being
+        // edited, so only the doc the engineer actually brings to the front
+        // registers. _presenceChecked tracks paths already evaluated this open
+        // so the warning shows once per open (not on every window switch).
+        private readonly HashSet<string> _presenceChecked =
+            new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+        private void UpdateActivePresence()
+        {
+            try
+            {
+                var doc = SwApp?.ActiveDoc as ModelDoc2;
+                if (doc == null) return;
+
+                string path = doc.GetPathName();
+                if (string.IsNullOrEmpty(path)) return;        // unsaved — not tracked
+                if (!_presenceChecked.Add(path)) return;        // already handled this open
+
+                // Released files are read-only for editing, so two people can
+                // never produce a save conflict on them — skip presence there.
+                if (DatabaseManager.GetFileStatus(path) == "Released") return;
+
+                var others = DatabaseManager.GetOtherOpenSessions(path, CurrentUser);
+                if (others.Count > 0)
+                {
+                    string who = string.Join("\n", others.ConvertAll(o =>
+                        "  • " + o.User + "   (since " +
+                        o.OpenedDate.ToString("dd/MM/yyyy HH:mm") + ")"));
+                    SwApp.SendMsgToUser2(
+                        "⚠  FILE ALREADY OPEN — BCore PDM\n\n" +
+                        "This file is currently open by:\n" + who + "\n\n" +
+                        "If you both save, the last save wins and the other\n" +
+                        "person's changes will be lost. Coordinate before editing.",
+                        (int)swMessageBoxIcon_e.swMbWarning,
+                        (int)swMessageBoxBtn_e.swMbOk);
+                }
+
+                DatabaseManager.RegisterOpenSession(path, CurrentUser,
+                    System.Environment.MachineName);
+            }
+            catch { }
+        }
+
         // Called from DocEventHandler.OnDestroy. Removes the stale handler, then
         // re-scans open docs and refreshes the task pane — but DEFERRED.
         internal void OnDocDestroyed(string id)
         {
             _docHandlers.Remove(id);
+
+            // Release our open-session presence so we no longer warn others.
+            // id is the file path for saved docs ("NEW:..." for unsaved ones,
+            // which were never registered — a harmless no-op). Also forget the
+            // in-memory check so reopening the file warns/registers afresh.
+            _presenceChecked.Remove(id);
+            try { DatabaseManager.ClearOpenSession(id, CurrentUser,
+                System.Environment.MachineName); } catch { }
 
             // BOTH the re-hook and the refresh must run AFTER the close settles,
             // not synchronously here. At DestroyNotify time the doc is still

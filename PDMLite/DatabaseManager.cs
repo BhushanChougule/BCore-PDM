@@ -45,6 +45,17 @@ namespace PDMLite
         public string RequestType { get; set; } // "Unlock", "Revision", "Release"
     }
 
+    // One engineer's open "presence" on a file. Recorded when a WIP file is
+    // opened and cleared when it closes; used to warn a second engineer that
+    // someone else is already editing the same file.
+    public class OpenSession
+    {
+        public string FilePath { get; set; }
+        public string User { get; set; }
+        public string Machine { get; set; }
+        public DateTime OpenedDate { get; set; }
+    }
+
     public static class DatabaseManager
     {
         private const string VaultFolder = @"N:\PDM-SolidWorks\VAULT";
@@ -387,6 +398,184 @@ namespace PDMLite
                     }
                 }
                 return new LockInfo { IsLocked = false };
+            }
+        }
+
+        // ════════════════════════════════════════════════════════════════
+        // Open sessions (multi-user conflict detection)
+        // ════════════════════════════════════════════════════════════════
+        // Soft presence — distinct from the hard Master Lock. Records that an
+        // engineer has a WIP file open so a second engineer who opens the same
+        // file is warned that their saves may overwrite each other. Backed by an
+        // <OpenSessions> section in vault.xml.
+
+        // A session older than this is treated as stale (e.g. SOLIDWORKS crashed
+        // without firing DestroyNotify) and ignored/purged on read.
+        private const int StaleSessionHours = 24;
+
+        private static XElement EnsureOpenSessions(XDocument doc)
+        {
+            var el = doc.Root.Element("OpenSessions");
+            if (el == null)
+            {
+                el = new XElement("OpenSessions");
+                doc.Root.Add(el);
+            }
+            return el;
+        }
+
+        // Record (or refresh) that user@machine has filePath open.
+        public static void RegisterOpenSession(string filePath, string user,
+            string machine)
+        {
+            if (string.IsNullOrWhiteSpace(filePath)) return;
+            lock (_lock)
+            {
+                var doc = LoadOrCreate();
+                var sessions = EnsureOpenSessions(doc);
+
+                XElement mine = null;
+                foreach (var el in sessions.Elements("Session"))
+                {
+                    if (string.Equals((string)el.Element("FilePath"), filePath,
+                            StringComparison.OrdinalIgnoreCase) &&
+                        string.Equals((string)el.Element("User"), user,
+                            StringComparison.OrdinalIgnoreCase) &&
+                        string.Equals((string)el.Element("Machine"), machine,
+                            StringComparison.OrdinalIgnoreCase))
+                    {
+                        mine = el;
+                        break;
+                    }
+                }
+
+                if (mine != null)
+                {
+                    mine.Element("OpenedDate").Value = DateTime.Now.ToString("o");
+                }
+                else
+                {
+                    sessions.Add(new XElement("Session",
+                        new XElement("FilePath", filePath),
+                        new XElement("User", user),
+                        new XElement("Machine", machine),
+                        new XElement("OpenedDate", DateTime.Now.ToString("o"))
+                    ));
+                }
+                Save(doc);
+            }
+        }
+
+        // Return the sessions held by OTHER users on filePath (excludes the
+        // current user, who may legitimately have it open in several windows).
+        // Stale sessions are skipped and purged in the same pass.
+        public static List<OpenSession> GetOtherOpenSessions(string filePath,
+            string currentUser)
+        {
+            var others = new List<OpenSession>();
+            if (string.IsNullOrWhiteSpace(filePath)) return others;
+
+            lock (_lock)
+            {
+                var doc = LoadOrCreate();
+                var sessions = doc.Root.Element("OpenSessions");
+                if (sessions == null) return others;
+
+                var stale = new List<XElement>();
+                foreach (var el in sessions.Elements("Session"))
+                {
+                    if (!string.Equals((string)el.Element("FilePath"), filePath,
+                            StringComparison.OrdinalIgnoreCase))
+                        continue;
+
+                    DateTime opened;
+                    if (!DateTime.TryParse((string)el.Element("OpenedDate"),
+                            out opened) ||
+                        (DateTime.Now - opened).TotalHours > StaleSessionHours)
+                    {
+                        stale.Add(el);
+                        continue;
+                    }
+
+                    string user = (string)el.Element("User") ?? "";
+                    if (string.Equals(user, currentUser,
+                            StringComparison.OrdinalIgnoreCase))
+                        continue;
+
+                    others.Add(new OpenSession
+                    {
+                        FilePath = filePath,
+                        User = user,
+                        Machine = (string)el.Element("Machine") ?? "",
+                        OpenedDate = opened
+                    });
+                }
+
+                if (stale.Count > 0)
+                {
+                    foreach (var el in stale) el.Remove();
+                    Save(doc);
+                }
+            }
+            return others;
+        }
+
+        // Clear this user@machine's session for filePath (called on file close).
+        public static void ClearOpenSession(string filePath, string user,
+            string machine)
+        {
+            if (string.IsNullOrWhiteSpace(filePath)) return;
+            lock (_lock)
+            {
+                var doc = LoadOrCreate();
+                var sessions = doc.Root.Element("OpenSessions");
+                if (sessions == null) return;
+
+                var toRemove = new List<XElement>();
+                foreach (var el in sessions.Elements("Session"))
+                {
+                    if (string.Equals((string)el.Element("FilePath"), filePath,
+                            StringComparison.OrdinalIgnoreCase) &&
+                        string.Equals((string)el.Element("User"), user,
+                            StringComparison.OrdinalIgnoreCase) &&
+                        string.Equals((string)el.Element("Machine"), machine,
+                            StringComparison.OrdinalIgnoreCase))
+                        toRemove.Add(el);
+                }
+
+                if (toRemove.Count > 0)
+                {
+                    foreach (var el in toRemove) el.Remove();
+                    Save(doc);
+                }
+            }
+        }
+
+        // Remove every session for a machine — called on add-in load and unload
+        // so entries a crashed SOLIDWORKS left behind on this PC never linger
+        // and falsely warn other engineers.
+        public static void ClearMachineSessions(string machine)
+        {
+            if (string.IsNullOrWhiteSpace(machine)) return;
+            lock (_lock)
+            {
+                var doc = LoadOrCreate();
+                var sessions = doc.Root.Element("OpenSessions");
+                if (sessions == null) return;
+
+                var toRemove = new List<XElement>();
+                foreach (var el in sessions.Elements("Session"))
+                {
+                    if (string.Equals((string)el.Element("Machine"), machine,
+                            StringComparison.OrdinalIgnoreCase))
+                        toRemove.Add(el);
+                }
+
+                if (toRemove.Count > 0)
+                {
+                    foreach (var el in toRemove) el.Remove();
+                    Save(doc);
+                }
             }
         }
 
