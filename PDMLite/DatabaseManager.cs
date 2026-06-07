@@ -278,7 +278,23 @@ namespace PDMLite
                 }
 
                 foreach (var el in toRemove) el.Remove();
-                if (toRemove.Count > 0) Save(doc);
+
+                // Also purge history entries for this file so a new file
+                // created with the same name never inherits old history.
+                var historyToRemove = new List<XElement>();
+                foreach (var el in doc.Root.Element("RevisionHistory").Elements("Entry"))
+                {
+                    string entryPath = (string)el.Element("FilePath") ?? "";
+                    bool pathMatch = string.Equals(entryPath, filePath,
+                        StringComparison.OrdinalIgnoreCase);
+                    bool nameMatch = string.Equals(
+                        Path.GetFileName(entryPath), fileName,
+                        StringComparison.OrdinalIgnoreCase);
+                    if (pathMatch || nameMatch) historyToRemove.Add(el);
+                }
+                foreach (var el in historyToRemove) el.Remove();
+
+                if (toRemove.Count > 0 || historyToRemove.Count > 0) Save(doc);
                 return toRemove.Count;
             }
         }
