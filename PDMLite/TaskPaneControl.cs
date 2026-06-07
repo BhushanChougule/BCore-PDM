@@ -640,7 +640,7 @@ namespace PDMLite
                 int btnH = S(18);
 
                 string partLabel = g.ModelExt == ".sldasm"
-                                    ? "Open Assembly" : "Open Part";
+                                    ? "Open ASM" : "Open PRT";
                 Button btnModel = new Button
                 {
                     Text = partLabel,
@@ -661,7 +661,7 @@ namespace PDMLite
 
                 Button btnDrawing = new Button
                 {
-                    Text = "Open Drawing",
+                    Text = "Open DRW",
                     Font = new Font("Segoe UI", 3.4f * _scale, FontStyle.Bold),
                     Width = btnW,
                     Height = btnH,

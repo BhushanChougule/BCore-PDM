@@ -324,9 +324,9 @@ No longer uses StringBuilder/AppendLine — individual labels prevent text overl
 
 
 
-Search results: MERGED cards — a part/assembly and its drawing collapse into ONE card keyed by shared base filename (the model is primary; it owns PartNo + Description). RunSearch groups the flat SearchFiles list by basename, then fills in the counterpart that did NOT match the term (GetModelForDrawing / GetDrawingPathForModel) so both buttons can be offered. Each card shows: thick left status bar with the status text painted VERTICALLY (rotated -90°, custom Panel.Paint), file name (no extension), part number, description, and TWO buttons side by side — "Open Part"/"Open Assembly" (cBrand; disabled+greyed when no model record, e.g. orphan drawing) and "Open Drawing" (cBrandDark). SearchGroup is a private nested class in TaskPaneControl.
+Search results: MERGED cards — a part/assembly and its drawing collapse into ONE card keyed by shared base filename (the model is primary; it owns PartNo + Description). RunSearch groups the flat SearchFiles list by basename, then fills in the counterpart that did NOT match the term (GetModelForDrawing / GetDrawingPathForModel) so both buttons can be offered. Each card shows: thick left status bar with the status text painted VERTICALLY (rotated -90°, custom Panel.Paint), file name (no extension), part number, description, and TWO buttons side by side — "Open PRT"/"Open ASM" (cBrand; disabled+greyed when no model record, e.g. orphan drawing) and "Open DRW" (cBrandDark); abbreviated so labels don't clip at the narrow task-pane width. SearchGroup is a private nested class in TaskPaneControl.
 
-Open Part/Assembly → OpenFile(modelPath). Open Drawing → OpenDrawingResult(modelPath, drawingPath): opens the drawing if it exists, else opens the model and calls VaultManager.OpenOrCreateDrawing to make one (same as the task-pane Open Drawing button).
+Open PRT/ASM → OpenFile(modelPath). Open DRW → OpenDrawingResult(modelPath, drawingPath): opens the drawing if it exists, else opens the model and calls VaultManager.OpenOrCreateDrawing to make one (same as the task-pane Open Drawing button).
 
 Uses ActivateDoc3 if file already open, OpenDoc6 with correct type if not. Opens the canonical WIP copy (read-only when Released), never the RELEASED snapshot.
 
