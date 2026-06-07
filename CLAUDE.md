@@ -196,6 +196,8 @@ Methods:
 
 \- GetFileHistory(filePath) → returns List<HistoryEntry> reversed (most recent first)
 
+\- GetDrawingModelPartNo(drawingFilePath) → looks up PartNumber of the part/assembly sharing the same base filename as the given drawing (e.g. "TEST 1.SLDDRW" → finds "TEST 1.SLDPRT" record and returns its PartNumber); returns "" if not found. Used by search result cards so drawings show the associated part number.
+
 \- AddRevisionRequest, AddUnlockRequest, AddReleaseRequest → all call private AddRequest(type,...)
 
 \- GetPendingRequests, GetRequestsByUser(user), ResolveRequest
@@ -206,11 +208,11 @@ Methods:
 
 Core vault operations.
 
-\- LockFile(path) → Master only, sets status=Locked
+\- LockFile(path) → Master only, sets status=Locked. NOTE: no longer wired to any task-pane button (the Lock File button was replaced by the context-aware Open Drawing / Open Part-Assembly button); kept as an available method
 
 \- UnlockFile(path) → Master only, sets status=WIP, removes read-only
 
-\- ReleaseFile(doc) → validates → (assembly) parts Released + drawing-release gate → exports → copies to RELEASED → sets read-only
+\- ReleaseFile(doc, suppressPrompts=false) → validates → (assembly) parts Released + drawing-release gate → exports → copies to RELEASED → sets read-only. Releasing a Drawing whose model is still WIP offers ONE prompt to release both; on Yes the model is released via ReleaseFile(model, suppressPrompts:true) so the pair needs only a single confirm + single combined success. suppressPrompts skips the confirm + success dialogs only (blocker/validation dialogs still show)
 
 \- StartNewRevision(doc) → removes read-only → archives → bumps rev → saves → sets WIP → auto-starts associated drawing revision → warns about parent assemblies
 
@@ -240,7 +242,9 @@ Core vault operations.
 
 \- ViewMyRequests() → Engineer views their own requests (MessageBox)
 
-\- OpenOrCreateDrawing(doc) → searches for matching .slddrw, prompts to create if not found
+\- OpenOrCreateDrawing(doc) → searches for matching .slddrw (model folder + every WIP division); opens it if found, else creates a new drawing FROM the model immediately (no prompt) — opens the default drawing template and calls DrawingDoc.InsertModelInPredefinedView to populate its predefined views (the "Make Drawing from Part/Assembly" equivalent); falls back to Create3rdAngleViews2 if the template has no predefined views, so the sheet is never blank. The part/assembly side of the context-aware Open button
+
+\- OpenReferencedModel(doc) → from a drawing, opens (or activates if already open) the part/assembly it references; warns if the referenced model can't be found. The drawing side of the context-aware Open button
 
 \- GetUnreleasedComponentsByPath(asmPath) → checks all assembly children are Released by reading the dependency tree from disk via GetDocumentDependencies2 (independent of load mode — a lightweight assembly, or one loaded only as a drawing reference, still reports its WIP children). Skips Toolbox; dedupes; non-Released tracked components block. Used by both the assembly-release gate and the assembly-drawing-release gate
 
@@ -292,9 +296,13 @@ Sections (top to bottom):
 
 3\. Active File card (filename, status, partNo, revision, lockedBy)
 
-4\. Master Actions (Lock/Unlock/Release/New Revision/Rollback) — Masters only
+4\. Master Actions (Open Drawing/Unlock/Release/New Revision/Rollback) — Masters only
 
-5\. Engineer Actions (Request Unlock/Revision/Release, Update Drawings, My Requests) — Engineers only, same y-position as Master Actions via engY = y - S(5\*28)
+5\. Engineer Actions (Request Unlock/Revision/Release, Open Drawing, My Requests) — Engineers only, same y-position as Master Actions via engY = y - S(5\*28)
+
+Open Drawing button (both roles, cBrand) is CONTEXT-AWARE: DoAction("openlinked") opens the matching .slddrw when a part/assembly is active (creating one if none exists), or opens the referenced part/assembly when a drawing is active. Its label flips between "Open Drawing" and "Open Part/Assembly" in Refresh() based on the active doc type, kept in sync across both role variants by SetOpenLinkedLabel(). Replaced the Master Lock File button and the Engineer Update Drawings button.
+
+Open Drawing button label when a drawing is active: VaultManager.GetDrawingOpenLabel(doc) checks the referenced model's extension — shows "Open Part" for .sldprt, "Open Assembly" for .sldasm, falls back to "Open Part/Assembly" if the reference can't be resolved.
 
 6\. File History — Panel (\_historyPanel) with individual labels per entry, Height=S(300), y+=S(305)
 
@@ -496,11 +504,29 @@ skipped → archive old exports → export STEP → copy to RELEASED → set rea
 
 \### Master Release (Drawing)
 
-check referenced part is Released → (if referenced model is an assembly) check all
+check referenced part is Released → if NOT Released: ONE Yes/No prompt to release BOTH
 
-assembly components are Released → sync drawing revision with part revision →
+files now (lists model + drawing) → Yes: open model if needed → ReleaseFile(model,
 
-export PDF (all sheets) → copy to RELEASED → set read-only → update DB
+suppressPrompts:true) (all validations still apply, but its own confirm + success
+
+dialogs are suppressed) → if model still not Released after that, abort drawing release;
+
+re-fetch drawing doc (model release closes/reopens the drawing) → (if referenced model is
+
+an assembly) check all assembly components are Released → sync drawing revision with part
+
+revision → export PDF (all sheets) → copy to RELEASED → set read-only → update DB → ONE
+
+combined success dialog ("Both files Released Successfully")
+
+\- Chained release = exactly one confirmation + one success popup for the model+drawing
+
+pair (no per-file confirm/success). ReleaseFile(doc, suppressPrompts=false) — when true,
+
+skips its confirm + success dialogs (used for the chained model release); validation and
+
+blocker dialogs still show.
 
 
 
@@ -618,7 +644,9 @@ GetNextRevision() in VaultManager.cs handles this
 
 \- BCore PDM branding with BC icon
 
-\- Engineer Actions section: Request Unlock, Request Revision, Request Release, Update Drawings, My Requests
+\- Engineer Actions section: Request Unlock, Request Revision, Request Release, Open Drawing (context-aware), My Requests
+
+\- Context-aware Open button (both roles): one button that opens the matching drawing from a part/assembly (creates one if none exists, no prompt) or opens the referenced part/assembly from a drawing; label flips between "Open Drawing" and "Open Part/Assembly". Replaced the Master Lock File button and the Engineer Update Drawings button
 
 \- Master Pending Requests popup (PendingRequestsForm) with 3-column Unlock/Revision/Release view
 

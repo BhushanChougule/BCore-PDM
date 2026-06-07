@@ -272,12 +272,21 @@ namespace PDMLite
         }
 
         // ── RELEASE ───────────────────────────────────────────────────────
-        public static void ReleaseFile(ModelDoc2 doc)
+        // suppressPrompts skips the confirm + success dialogs (used when this
+        // file is being released as part of a chained drawing+model release so
+        // the Master only confirms once). Validation/blocker dialogs still show.
+        public static void ReleaseFile(ModelDoc2 doc, bool suppressPrompts = false)
         {
             string user = PDMLiteAddin.CurrentUser;
             string filePath = doc.GetPathName();
             int docType = doc.GetType();
             bool isDrawing = docType == (int)swDocumentTypes_e.swDocDRAWING;
+
+            // Set when a WIP referenced model was released alongside this drawing
+            // (see the drawing gate below). Suppresses this drawing's own confirm
+            // dialog and swaps the success message for a combined one.
+            bool chainedRelease = false;
+            string chainedModelName = null;
 
             if (!IsMaster(user)) { NotMaster(); return; }
 
@@ -301,17 +310,92 @@ namespace PDMLite
                     string modelStatus = DatabaseManager.GetFileStatus(referencedModel);
                     if (modelStatus != "Released")
                     {
-                        MessageBox.Show(
-                            "Cannot release Drawing — the referenced Part or Assembly " +
-                            "is not yet Released.\n\n" +
-                            "Referenced file : " + Path.GetFileName(referencedModel) + "\n" +
-                            "Current status  : " +
-                            (string.IsNullOrEmpty(modelStatus) ? "WIP" : modelStatus) + "\n\n" +
-                            "Release the Part or Assembly first, then release the Drawing.",
-                            "BCore PDM — Release Blocked",
-                            MessageBoxButtons.OK,
-                            MessageBoxIcon.Stop);
-                        return;
+                        string modelName = Path.GetFileName(referencedModel);
+                        bool isRefAsm = Path.GetExtension(referencedModel)
+                            .Equals(".sldasm", StringComparison.OrdinalIgnoreCase);
+                        string statusDisplay =
+                            string.IsNullOrEmpty(modelStatus) ? "WIP" : modelStatus;
+
+                        var chain = MessageBox.Show(
+                            "The referenced " + (isRefAsm ? "Assembly" : "Part") +
+                            " is still " + statusDisplay + ".\n\n" +
+                            "Release BOTH files now?\n\n" +
+                            "  • " + modelName +
+                                "  (" + (isRefAsm ? "Assembly" : "Part") + ")\n" +
+                            "  • " + Path.GetFileName(filePath) + "  (Drawing)\n\n" +
+                            "Each file's properties and references are still " +
+                            "validated before release.",
+                            "BCore PDM — Release Drawing + " +
+                                (isRefAsm ? "Assembly" : "Part"),
+                            MessageBoxButtons.YesNo, MessageBoxIcon.Question);
+
+                        if (chain != DialogResult.Yes) return;
+
+                        // Open the model if it isn't already.
+                        ModelDoc2 refDoc = PDMLiteAddin.SwApp
+                            .GetOpenDocumentByName(referencedModel) as ModelDoc2;
+                        if (refDoc == null)
+                        {
+                            int openType = isRefAsm
+                                ? (int)swDocumentTypes_e.swDocASSEMBLY
+                                : (int)swDocumentTypes_e.swDocPART;
+                            int oErrs = 0, oWarn = 0;
+                            refDoc = PDMLiteAddin.SwApp.OpenDoc6(
+                                referencedModel, openType,
+                                (int)swOpenDocOptions_e.swOpenDocOptions_Silent,
+                                "", ref oErrs, ref oWarn) as ModelDoc2;
+                        }
+
+                        if (refDoc == null)
+                        {
+                            MessageBox.Show(
+                                "Could not open " + modelName + ".\n" +
+                                "Open it manually and release it first.",
+                                "BCore PDM — Release Blocked",
+                                MessageBoxButtons.OK, MessageBoxIcon.Stop);
+                            return;
+                        }
+
+                        // Release through the normal path — all validations apply,
+                        // but suppress its confirm/success dialogs: the Master
+                        // already confirmed both files in the prompt above.
+                        ReleaseFile(refDoc, suppressPrompts: true);
+
+                        // If the model release was blocked by a validation issue
+                        // (missing properties, broken refs, unreleased children),
+                        // abort the drawing release too — ReleaseFile already
+                        // explained what blocked it.
+                        if (DatabaseManager.GetFileStatus(referencedModel) != "Released")
+                            return;
+
+                        // Both files confirmed at once — skip this drawing's own
+                        // confirm dialog and show a single combined success.
+                        chainedRelease = true;
+                        chainedModelName = modelName;
+
+                        // The model release closes/reopens the drawing (because the
+                        // drawing is open and holds a reference to the model).
+                        // Re-fetch doc so the rest of this function has a live object.
+                        doc = PDMLiteAddin.SwApp.GetOpenDocumentByName(filePath)
+                            as ModelDoc2;
+                        if (doc == null)
+                        {
+                            int rErrs = 0, rWarn = 0;
+                            doc = PDMLiteAddin.SwApp.OpenDoc6(filePath,
+                                (int)swDocumentTypes_e.swDocDRAWING,
+                                (int)swOpenDocOptions_e.swOpenDocOptions_Silent,
+                                "", ref rErrs, ref rWarn) as ModelDoc2;
+                        }
+                        if (doc == null)
+                        {
+                            MessageBox.Show(
+                                "The " + (isRefAsm ? "Assembly" : "Part") +
+                                " was released, but the Drawing could not be " +
+                                "reopened.\n\nPlease try releasing the Drawing again.",
+                                "BCore PDM — Reopen Failed",
+                                MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                            return;
+                        }
                     }
 
                     // If the drawing's model is an ASSEMBLY, the assembly can be
@@ -492,23 +576,28 @@ namespace PDMLite
             }
 
             // ── Confirm ───────────────────────────────────────────────────
+            // Skipped when suppressPrompts (chained model release) or chained
+            // (the Master already confirmed both files in the chain prompt).
             string fileTypeLabel = isDrawing ? "Drawing No" : "Part No";
-            var confirm = MessageBox.Show(
-                "Release this file?\n\n" +
-                fileTypeLabel + "  : " + partNo + "\n" +
-                "Revision      : REV " + rev + "\n" +
-                "File          : " + Path.GetFileName(filePath) + "\n\n" +
-                "This will:\n" +
-                (isDrawing
-                    ? "  • Export PDF\n"
-                    : "  • Auto-fill Part Weight\n  • Export STEP file\n") +
-                "  • Lock file as Released\n" +
-                "  • Log the revision",
-                "BCore PDM — Confirm Release",
-                MessageBoxButtons.YesNo,
-                MessageBoxIcon.Question);
+            if (!suppressPrompts && !chainedRelease)
+            {
+                var confirm = MessageBox.Show(
+                    "Release this file?\n\n" +
+                    fileTypeLabel + "  : " + partNo + "\n" +
+                    "Revision      : REV " + rev + "\n" +
+                    "File          : " + Path.GetFileName(filePath) + "\n\n" +
+                    "This will:\n" +
+                    (isDrawing
+                        ? "  • Export PDF\n"
+                        : "  • Auto-fill Part Weight\n  • Export STEP file\n") +
+                    "  • Lock file as Released\n" +
+                    "  • Log the revision",
+                    "BCore PDM — Confirm Release",
+                    MessageBoxButtons.YesNo,
+                    MessageBoxIcon.Question);
 
-            if (confirm != DialogResult.Yes) return;
+                if (confirm != DialogResult.Yes) return;
+            }
 
             // ── Auto-fill fields ──────────────────────────────────────────
             PropertyValidator.SetProperty(doc, "CheckedBy",
@@ -590,13 +679,29 @@ namespace PDMLite
             AuditLogger.Log("Release", user, Path.GetFileName(filePath),
                 partNo, rev);
 
-            MessageBox.Show(
-                "File Released Successfully!\n\n" +
-                fileTypeLabel + " : " + partNo + "  REV " + rev + "\n" +
-                "Exports saved to:\n" + ExportRoot,
-                "BCore PDM — Released",
-                MessageBoxButtons.OK,
-                MessageBoxIcon.Information);
+            if (chainedRelease)
+            {
+                // One combined dialog for the model + drawing released together.
+                MessageBox.Show(
+                    "Both files Released Successfully!\n\n" +
+                    "  • " + chainedModelName + "\n" +
+                    "  • " + Path.GetFileName(filePath) + "  (Drawing)\n\n" +
+                    "Revision : REV " + rev + "\n" +
+                    "Exports saved to:\n" + ExportRoot,
+                    "BCore PDM — Released",
+                    MessageBoxButtons.OK,
+                    MessageBoxIcon.Information);
+            }
+            else if (!suppressPrompts)
+            {
+                MessageBox.Show(
+                    "File Released Successfully!\n\n" +
+                    fileTypeLabel + " : " + partNo + "  REV " + rev + "\n" +
+                    "Exports saved to:\n" + ExportRoot,
+                    "BCore PDM — Released",
+                    MessageBoxButtons.OK,
+                    MessageBoxIcon.Information);
+            }
 
             // Close and reopen the WIP copy so SOLIDWORKS immediately adopts
             // the OS read-only flag. Without this, SW keeps its cached writable
@@ -1483,28 +1588,127 @@ namespace PDMLite
                 string candidate = Path.Combine(searchDir, name + ".slddrw");
                 if (File.Exists(candidate))
                 {
-                    int errs = 0, warnings = 0;
-                    PDMLiteAddin.SwApp.OpenDoc6(candidate,
-                        (int)swDocumentTypes_e.swDocDRAWING,
-                        (int)swOpenDocOptions_e.swOpenDocOptions_Silent,
-                        "", ref errs, ref warnings);
+                    // Already open → bring it to the front without reopening.
+                    ModelDoc2 already = PDMLiteAddin.SwApp
+                        .GetOpenDocumentByName(candidate) as ModelDoc2;
+                    if (already != null)
+                    {
+                        int ae = 0;
+                        PDMLiteAddin.SwApp.ActivateDoc3(candidate, false,
+                            (int)swRebuildOnActivation_e.swDontRebuildActiveDoc, ref ae);
+                    }
+                    else
+                    {
+                        int errs = 0, warnings = 0;
+                        PDMLiteAddin.SwApp.OpenDoc6(candidate,
+                            (int)swDocumentTypes_e.swDocDRAWING,
+                            (int)swOpenDocOptions_e.swOpenDocOptions_Silent,
+                            "", ref errs, ref warnings);
+                    }
                     return;
                 }
             }
 
-            // No drawing found — prompt user
-            var result = MessageBox.Show(
-                "No drawing found for:\n" + name +
-                "\n\nWould you like to create a new drawing in SOLIDWORKS?",
-                "BCore PDM — Open Drawing",
-                MessageBoxButtons.YesNo, MessageBoxIcon.Question);
+            // No drawing found on disk — check if an unsaved new drawing is
+            // already open in memory for this model (prevents duplicate creation
+            // when the user clicks "Open Drawing" multiple times before saving).
+            object[] openDocs = PDMLiteAddin.SwApp.GetDocuments() as object[];
+            if (openDocs != null)
+            {
+                foreach (object obj in openDocs)
+                {
+                    ModelDoc2 openDoc = obj as ModelDoc2;
+                    if (openDoc == null) continue;
+                    if (openDoc.GetType() != (int)swDocumentTypes_e.swDocDRAWING) continue;
+                    if (!string.IsNullOrEmpty(openDoc.GetPathName())) continue;
+                    // Unsaved drawing — check if it was created for this model.
+                    string refModel = GetDrawingReferencedModel(openDoc);
+                    if (string.Equals(refModel, filePath,
+                            StringComparison.OrdinalIgnoreCase))
+                    {
+                        int ae = 0;
+                        PDMLiteAddin.SwApp.ActivateDoc3(openDoc.GetTitle(), false,
+                            (int)swRebuildOnActivation_e.swDontRebuildActiveDoc, ref ae);
+                        return;
+                    }
+                }
+            }
 
-            if (result == DialogResult.Yes)
-                PDMLiteAddin.SwApp.NewDocument(
-                    PDMLiteAddin.SwApp.GetUserPreferenceStringValue(
-                        (int)swUserPreferenceStringValue_e
-                            .swDefaultTemplateDrawing),
-                    0, 0, 0);
+            // No drawing found — create one from the model immediately (no
+            // prompt), the API equivalent of File > Make Drawing from Part/
+            // Assembly. Open the default drawing template and populate its
+            // predefined views with this model so the new drawing isn't blank.
+            string drwTemplate = PDMLiteAddin.SwApp.GetUserPreferenceStringValue(
+                (int)swUserPreferenceStringValue_e.swDefaultTemplateDrawing);
+            ModelDoc2 newDrw = PDMLiteAddin.SwApp
+                .NewDocument(drwTemplate, 0, 0, 0) as ModelDoc2;
+
+            DrawingDoc draw = newDrw as DrawingDoc;
+            if (draw != null)
+            {
+                // Fill the template's predefined views with the model. Returns
+                // true on success; if it fails (e.g. the template has no
+                // predefined views) fall back to standard 3rd-angle views so
+                // the engineer never gets a blank sheet.
+                bool inserted = draw.InsertModelInPredefinedView(filePath);
+                if (!inserted)
+                    draw.Create3rdAngleViews2(filePath);
+
+                newDrw.ViewZoomtofit2();
+            }
+        }
+
+        // ── Label for the context-aware Open button when a drawing is active ─
+        // Returns "Open Part", "Open Assembly", or the generic fallback when the
+        // referenced model path can't be resolved.
+        public static string GetDrawingOpenLabel(ModelDoc2 drawingDoc)
+        {
+            string refPath = GetDrawingReferencedModel(drawingDoc);
+            if (string.IsNullOrEmpty(refPath)) return "Open Part/Assembly";
+            string ext = Path.GetExtension(refPath).ToLower();
+            if (ext == ".sldasm") return "Open Assembly";
+            if (ext == ".sldprt") return "Open Part";
+            return "Open Part/Assembly";
+        }
+
+        // ── OPEN REFERENCED MODEL from a drawing ──────────────────────
+        // The drawing → part/assembly counterpart of OpenOrCreateDrawing.
+        // Opens (or activates, if already open) the part/assembly that the
+        // active drawing documents. Used by the context-aware Open button.
+        public static void OpenReferencedModel(ModelDoc2 drawingDoc)
+        {
+            string refPath = GetDrawingReferencedModel(drawingDoc);
+            if (string.IsNullOrEmpty(refPath) || !File.Exists(refPath))
+            {
+                MessageBox.Show(
+                    "Could not find the part or assembly this drawing " +
+                    "references.\n\nIt may have been removed from the vault or " +
+                    "moved outside the WIP folder.",
+                    "BCore PDM — Open Part/Assembly",
+                    MessageBoxButtons.OK, MessageBoxIcon.Information);
+                return;
+            }
+
+            // Already open → just bring it to the front.
+            ModelDoc2 already = PDMLiteAddin.SwApp
+                .GetOpenDocumentByName(refPath) as ModelDoc2;
+            if (already != null)
+            {
+                int e = 0;
+                PDMLiteAddin.SwApp.ActivateDoc3(refPath, false,
+                    (int)swRebuildOnActivation_e.swDontRebuildActiveDoc, ref e);
+                return;
+            }
+
+            string ext = Path.GetExtension(refPath).ToLower();
+            int docType = ext == ".sldasm"
+                ? (int)swDocumentTypes_e.swDocASSEMBLY
+                : (int)swDocumentTypes_e.swDocPART;
+
+            int errs = 0, warnings = 0;
+            PDMLiteAddin.SwApp.OpenDoc6(refPath, docType,
+                (int)swOpenDocOptions_e.swOpenDocOptions_Silent,
+                "", ref errs, ref warnings);
         }
 
         // ── VIEW MY REQUESTS — Engineer sees their submitted requests ──

@@ -17,7 +17,7 @@ namespace PDMLite
         private Label _revVal;
         private Label _lockedVal;
         private Panel _historyPanel;
-        private Button _btnLock;
+        private Button _btnOpenLinkedMaster;
         private Button _btnRelease;
         private Button _btnUnlock;
         private Button _btnNewRev;
@@ -25,7 +25,7 @@ namespace PDMLite
         private Button _btnReqUnlock;
         private Button _btnReqRevision;
         private Button _btnReqRelease;
-        private Button _btnUpdateDrawings;
+        private Button _btnOpenLinkedEng;
         private Button _btnMyRequests;
         private TextBox _searchBox;
         private Panel _resultsPanel;
@@ -279,13 +279,13 @@ namespace PDMLite
             this.Controls.Add(masterLbl);
             y += S(20);
 
-            _btnLock    = MakeActionButton("Lock File",          cOrange, fBtn, x, w, ref y, isMaster);
+            _btnOpenLinkedMaster = MakeActionButton("Open Drawing", cBrand, fBtn, x, w, ref y, isMaster);
             _btnRelease = MakeActionButton("Release File",        cGreen,  fBtn, x, w, ref y, isMaster);
             _btnUnlock  = MakeActionButton("Unlock File",         cPurple, fBtn, x, w, ref y, isMaster);
             _btnNewRev  = MakeActionButton("New Revision",        cDark,   fBtn, x, w, ref y, isMaster);
             _btnRollback = MakeActionButton("Rollback Revision",  cMaroon, fBtn, x, w, ref y, isMaster);
 
-            _btnLock.Click    += (s, e) => DoAction("lock");
+            _btnOpenLinkedMaster.Click += (s, e) => DoAction("openlinked");
             _btnRelease.Click += (s, e) => DoAction("release");
             _btnUnlock.Click  += (s, e) => DoAction("unlock");
             _btnNewRev.Click  += (s, e) => DoAction("newrev");
@@ -300,13 +300,13 @@ namespace PDMLite
             _btnReqUnlock     = MakeActionButton("Request Unlock",    cOrange, fBtn, x, w, ref engY, !isMaster);
             _btnReqRevision   = MakeActionButton("Request Revision",  cDark,   fBtn, x, w, ref engY, !isMaster);
             _btnReqRelease    = MakeActionButton("Request Release",   cGreen,  fBtn, x, w, ref engY, !isMaster);
-            _btnUpdateDrawings = MakeActionButton("Update Drawings",  cBrand,  fBtn, x, w, ref engY, !isMaster);
+            _btnOpenLinkedEng = MakeActionButton("Open Drawing",      cBrand,  fBtn, x, w, ref engY, !isMaster);
             _btnMyRequests    = MakeActionButton("My Requests",       cPurple, fBtn, x, w, ref engY, !isMaster);
 
             _btnReqUnlock.Click      += (s, e) => DoAction("requnlock");
             _btnReqRevision.Click    += (s, e) => DoAction("requestrev");
             _btnReqRelease.Click     += (s, e) => DoAction("reqrelease");
-            _btnUpdateDrawings.Click += (s, e) => DoAction("updatedrawings");
+            _btnOpenLinkedEng.Click  += (s, e) => DoAction("openlinked");
             _btnMyRequests.Click     += (s, e) => DoAction("myrequests");
 
             y += S(4);
@@ -513,10 +513,20 @@ namespace PDMLite
                     AutoSize = true
                 });
 
+                // Drawings have no PartNo of their own — look up the matching
+                // part/assembly record from the DB by shared base filename.
+                string displayPartNo = file.PartNumber;
+                if (string.IsNullOrEmpty(displayPartNo) &&
+                    string.Equals(
+                        Path.GetExtension(file.FilePath),
+                        ".slddrw", StringComparison.OrdinalIgnoreCase))
+                    displayPartNo = DatabaseManager.GetDrawingModelPartNo(
+                        file.FilePath);
+
                 card.Controls.Add(new Label
                 {
-                    Text = string.IsNullOrEmpty(file.PartNumber)
-                                ? "No Part No" : file.PartNumber,
+                    Text = string.IsNullOrEmpty(displayPartNo)
+                                ? "No Part No" : displayPartNo,
                     Font = new Font("Segoe UI", 3.5f * _scale),
                     ForeColor = cTextGray,
                     Location = new Point(S(8), S(33)),
@@ -632,6 +642,7 @@ namespace PDMLite
                 _partNoVal.Text = "—";
                 _revVal.Text = "—";
                 _lockedVal.Text = "—";
+                SetOpenLinkedLabel("Open Drawing");
                 PopulateHistoryPanel(null);
                 RefreshRequests();
                 return;
@@ -670,12 +681,26 @@ namespace PDMLite
             _lockedVal.Text = lockInfo.IsLocked ? lockInfo.LockedBy : "Not Locked";
             _lockedVal.ForeColor = lockInfo.IsLocked ? cRed : cGreen;
 
+            // Context-aware Open button: a drawing opens its model, a part/
+            // assembly opens its drawing. Both role variants stay in sync.
+            SetOpenLinkedLabel(isDrawing
+                ? VaultManager.GetDrawingOpenLabel(doc)
+                : "Open Drawing");
+
             // File History
             var history = DatabaseManager.GetFileHistory(filePath);
             PopulateHistoryPanel(history);
 
             // Refresh pending requests for masters
             RefreshRequests();
+        }
+
+        // Keep both role variants of the context-aware Open button labelled
+        // the same (only one is visible at a time, per role).
+        private void SetOpenLinkedLabel(string text)
+        {
+            if (_btnOpenLinkedMaster != null) _btnOpenLinkedMaster.Text = text;
+            if (_btnOpenLinkedEng != null) _btnOpenLinkedEng.Text = text;
         }
 
         // ── History Panel ─────────────────────────────────────────────
@@ -771,7 +796,22 @@ namespace PDMLite
 
             string path = doc.GetPathName();
 
-            if (action == "lock") VaultManager.LockFile(path);
+            if (action == "openlinked")
+            {
+                // Context-aware: from a drawing → open the referenced part/
+                // assembly; from a part/assembly → open (or create) its drawing.
+                if (doc.GetType() == (int)swDocumentTypes_e.swDocDRAWING)
+                    VaultManager.OpenReferencedModel(doc);
+                else
+                    VaultManager.OpenOrCreateDrawing(doc);
+                // Defer refresh — ActiveDocChangeNotify fires during NewDocument
+                // before InsertModelInPredefinedView runs, so the initial refresh
+                // sees a blank drawing. BeginInvoke queues AFTER the full creation
+                // completes, so the views are set up and part no / label are correct.
+                BeginInvoke((Action)(() =>
+                    Refresh(PDMLiteAddin.SwApp?.ActiveDoc as ModelDoc2)));
+                return;
+            }
             else if (action == "release") VaultManager.ReleaseFile(doc);
             else if (action == "unlock") VaultManager.UnlockFile(path);
             else if (action == "newrev")
@@ -789,7 +829,6 @@ namespace PDMLite
             else if (action == "requestrev") VaultManager.RequestRevision(doc);
             else if (action == "requnlock") VaultManager.RequestUnlock(doc);
             else if (action == "reqrelease") VaultManager.RequestRelease(doc);
-            else if (action == "updatedrawings") VaultManager.OpenOrCreateDrawing(doc);
             else if (action == "myrequests") { VaultManager.ViewMyRequests(); return; }
 
             // Unlock also closes and reopens — use current active doc for refresh.
