@@ -2162,7 +2162,9 @@ namespace PDMLite
         }
 
         // ── Get referenced model path from drawing ────────────────────────
-        private static string GetDrawingReferencedModel(ModelDoc2 doc)
+        // Public so SwAddin.OnSavePost can call it when writing drawing records
+        // (it needs the model path to populate ReferencedModel in the DB).
+        public static string GetDrawingReferencedModel(ModelDoc2 doc)
         {
             try
             {
@@ -2179,6 +2181,36 @@ namespace PDMLite
                 return refDoc?.GetPathName() ?? "";
             }
             catch { return ""; }
+        }
+
+        // Returns unique config names referenced across all views on the active
+        // sheet of a drawing, as a comma-separated string. Used by OnSavePost to
+        // populate ReferencedConfigs in the vault DB so the DB knows which
+        // configurations a drawing documents.
+        // Returns "" when no config info can be read (treat as "covers all").
+        public static string GetDrawingReferencedConfigs(ModelDoc2 doc)
+        {
+            var configs = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            try
+            {
+                DrawingDoc drw = (DrawingDoc)doc;
+                // GetFirstView() returns the sheet/paper view (not a model view).
+                // Model views start at GetNextView() from the sheet view.
+                SolidWorks.Interop.sldworks.View sheet =
+                    (SolidWorks.Interop.sldworks.View)drw.GetFirstView();
+                if (sheet == null) return "";
+
+                SolidWorks.Interop.sldworks.View v =
+                    (SolidWorks.Interop.sldworks.View)sheet.GetNextView();
+                while (v != null)
+                {
+                    string cfg = v.ReferencedConfiguration;
+                    if (!string.IsNullOrEmpty(cfg)) configs.Add(cfg);
+                    v = (SolidWorks.Interop.sldworks.View)v.GetNextView();
+                }
+            }
+            catch { }
+            return string.Join(",", configs);
         }
         // ── Move ALL exports for this part to archive on rollback ─────
         private static void CleanupExportsOnRollback(string partNoClean,

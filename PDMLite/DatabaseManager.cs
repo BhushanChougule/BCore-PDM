@@ -1,21 +1,42 @@
 ﻿using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Linq;
 using System.Xml.Linq;
 
 namespace PDMLite
 {
+    // One SOLIDWORKS configuration's identity. Config name = Part No by convention,
+    // so Name and PartNo are the same value — both stored for clarity.
+    public class ConfigEntry
+    {
+        public string Name        { get; set; } // = PartNo (config name IS the part number)
+        public string PartNo      { get; set; }
+        public string Description { get; set; }
+        public string DrawingNo   { get; set; }
+        public string Revision    { get; set; }
+    }
+
     public class VaultFile
     {
-        public string FilePath { get; set; }
-        public string FileName { get; set; }
-        public string PartNumber { get; set; }
+        public string FilePath    { get; set; }
+        public string FileName    { get; set; }
+        // Active/primary config values — used for display and backward compatibility.
+        public string PartNumber  { get; set; }
         public string Description { get; set; }
-        public string Revision { get; set; }
-        public string Status { get; set; }
-        public string ModifiedBy { get; set; }
+        public string Revision    { get; set; }
+        // File-level: all configs share one lifecycle (OS read-only is file-level).
+        public string Status      { get; set; }
+        public string ModifiedBy  { get; set; }
         public DateTime ModifiedDate { get; set; }
         public bool HasBrokenRefs { get; set; }
+        // Per-configuration metadata (parts/assemblies). Empty for drawings and for
+        // old records that haven't been re-saved since this feature shipped.
+        public List<ConfigEntry> Configurations { get; set; } = new List<ConfigEntry>();
+        // Drawing-only: which model file and which of its configs this drawing documents.
+        // ReferencedConfigs = "" means "all configs" (e.g. a config-table drawing).
+        public string ReferencedModel   { get; set; }
+        public string ReferencedConfigs { get; set; }
     }
 
     public class LockInfo
@@ -139,6 +160,67 @@ namespace PDMLite
         }
 
         // ════════════════════════════════════════════════════════════════
+        // Config / drawing-reference XML helpers
+        // ════════════════════════════════════════════════════════════════
+
+        // Build the <Configurations> XElement from a list of ConfigEntry objects.
+        private static XElement BuildConfigsElement(List<ConfigEntry> configs)
+        {
+            var el = new XElement("Configurations");
+            foreach (var c in configs)
+                el.Add(new XElement("Config",
+                    new XElement("Name",        c.Name        ?? ""),
+                    new XElement("PartNo",       c.PartNo      ?? ""),
+                    new XElement("Description",  c.Description ?? ""),
+                    new XElement("DrawingNo",    c.DrawingNo   ?? ""),
+                    new XElement("Revision",     c.Revision    ?? "")
+                ));
+            return el;
+        }
+
+        // Read <Configurations> from a File element. If the element doesn't exist
+        // (old record saved before multi-config shipped) synthesise a single entry
+        // from the file-level PartNumber / Description / Revision fields so callers
+        // never see an empty list for a tracked single-config file.
+        private static List<ConfigEntry> ReadConfigs(XElement fileEl,
+            string fallbackPartNo, string fallbackDesc, string fallbackRev)
+        {
+            var configsEl = fileEl.Element("Configurations");
+            if (configsEl != null)
+            {
+                var list = new List<ConfigEntry>();
+                foreach (var c in configsEl.Elements("Config"))
+                    list.Add(new ConfigEntry
+                    {
+                        Name        = (string)c.Element("Name")        ?? "",
+                        PartNo      = (string)c.Element("PartNo")      ?? "",
+                        Description = (string)c.Element("Description") ?? "",
+                        DrawingNo   = (string)c.Element("DrawingNo")   ?? "",
+                        Revision    = (string)c.Element("Revision")    ?? ""
+                    });
+                return list;
+            }
+            // Old record: one implicit config whose name = PartNo.
+            if (!string.IsNullOrEmpty(fallbackPartNo))
+                return new List<ConfigEntry> { new ConfigEntry {
+                    Name        = fallbackPartNo,
+                    PartNo      = fallbackPartNo,
+                    Description = fallbackDesc ?? "",
+                    Revision    = fallbackRev  ?? ""
+                }};
+            return new List<ConfigEntry>();
+        }
+
+        // Set or add a child element on an existing XML node — safe to call on
+        // old records that don't yet have the element (migration path).
+        private static void SetOrAdd(XElement parent, string name, string value)
+        {
+            var el = parent.Element(name);
+            if (el != null) el.Value = value ?? "";
+            else parent.Add(new XElement(name, value ?? ""));
+        }
+
+        // ════════════════════════════════════════════════════════════════
         // File operations
         // ════════════════════════════════════════════════════════════════
         public static void UpsertFile(VaultFile f)
@@ -170,29 +252,48 @@ namespace PDMLite
 
                 if (existing != null)
                 {
-                    existing.Element("FileName").Value = f.FileName;
-                    existing.Element("PartNumber").Value = f.PartNumber ?? "";
+                    existing.Element("FileName").Value    = f.FileName;
+                    existing.Element("PartNumber").Value  = f.PartNumber  ?? "";
                     existing.Element("Description").Value = f.Description ?? "";
-                    existing.Element("ModifiedBy").Value = f.ModifiedBy ?? "";
+                    existing.Element("ModifiedBy").Value  = f.ModifiedBy  ?? "";
                     existing.Element("ModifiedDate").Value = f.ModifiedDate.ToString("o");
 
                     if (!string.IsNullOrEmpty(f.Status))
                         existing.Element("Status").Value = f.Status;
+
+                    // Revision (may not exist in old records — add if missing).
+                    SetOrAdd(existing, "Revision", f.Revision ?? "");
+
+                    // Drawing reference fields (drawings only; safe no-op on models).
+                    SetOrAdd(existing, "ReferencedModel",   f.ReferencedModel   ?? "");
+                    SetOrAdd(existing, "ReferencedConfigs", f.ReferencedConfigs ?? "");
+
+                    // Per-config metadata: replace the whole block on each save so
+                    // adding/removing configs is always reflected correctly.
+                    existing.Element("Configurations")?.Remove();
+                    if (f.Configurations != null && f.Configurations.Count > 0)
+                        existing.Add(BuildConfigsElement(f.Configurations));
                 }
                 else
                 {
-                    files.Add(new XElement("File",
-                        new XElement("FilePath", f.FilePath),
-                        new XElement("FileName", f.FileName),
-                        new XElement("PartNumber", f.PartNumber ?? ""),
-                        new XElement("Description", f.Description ?? ""),
-                        new XElement("Status", f.Status ?? "WIP"),
-                        new XElement("LockedBy", ""),
-                        new XElement("LockedDate", ""),
-                        new XElement("ModifiedBy", f.ModifiedBy ?? ""),
-                        new XElement("ModifiedDate", f.ModifiedDate.ToString("o")),
-                        new XElement("HasBrokenRefs", "false")
-                    ));
+                    var fileEl = new XElement("File",
+                        new XElement("FilePath",        f.FilePath),
+                        new XElement("FileName",        f.FileName),
+                        new XElement("PartNumber",      f.PartNumber  ?? ""),
+                        new XElement("Description",     f.Description ?? ""),
+                        new XElement("Revision",        f.Revision    ?? ""),
+                        new XElement("Status",          f.Status      ?? "WIP"),
+                        new XElement("LockedBy",        ""),
+                        new XElement("LockedDate",      ""),
+                        new XElement("ModifiedBy",      f.ModifiedBy  ?? ""),
+                        new XElement("ModifiedDate",    f.ModifiedDate.ToString("o")),
+                        new XElement("HasBrokenRefs",   "false"),
+                        new XElement("ReferencedModel",   f.ReferencedModel   ?? ""),
+                        new XElement("ReferencedConfigs", f.ReferencedConfigs ?? "")
+                    );
+                    if (f.Configurations != null && f.Configurations.Count > 0)
+                        fileEl.Add(BuildConfigsElement(f.Configurations));
+                    files.Add(fileEl);
                 }
 
                 Save(doc);
@@ -674,10 +775,30 @@ namespace PDMLite
                     string partNoRaw = (string)el.Element("PartNumber") ?? "";
                     string descRaw = (string)el.Element("Description") ?? "";
 
-                    if (!(partNoRaw.ToLower().Contains(term) ||
-                          descRaw.ToLower().Contains(term) ||
-                          fileName.ToLower().Contains(term)))
-                        continue;
+                    // Match the term against the file-level PN/desc/name, AND
+                    // against every configuration's PN and description so a
+                    // multi-config part is findable by any of its part numbers.
+                    bool matchFound = partNoRaw.ToLower().Contains(term)
+                                   || descRaw.ToLower().Contains(term)
+                                   || fileName.ToLower().Contains(term);
+
+                    if (!matchFound)
+                    {
+                        var cfgEl = el.Element("Configurations");
+                        if (cfgEl != null)
+                        {
+                            foreach (var c in cfgEl.Elements("Config"))
+                            {
+                                if (((string)c.Element("PartNo")      ?? "").ToLower().Contains(term) ||
+                                    ((string)c.Element("Description") ?? "").ToLower().Contains(term))
+                                {
+                                    matchFound = true;
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                    if (!matchFound) continue;
 
                     // Orphan check: file gone on disk → never show it, and purge
                     // its record when we can prove the share is online.
@@ -713,12 +834,16 @@ namespace PDMLite
 
                     results.Add(new VaultFile
                     {
-                        FilePath = filePath,
-                        FileName = fileName,
-                        PartNumber = partNoRaw,
+                        FilePath    = filePath,
+                        FileName    = fileName,
+                        PartNumber  = partNoRaw,
                         Description = descRaw,
-                        Status = status,
-                        Revision = (string)el.Element("Revision") ?? ""
+                        Status      = status,
+                        Revision    = (string)el.Element("Revision") ?? "",
+                        ReferencedModel   = (string)el.Element("ReferencedModel")   ?? "",
+                        ReferencedConfigs = (string)el.Element("ReferencedConfigs") ?? "",
+                        Configurations    = ReadConfigs(el, partNoRaw, descRaw,
+                                               (string)el.Element("Revision") ?? "")
                     });
                 }
 
@@ -831,9 +956,23 @@ namespace PDMLite
                         elFileName.Equals(excludeFileName, StringComparison.OrdinalIgnoreCase))
                         continue;
 
+                    // Check the file-level PartNumber first (single-config and primary).
                     string elPart = ((string)el.Element("PartNumber") ?? "").Trim();
                     if (elPart.Equals(target, StringComparison.OrdinalIgnoreCase))
                         return elFileName.Length > 0 ? elFileName : elPath;
+
+                    // Also check every configuration's PartNo — a multi-config file
+                    // occupies all its configs' part numbers simultaneously.
+                    var cfgEl = el.Element("Configurations");
+                    if (cfgEl != null)
+                    {
+                        foreach (var c in cfgEl.Elements("Config"))
+                        {
+                            string cfgPn = ((string)c.Element("PartNo") ?? "").Trim();
+                            if (cfgPn.Equals(target, StringComparison.OrdinalIgnoreCase))
+                                return elFileName.Length > 0 ? elFileName : elPath;
+                        }
+                    }
                 }
             }
 
@@ -1035,14 +1174,20 @@ namespace PDMLite
                     if (string.Equals((string)el.Element("FilePath"), filePath,
                             StringComparison.OrdinalIgnoreCase))
                     {
+                        string pn  = (string)el.Element("PartNumber")  ?? "";
+                        string dsc = (string)el.Element("Description") ?? "";
+                        string rev = (string)el.Element("Revision")    ?? "";
                         return new VaultFile
                         {
-                            FilePath = (string)el.Element("FilePath") ?? "",
-                            FileName = (string)el.Element("FileName") ?? "",
-                            PartNumber = (string)el.Element("PartNumber") ?? "",
-                            Description = (string)el.Element("Description") ?? "",
-                            Revision = (string)el.Element("Revision") ?? "",
-                            Status = (string)el.Element("Status") ?? ""
+                            FilePath          = (string)el.Element("FilePath") ?? "",
+                            FileName          = (string)el.Element("FileName") ?? "",
+                            PartNumber        = pn,
+                            Description       = dsc,
+                            Revision          = rev,
+                            Status            = (string)el.Element("Status")           ?? "",
+                            ReferencedModel   = (string)el.Element("ReferencedModel")  ?? "",
+                            ReferencedConfigs = (string)el.Element("ReferencedConfigs")?? "",
+                            Configurations    = ReadConfigs(el, pn, dsc, rev)
                         };
                     }
                 }
@@ -1050,36 +1195,83 @@ namespace PDMLite
             return null;
         }
 
-        // Returns the part/assembly VaultFile that shares the same base filename
-        // as the given drawing (PartNo, Description, Status etc. live on the
-        // model, not the drawing). e.g. "TEST 1.SLDDRW" → finds "TEST 1.SLDPRT"
-        // or "TEST 1.SLDASM" and returns its record. Returns null if not found.
-        // Used by the merged search card to populate the model's details when a
-        // search matched the drawing.
+        // Returns the part/assembly VaultFile that this drawing documents.
+        // Lookup order: (1) explicit ReferencedModel link written at save time
+        // (reliable for multi-config drawings); (2) basename convention fallback
+        // for drawings saved before multi-config shipped (Widget.slddrw →
+        // Widget.sldprt). Returns null if not found.
         public static VaultFile GetModelForDrawing(string drawingFilePath)
         {
-            string baseName = System.IO.Path.GetFileNameWithoutExtension(
-                drawingFilePath);
+            if (string.IsNullOrEmpty(drawingFilePath)) return null;
             lock (_lock)
             {
                 var doc = LoadOrCreate();
+
+                // ── Pass 1: reference-based ──────────────────────────────
                 foreach (var el in doc.Root.Element("Files").Elements("File"))
                 {
-                    string fn = (string)el.Element("FileName") ?? "";
+                    string fp = (string)el.Element("FilePath") ?? "";
+                    if (!string.Equals(fp, drawingFilePath,
+                            StringComparison.OrdinalIgnoreCase))
+                        continue;
+
+                    string refModel = (string)el.Element("ReferencedModel") ?? "";
+                    if (string.IsNullOrEmpty(refModel)) break; // no ref → try basename
+
+                    // Find the model record by path or by filename.
+                    string refName = System.IO.Path.GetFileName(refModel);
+                    foreach (var mel in doc.Root.Element("Files").Elements("File"))
+                    {
+                        string mfp = (string)mel.Element("FilePath") ?? "";
+                        string mfn = (string)mel.Element("FileName") ?? "";
+                        string mExt = System.IO.Path.GetExtension(mfn).ToLower();
+                        if ((mExt == ".sldprt" || mExt == ".sldasm") &&
+                            (string.Equals(mfp, refModel,
+                                 StringComparison.OrdinalIgnoreCase) ||
+                             string.Equals(mfn, refName,
+                                 StringComparison.OrdinalIgnoreCase)))
+                        {
+                            string pn  = (string)mel.Element("PartNumber")  ?? "";
+                            string dsc = (string)mel.Element("Description") ?? "";
+                            string rev = (string)mel.Element("Revision")    ?? "";
+                            return new VaultFile
+                            {
+                                FilePath          = mfp,
+                                FileName          = mfn,
+                                PartNumber        = pn,
+                                Description       = dsc,
+                                Revision          = rev,
+                                Status            = (string)mel.Element("Status") ?? "",
+                                Configurations    = ReadConfigs(mel, pn, dsc, rev)
+                            };
+                        }
+                    }
+                    break;
+                }
+
+                // ── Pass 2: basename fallback ────────────────────────────
+                string baseName = System.IO.Path.GetFileNameWithoutExtension(drawingFilePath);
+                foreach (var el in doc.Root.Element("Files").Elements("File"))
+                {
+                    string fn    = (string)el.Element("FileName") ?? "";
                     string fnBase = System.IO.Path.GetFileNameWithoutExtension(fn);
-                    string fnExt = System.IO.Path.GetExtension(fn).ToLower();
+                    string fnExt  = System.IO.Path.GetExtension(fn).ToLower();
                     if (string.Equals(fnBase, baseName,
                             StringComparison.OrdinalIgnoreCase) &&
                         (fnExt == ".sldprt" || fnExt == ".sldasm"))
                     {
+                        string pn  = (string)el.Element("PartNumber")  ?? "";
+                        string dsc = (string)el.Element("Description") ?? "";
+                        string rev = (string)el.Element("Revision")    ?? "";
                         return new VaultFile
                         {
-                            FilePath = (string)el.Element("FilePath") ?? "",
-                            FileName = fn,
-                            PartNumber = (string)el.Element("PartNumber") ?? "",
-                            Description = (string)el.Element("Description") ?? "",
-                            Revision = (string)el.Element("Revision") ?? "",
-                            Status = (string)el.Element("Status") ?? ""
+                            FilePath       = (string)el.Element("FilePath") ?? "",
+                            FileName       = fn,
+                            PartNumber     = pn,
+                            Description    = dsc,
+                            Revision       = rev,
+                            Status         = (string)el.Element("Status") ?? "",
+                            Configurations = ReadConfigs(el, pn, dsc, rev)
                         };
                     }
                 }
@@ -1087,22 +1279,46 @@ namespace PDMLite
             return null;
         }
 
-        // Returns the WIP path of the .slddrw that shares the same base filename
-        // as the given part/assembly (the drawing that documents it), or null if
-        // no drawing is tracked. Used by the merged search card to wire the
-        // "Open Drawing" button when a search matched only the model.
+        // Returns the WIP path of the primary drawing for a part/assembly, or null.
+        // "Primary" = the shared config-table drawing named after the model basename
+        // (Widget.slddrw). For config-specific drawings use GetDrawingsForConfig.
+        // Lookup order: (1) ReferencedModel reference (reliable); (2) basename.
         public static string GetDrawingPathForModel(string modelFilePath)
         {
-            string baseName = System.IO.Path.GetFileNameWithoutExtension(
-                modelFilePath);
+            if (string.IsNullOrEmpty(modelFilePath)) return null;
+            string modelName = System.IO.Path.GetFileName(modelFilePath);
             lock (_lock)
             {
                 var doc = LoadOrCreate();
+
+                // ── Pass 1: reference-based ──────────────────────────────
                 foreach (var el in doc.Root.Element("Files").Elements("File"))
                 {
-                    string fn = (string)el.Element("FileName") ?? "";
+                    string fn  = (string)el.Element("FileName") ?? "";
+                    if (!System.IO.Path.GetExtension(fn)
+                            .Equals(".slddrw", StringComparison.OrdinalIgnoreCase))
+                        continue;
+
+                    string refModel = (string)el.Element("ReferencedModel") ?? "";
+                    if (string.IsNullOrEmpty(refModel)) continue;
+
+                    if (string.Equals(System.IO.Path.GetFileName(refModel),
+                            modelName, StringComparison.OrdinalIgnoreCase) ||
+                        string.Equals(refModel, modelFilePath,
+                            StringComparison.OrdinalIgnoreCase))
+                    {
+                        string fp = (string)el.Element("FilePath") ?? "";
+                        if (!string.IsNullOrEmpty(fp)) return fp;
+                    }
+                }
+
+                // ── Pass 2: basename fallback ────────────────────────────
+                string baseName = System.IO.Path.GetFileNameWithoutExtension(modelFilePath);
+                foreach (var el in doc.Root.Element("Files").Elements("File"))
+                {
+                    string fn    = (string)el.Element("FileName") ?? "";
                     string fnBase = System.IO.Path.GetFileNameWithoutExtension(fn);
-                    string fnExt = System.IO.Path.GetExtension(fn).ToLower();
+                    string fnExt  = System.IO.Path.GetExtension(fn).ToLower();
                     if (string.Equals(fnBase, baseName,
                             StringComparison.OrdinalIgnoreCase) &&
                         fnExt == ".slddrw")
@@ -1113,6 +1329,98 @@ namespace PDMLite
                 }
             }
             return null;
+        }
+
+        // Returns all WIP drawing paths that document a specific configuration of
+        // a model. Used by the per-config search card and by release/new-revision
+        // to locate config-specific drawings.
+        // Match logic: drawing's ReferencedModel == modelFilePath AND
+        //   ReferencedConfigs is blank (covers all) OR contains configName.
+        // Falls back to basename convention for old/unsaved drawings.
+        public static List<string> GetDrawingsForConfig(string modelFilePath, string configName)
+        {
+            var result = new List<string>();
+            if (string.IsNullOrEmpty(modelFilePath)) return result;
+
+            string modelName = System.IO.Path.GetFileName(modelFilePath);
+            var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+            lock (_lock)
+            {
+                var doc = LoadOrCreate();
+                foreach (var el in doc.Root.Element("Files").Elements("File"))
+                {
+                    string fn  = (string)el.Element("FileName") ?? "";
+                    if (!System.IO.Path.GetExtension(fn)
+                            .Equals(".slddrw", StringComparison.OrdinalIgnoreCase))
+                        continue;
+
+                    string fp = (string)el.Element("FilePath") ?? "";
+                    if (string.IsNullOrEmpty(fp) || seen.Contains(fp)) continue;
+
+                    string refModel   = (string)el.Element("ReferencedModel")   ?? "";
+                    string refConfigs = (string)el.Element("ReferencedConfigs") ?? "";
+
+                    if (!string.IsNullOrEmpty(refModel) &&
+                        (string.Equals(refModel, modelFilePath,
+                             StringComparison.OrdinalIgnoreCase) ||
+                         string.Equals(System.IO.Path.GetFileName(refModel),
+                             modelName, StringComparison.OrdinalIgnoreCase)))
+                    {
+                        // Drawing references our model. Check config coverage.
+                        bool coversAll     = string.IsNullOrEmpty(refConfigs);
+                        bool coversThis    = !coversAll && refConfigs
+                            .Split(',')
+                            .Any(c => string.Equals(c.Trim(), configName,
+                                          StringComparison.OrdinalIgnoreCase));
+                        if (coversAll || coversThis)
+                        {
+                            result.Add(fp);
+                            seen.Add(fp);
+                        }
+                        continue; // don't also match by basename
+                    }
+
+                    // Basename fallback: drawing named after the model (shared) or
+                    // after the config PartNo (config-specific) — pre-reference era.
+                    string fnBase = System.IO.Path.GetFileNameWithoutExtension(fn);
+                    string modelBase   = System.IO.Path.GetFileNameWithoutExtension(modelFilePath);
+                    bool sharedMatch   = string.Equals(fnBase, modelBase,
+                                            StringComparison.OrdinalIgnoreCase);
+                    bool configMatch   = !string.IsNullOrEmpty(configName) &&
+                                        string.Equals(fnBase, configName,
+                                            StringComparison.OrdinalIgnoreCase);
+                    if ((sharedMatch || configMatch) && !seen.Contains(fp))
+                    {
+                        result.Add(fp);
+                        seen.Add(fp);
+                    }
+                }
+            }
+            return result;
+        }
+
+        // Returns all configuration entries for a tracked file path.
+        // For old single-config records returns a synthesised single-entry list.
+        public static List<ConfigEntry> GetConfigsForFile(string filePath)
+        {
+            if (string.IsNullOrEmpty(filePath)) return new List<ConfigEntry>();
+            lock (_lock)
+            {
+                var doc = LoadOrCreate();
+                foreach (var el in doc.Root.Element("Files").Elements("File"))
+                {
+                    if (string.Equals((string)el.Element("FilePath"), filePath,
+                            StringComparison.OrdinalIgnoreCase))
+                    {
+                        string pn  = (string)el.Element("PartNumber")  ?? "";
+                        string dsc = (string)el.Element("Description") ?? "";
+                        string rev = (string)el.Element("Revision")    ?? "";
+                        return ReadConfigs(el, pn, dsc, rev);
+                    }
+                }
+            }
+            return new List<ConfigEntry>();
         }
     }
 }

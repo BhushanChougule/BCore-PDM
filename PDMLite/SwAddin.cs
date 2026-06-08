@@ -3,6 +3,7 @@ using SolidWorks.Interop.swpublished;
 using SolidWorks.Interop.swconst;
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Runtime.InteropServices;
 using System.Windows.Forms;
 
@@ -400,16 +401,83 @@ namespace PDMLite
                 if (string.IsNullOrEmpty(filePath)) filePath = fileName;
                 string currentStatus = DatabaseManager.GetFileStatus(filePath);
                 _taskPane?.RefreshPanel();
-                DatabaseManager.UpsertFile(new VaultFile
+
+                int docType    = doc.GetType();
+                bool isDrawing = docType == (int)SolidWorks.Interop.swconst
+                                    .swDocumentTypes_e.swDocDRAWING;
+
+                var vf = new VaultFile
                 {
-                    FilePath    = filePath,
-                    FileName    = System.IO.Path.GetFileName(filePath),
-                    PartNumber  = PropertyValidator.GetProperty(doc, "PartNo"),
-                    Description = PropertyValidator.GetProperty(doc, "Description"),
-                    Status      = string.IsNullOrEmpty(currentStatus) ? "WIP" : currentStatus,
-                    ModifiedBy  = CurrentUser,
+                    FilePath     = filePath,
+                    FileName     = System.IO.Path.GetFileName(filePath),
+                    PartNumber   = PropertyValidator.GetProperty(doc, "PartNo"),
+                    Description  = PropertyValidator.GetProperty(doc, "Description"),
+                    Revision     = PropertyValidator.GetProperty(doc, "Revision"),
+                    Status       = string.IsNullOrEmpty(currentStatus) ? "WIP" : currentStatus,
+                    ModifiedBy   = CurrentUser,
                     ModifiedDate = DateTime.Now
-                });
+                };
+
+                if (isDrawing)
+                {
+                    // Drawings: record which model file and which of its
+                    // configurations this drawing documents so the DB can answer
+                    // "which drawings cover config WGT-005?" without relying on
+                    // fragile filename conventions.
+                    vf.ReferencedModel   = VaultManager.GetDrawingReferencedModel(doc);
+                    vf.ReferencedConfigs = VaultManager.GetDrawingReferencedConfigs(doc);
+                }
+                else
+                {
+                    // Parts / Assemblies: capture every configuration's identity
+                    // so the vault can find the file by any of its part numbers
+                    // and detect duplicate-PN conflicts across all configs.
+                    var cfgNames = PropertyValidator.GetConfigNames(doc);
+                    var configs  = new System.Collections.Generic.List<ConfigEntry>();
+                    foreach (string cfgName in cfgNames)
+                    {
+                        configs.Add(new ConfigEntry
+                        {
+                            Name        = cfgName,
+                            PartNo      = PropertyValidator.GetProperty(doc, "PartNo",      cfgName),
+                            Description = PropertyValidator.GetProperty(doc, "Description", cfgName),
+                            DrawingNo   = PropertyValidator.GetProperty(doc, "DrawingNo",   cfgName),
+                            Revision    = PropertyValidator.GetProperty(doc, "Revision",    cfgName)
+                        });
+                    }
+                    vf.Configurations = configs;
+                }
+
+                DatabaseManager.UpsertFile(vf);
+
+                // Warn (do not block) when non-active configs have incomplete
+                // properties so the engineer knows to switch configs and save.
+                if (!isDrawing)
+                {
+                    string activeConfig = "";
+                    try
+                    {
+                        var cfg = doc.GetActiveConfiguration()
+                            as SolidWorks.Interop.sldworks.Configuration;
+                        activeConfig = cfg?.Name ?? "";
+                    }
+                    catch { }
+
+                    var allIssues = PropertyValidator.ValidateAllConfigs(doc);
+                    allIssues.Remove(activeConfig); // already validated / prompted above
+                    if (allIssues.Count > 0)
+                    {
+                        string summary = string.Join("\n", allIssues.Select(kv =>
+                            "  • " + kv.Key + ": " + string.Join(", ", kv.Value)));
+                        SwApp.SendMsgToUser2(
+                            "OTHER CONFIGURATIONS HAVE INCOMPLETE PROPERTIES:\n\n" +
+                            summary + "\n\n" +
+                            "Switch to each configuration and save to complete " +
+                            "their required fields before releasing.",
+                            (int)SolidWorks.Interop.swconst.swMessageBoxIcon_e.swMbWarning,
+                            (int)SolidWorks.Interop.swconst.swMessageBoxBtn_e.swMbOk);
+                    }
+                }
             }
             catch { }
             return 0;
