@@ -93,8 +93,15 @@ namespace PDMLite
             int[] colX = { S(10), S(10) + colW + S(5), S(10) + (colW + S(5)) * 2 };
             int colY = S(40);
 
-            // Bottom action area reserved below the columns.
-            int bottomBarTop = cH - S(96);
+            // Bottom buttons anchored from client bottom — no dead space.
+            int bMargin      = S(8);
+            int row2H        = S(28);
+            int row1H        = S(26);
+            int rowGap       = S(6);
+            int row2Y        = cH - bMargin - row2H;      // Approve All + Bulk Release
+            int row1Y        = row2Y - rowGap - row1H;    // per-column Approve Selected
+            int bottomBarTop = row1Y - rowGap;            // list panels end here
+
             int panelTop = colY + S(22);
             int panelH = bottomBarTop - panelTop - S(6);
 
@@ -145,9 +152,9 @@ namespace PDMLite
                 {
                     Text = "Approve Selected",
                     Font = fBtn,
-                    Location = new Point(colX[i], bottomBarTop + S(2)),
+                    Location = new Point(colX[i], row1Y),
                     Width = colW,
-                    Height = S(26),
+                    Height = row1H,
                     BackColor = colors[i],
                     ForeColor = Color.White,
                     FlatStyle = FlatStyle.Flat,
@@ -174,16 +181,17 @@ namespace PDMLite
             _releaseAll.CheckedChanged  += (s, e) => SetAll(_releaseChecks, _releaseAll.Checked);
 
             // ── Bottom row: Approve All Pending (green) + Bulk Release (blue) ──
-            int row2Y = bottomBarTop + S(32);
-            int greenW = colX[1] + colW - colX[0];   // spans columns 1+2
+            // Equal halves of the full column span so they look uniform.
+            int totalColSpan = colX[2] + colW - colX[0];
+            int halfW        = totalColSpan / 2;
 
             Button btnApproveAll = new Button
             {
                 Text = "Approve All Pending",
                 Font = fBtn,
                 Location = new Point(colX[0], row2Y),
-                Width = greenW,
-                Height = S(28),
+                Width = halfW,
+                Height = row2H,
                 BackColor = cGreen,
                 ForeColor = Color.White,
                 FlatStyle = FlatStyle.Flat,
@@ -197,9 +205,9 @@ namespace PDMLite
             {
                 Text = "Bulk Release…",
                 Font = fBtn,
-                Location = new Point(colX[2], row2Y),
-                Width = colW,
-                Height = S(28),
+                Location = new Point(colX[0] + halfW, row2Y),
+                Width = totalColSpan - halfW,
+                Height = row2H,
                 BackColor = cBrand,
                 ForeColor = Color.White,
                 FlatStyle = FlatStyle.Flat,

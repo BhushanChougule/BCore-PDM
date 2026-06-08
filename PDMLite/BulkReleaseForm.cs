@@ -85,12 +85,16 @@ namespace PDMLite
             int innerW = cW - margin * 2;
 
             // Filter box + button
+            // Multiline = true lets WinForms respect the explicit Height (single-line
+            // TextBox auto-sizes from font and ignores Height). Enter still triggers
+            // the filter via KeyDown below.
             _filter = new TextBox
             {
                 Font = fText,
                 Location = new Point(margin, S(42)),
                 Width = innerW - S(72),
-                Height = S(26)
+                Height = S(26),
+                Multiline = true
             };
             _filter.KeyDown += (s, e) =>
             {
