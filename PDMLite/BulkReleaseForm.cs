@@ -15,6 +15,24 @@ namespace PDMLite
         private float _scale;
         private int S(float v) => (int)(v * _scale);
 
+        // EM_SETCUEBANNER — shows grey placeholder text in a single-line TextBox
+        // until the user types. Available since the placeholder property does not
+        // exist on .NET Framework 4.8's TextBox.
+        [System.Runtime.InteropServices.DllImport("user32.dll",
+            CharSet = System.Runtime.InteropServices.CharSet.Unicode)]
+        private static extern IntPtr SendMessage(
+            IntPtr hWnd, int msg, IntPtr wParam, string lParam);
+
+        private static void SetCueBanner(TextBox box, string text)
+        {
+            const int EM_SETCUEBANNER = 0x1501;
+            if (box.IsHandleCreated)
+                SendMessage(box.Handle, EM_SETCUEBANNER, (IntPtr)1, text);
+            else
+                box.HandleCreated += (s, e) =>
+                    SendMessage(box.Handle, EM_SETCUEBANNER, (IntPtr)1, text);
+        }
+
         private readonly Color cBrand    = Color.FromArgb(65, 120, 175);
         private readonly Color cBrandDark = Color.FromArgb(44, 85, 128);
         private readonly Color cBg       = Color.FromArgb(248, 249, 251);
@@ -92,11 +110,10 @@ namespace PDMLite
             {
                 Font = fText,
                 Location = new Point(margin, S(42)),
-                Width = innerW,
-                Height = S(26),
-                Multiline = true,
-                PlaceholderText = "Search by part number, description or filename…"
+                Width = innerW
             };
+            // Grey cue banner (placeholder) — Win32, works on .NET Framework 4.8.
+            SetCueBanner(_filter, "Search by part number, description or filename…");
 
             _searchTimer = new Timer { Interval = 600 };
             _searchTimer.Tick += (s, e) => { _searchTimer.Stop(); LoadFiles(); };
