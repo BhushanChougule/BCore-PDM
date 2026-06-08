@@ -33,6 +33,7 @@ namespace PDMLite
         private Panel _listPanel;
         private CheckBox _selectAll;
         private Label _countLabel;
+        private Timer _searchTimer;
         private readonly List<CheckBox> _checks = new List<CheckBox>();
 
         public BulkReleaseForm(float scale)
@@ -84,39 +85,31 @@ namespace PDMLite
             int margin = S(12);
             int innerW = cW - margin * 2;
 
-            // Filter box + button
-            // Multiline = true lets WinForms respect the explicit Height (single-line
-            // TextBox auto-sizes from font and ignores Height). Enter still triggers
-            // the filter via KeyDown below.
+            // Dynamic search box — full width, auto-searches after 600 ms of
+            // inactivity (≥2 chars) or immediately clears back to all files when
+            // the box is empty. Mirrors the task-pane search pattern.
             _filter = new TextBox
             {
                 Font = fText,
                 Location = new Point(margin, S(42)),
-                Width = innerW - S(72),
+                Width = innerW,
                 Height = S(26),
-                Multiline = true
+                Multiline = true,
+                PlaceholderText = "Search by part number, description or filename…"
             };
-            _filter.KeyDown += (s, e) =>
+
+            _searchTimer = new Timer { Interval = 600 };
+            _searchTimer.Tick += (s, e) => { _searchTimer.Stop(); LoadFiles(); };
+
+            _filter.TextChanged += (s, e) =>
             {
-                if (e.KeyCode == Keys.Enter) { e.SuppressKeyPress = true; LoadFiles(); }
+                _searchTimer.Stop();
+                if (string.IsNullOrWhiteSpace(_filter.Text))
+                    LoadFiles();          // clear → show all immediately
+                else if (_filter.Text.Length >= 2)
+                    _searchTimer.Start(); // wait for pause before querying
             };
             this.Controls.Add(_filter);
-
-            Button btnFilter = new Button
-            {
-                Text = "Filter",
-                Font = fBtn,
-                Location = new Point(margin + innerW - S(66), S(42)),
-                Width = S(66),
-                Height = S(26),
-                BackColor = cDark,
-                ForeColor = Color.White,
-                FlatStyle = FlatStyle.Flat,
-                Cursor = Cursors.Hand
-            };
-            btnFilter.FlatAppearance.BorderSize = 0;
-            btnFilter.Click += (s, e) => LoadFiles();
-            this.Controls.Add(btnFilter);
 
             // Select-all + count row
             _selectAll = new CheckBox
