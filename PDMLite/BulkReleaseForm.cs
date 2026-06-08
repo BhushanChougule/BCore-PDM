@@ -335,8 +335,24 @@ namespace PDMLite
                 // PN + description on one line: the "PN:" / "DESC:" labels are
                 // bold so they stand out from their values. Built from a row of
                 // side-by-side AutoSize labels, positioned by measured width.
-                bool hasPn = !string.IsNullOrWhiteSpace(f.PartNumber);
-                bool hasDesc = !string.IsNullOrWhiteSpace(f.Description);
+                // Drawings carry no properties of their own — they inherit PN +
+                // Description from the part/assembly of the same base filename.
+                string pn = f.PartNumber;
+                string desc = f.Description;
+                if (string.Equals(System.IO.Path.GetExtension(f.FileName),
+                        ".slddrw", StringComparison.OrdinalIgnoreCase) &&
+                    string.IsNullOrWhiteSpace(pn))
+                {
+                    var model = DatabaseManager.GetModelForDrawing(f.FilePath);
+                    if (model != null)
+                    {
+                        pn = model.PartNumber;
+                        desc = model.Description;
+                    }
+                }
+
+                bool hasPn = !string.IsNullOrWhiteSpace(pn);
+                bool hasDesc = !string.IsNullOrWhiteSpace(desc);
                 int subY = S(24);
                 int subX = S(28);
                 int subRight = card.Width - S(6);
@@ -355,12 +371,12 @@ namespace PDMLite
                 }
                 else
                 {
-                    subX = AddInlinePair(card, "PN:", f.PartNumber,
+                    subX = AddInlinePair(card, "PN:", pn,
                         fSubBold, fSub, subX, subY, subRight, false);
                     if (hasDesc)
                     {
                         subX += S(10); // gap between the PN and DESC pairs
-                        AddInlinePair(card, "DESC:", f.Description,
+                        AddInlinePair(card, "DESC:", desc,
                             fSubBold, fSub, subX, subY, subRight, true);
                     }
                 }
