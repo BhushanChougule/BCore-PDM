@@ -204,7 +204,7 @@ namespace PDMLite
 
             Button btnBulkRelease = new Button
             {
-                Text = "Bulk Release…",
+                Text = "Bulk Release - WIP",
                 Font = fBtn,
                 Location = new Point(colX[0] + halfW + S(5), row2Y),
                 Width = totalColSpan - halfW - S(5),

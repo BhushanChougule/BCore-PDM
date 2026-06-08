@@ -207,8 +207,11 @@ namespace PDMLite
 
         // Adds a bold "label" + regular "value" side by side on one row and
         // returns the X where the value ends (so the next pair can follow).
+        // fill=false → value auto-sizes to its text (so a following pair butts
+        // up against it); fill=true → value takes the remaining width with an
+        // ellipsis (use for the last pair on the row).
         private int AddInlinePair(Panel card, string label, string value,
-            Font fLabel, Font fValue, int x, int y, int rightEdge)
+            Font fLabel, Font fValue, int x, int y, int rightEdge, bool fill)
         {
             var lbl = new Label
             {
@@ -222,20 +225,24 @@ namespace PDMLite
             int labelW = TextRenderer.MeasureText(label, fLabel).Width;
 
             int valX = x + labelW + S(3);
+            int valW = TextRenderer.MeasureText(value, fValue).Width;
             var val = new Label
             {
                 Text = value,
                 Font = fValue,
                 ForeColor = cTextGray,
                 Location = new Point(valX, y),
-                AutoSize = false,
-                Width = Math.Max(S(10), rightEdge - valX),
-                Height = S(14),
-                AutoEllipsis = true
+                AutoSize = !fill,
+                AutoEllipsis = fill
             };
+            if (fill)
+            {
+                val.Width = Math.Max(S(10), rightEdge - valX);
+                val.Height = S(14);
+                valW = Math.Min(valW, val.Width);
+            }
             card.Controls.Add(val);
-            int valW = TextRenderer.MeasureText(value, fValue).Width;
-            return valX + Math.Min(valW, val.Width);
+            return valX + valW;
         }
 
         private void LoadFiles()
@@ -349,12 +356,12 @@ namespace PDMLite
                 else
                 {
                     subX = AddInlinePair(card, "PN:", f.PartNumber,
-                        fSubBold, fSub, subX, subY, subRight);
+                        fSubBold, fSub, subX, subY, subRight, false);
                     if (hasDesc)
                     {
                         subX += S(10); // gap between the PN and DESC pairs
                         AddInlinePair(card, "DESC:", f.Description,
-                            fSubBold, fSub, subX, subY, subRight);
+                            fSubBold, fSub, subX, subY, subRight, true);
                     }
                 }
 
