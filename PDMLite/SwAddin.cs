@@ -174,6 +174,17 @@ namespace PDMLite
             catch { }
         }
 
+        // Called from DocEventHandler when the user switches the active
+        // configuration of a part/assembly. Config name = Part No by convention,
+        // so each config carries its own PartNo / Description / Revision; the
+        // Active File card must re-read them when the active config changes.
+        // (ActiveDocChangeNotify does NOT fire on a config switch — only on a
+        // document switch — so this is the only signal for it.)
+        internal void OnActiveConfigChanged()
+        {
+            try { _taskPane?.RefreshPanel(); } catch { }
+        }
+
         // Called from DocEventHandler.OnDestroy. Removes the stale handler, then
         // re-scans open docs and refreshes the task pane — but DEFERRED.
         internal void OnDocDestroyed(string id)
@@ -510,12 +521,14 @@ namespace PDMLite
             private DPartDocEvents_FileSaveAsNotify2EventHandler _partSaveAs;
             private DPartDocEvents_FileSavePostNotifyEventHandler _partPost;
             private DPartDocEvents_DestroyNotifyEventHandler     _partDestroy;
+            private DPartDocEvents_ActiveConfigChangePostNotifyEventHandler _partCfgChange;
 
             // Assembly delegates
             private DAssemblyDocEvents_FileSaveNotifyEventHandler    _asmSave;
             private DAssemblyDocEvents_FileSaveAsNotify2EventHandler _asmSaveAs;
             private DAssemblyDocEvents_FileSavePostNotifyEventHandler _asmPost;
             private DAssemblyDocEvents_DestroyNotifyEventHandler     _asmDestroy;
+            private DAssemblyDocEvents_ActiveConfigChangePostNotifyEventHandler _asmCfgChange;
 
             // Drawing delegates
             private DDrawingDocEvents_FileSaveNotifyEventHandler    _drwSave;
@@ -544,10 +557,12 @@ namespace PDMLite
                     _partSaveAs  = new DPartDocEvents_FileSaveAsNotify2EventHandler(OnSave);
                     _partPost    = new DPartDocEvents_FileSavePostNotifyEventHandler(OnPost);
                     _partDestroy = new DPartDocEvents_DestroyNotifyEventHandler(OnDestroy);
+                    _partCfgChange = new DPartDocEvents_ActiveConfigChangePostNotifyEventHandler(OnConfigChange);
                     d.FileSaveNotify    += _partSave;
                     d.FileSaveAsNotify2 += _partSaveAs;
                     d.FileSavePostNotify += _partPost;
                     d.DestroyNotify     += _partDestroy;
+                    d.ActiveConfigChangePostNotify += _partCfgChange;
                     return true;
                 }
                 if (_type == (int)swDocumentTypes_e.swDocASSEMBLY)
@@ -557,10 +572,12 @@ namespace PDMLite
                     _asmSaveAs  = new DAssemblyDocEvents_FileSaveAsNotify2EventHandler(OnSave);
                     _asmPost    = new DAssemblyDocEvents_FileSavePostNotifyEventHandler(OnPost);
                     _asmDestroy = new DAssemblyDocEvents_DestroyNotifyEventHandler(OnDestroy);
+                    _asmCfgChange = new DAssemblyDocEvents_ActiveConfigChangePostNotifyEventHandler(OnConfigChange);
                     d.FileSaveNotify    += _asmSave;
                     d.FileSaveAsNotify2 += _asmSaveAs;
                     d.FileSavePostNotify += _asmPost;
                     d.DestroyNotify     += _asmDestroy;
+                    d.ActiveConfigChangePostNotify += _asmCfgChange;
                     return true;
                 }
                 if (_type == (int)swDocumentTypes_e.swDocDRAWING)
@@ -590,6 +607,8 @@ namespace PDMLite
                         d.FileSaveAsNotify2 -= _partSaveAs;
                         d.FileSavePostNotify -= _partPost;
                         d.DestroyNotify     -= _partDestroy;
+                        if (_partCfgChange != null)
+                            d.ActiveConfigChangePostNotify -= _partCfgChange;
                     }
                     else if (_type == (int)swDocumentTypes_e.swDocASSEMBLY && _asmSave != null)
                     {
@@ -598,6 +617,8 @@ namespace PDMLite
                         d.FileSaveAsNotify2 -= _asmSaveAs;
                         d.FileSavePostNotify -= _asmPost;
                         d.DestroyNotify     -= _asmDestroy;
+                        if (_asmCfgChange != null)
+                            d.ActiveConfigChangePostNotify -= _asmCfgChange;
                     }
                     else if (_type == (int)swDocumentTypes_e.swDocDRAWING && _drwSave != null)
                     {
@@ -612,10 +633,12 @@ namespace PDMLite
                 _partSave = null; _partSaveAs = null; _partPost = null; _partDestroy = null;
                 _asmSave  = null; _asmSaveAs  = null; _asmPost  = null; _asmDestroy  = null;
                 _drwSave  = null; _drwSaveAs  = null; _drwPost  = null; _drwDestroy  = null;
+                _partCfgChange = null; _asmCfgChange = null;
             }
 
             private int OnSave(string fileName) => _addin.ValidateSave(_doc, fileName);
             private int OnPost(int t, string fn) => _addin.OnSavePost(_doc, fn);
+            private int OnConfigChange() { _addin.OnActiveConfigChanged(); return 0; }
 
             private int OnDestroy()
             {

@@ -484,79 +484,20 @@ namespace PDMLite
             int ry = 0;
             int rw = S(188);
 
-            // Merge each part/assembly with its drawing into ONE card, keyed by
-            // shared base filename. The model is primary (it owns PartNo and
-            // Description); the drawing is the secondary file.
-            var order = new List<string>();
-            var groups = new Dictionary<string, SearchGroup>(
-                StringComparer.OrdinalIgnoreCase);
-
-            foreach (var file in results)
-            {
-                string baseName = Path.GetFileNameWithoutExtension(file.FilePath);
-                string ext = Path.GetExtension(file.FilePath).ToLower();
-
-                SearchGroup g;
-                if (!groups.TryGetValue(baseName, out g))
-                {
-                    g = new SearchGroup { DisplayName = baseName };
-                    groups[baseName] = g;
-                    order.Add(baseName);
-                }
-
-                if (ext == ".slddrw")
-                {
-                    g.DrawingPath = file.FilePath;
-                    if (string.IsNullOrEmpty(g.Status)) g.Status = file.Status;
-                }
-                else
-                {
-                    g.ModelPath = file.FilePath;
-                    g.ModelExt = ext;
-                    g.PartNumber = file.PartNumber;
-                    g.Description = file.Description;
-                    g.Status = file.Status;          // model status is authoritative
-                    g.DisplayName = baseName;
-                }
-            }
-
-            // Fill in the counterpart file that did NOT match the term so each
-            // card can offer both buttons (a part-number search matches only the
-            // model; the drawing carries no PartNo of its own).
-            foreach (string baseName in order)
-            {
-                SearchGroup g = groups[baseName];
-                if (g.ModelPath == null && g.DrawingPath != null)
-                {
-                    VaultFile model =
-                        DatabaseManager.GetModelForDrawing(g.DrawingPath);
-                    if (model != null)
-                    {
-                        g.ModelPath = model.FilePath;
-                        g.ModelExt = Path.GetExtension(model.FileName).ToLower();
-                        g.PartNumber = model.PartNumber;
-                        g.Description = model.Description;
-                        g.Status = model.Status;
-                        g.DisplayName =
-                            Path.GetFileNameWithoutExtension(model.FileName);
-                    }
-                }
-                else if (g.DrawingPath == null && g.ModelPath != null)
-                {
-                    g.DrawingPath =
-                        DatabaseManager.GetDrawingPathForModel(g.ModelPath);
-                }
-            }
+            // Build ONE card per matching configuration. Config name = Part No by
+            // convention, so a multi-config part yields a card per config, each
+            // showing THAT config's own PartNo / Description / Revision (never the
+            // active config's). A drawing result maps back to its model and is
+            // skipped if that model also matched (it is expanded there instead).
+            var cards = BuildConfigCards(results, term.ToLower());
 
             int barW = S(15);
             int cardH = S(74);
             int contentLeft = barW + S(6);
             int contentW = rw - contentLeft - S(3);
 
-            foreach (string baseName in order)
+            foreach (SearchGroup g in cards)
             {
-                SearchGroup g = groups[baseName];
-
                 Color statusColor = g.Status == "Released" ? cGreen
                                   : g.Status == "Locked" ? cOrange
                                   : cBrand;
@@ -565,6 +506,7 @@ namespace PDMLite
 
                 string modelPath = g.ModelPath;
                 string drawingPath = g.DrawingPath;
+                string configName = g.ConfigName;
                 bool hasModel = !string.IsNullOrEmpty(modelPath);
 
                 Panel card = new Panel
@@ -620,11 +562,17 @@ namespace PDMLite
                     AutoEllipsis = true
                 });
 
-                // ── Part number ───────────────────────────────────────────
+                // ── Part number (+ revision) ──────────────────────────────
+                // PartNumber here is the config's own PN (= config name). The
+                // revision is this config's revision, so two configs of the same
+                // file show distinct PN + REV lines.
+                string pnText = string.IsNullOrEmpty(g.PartNumber)
+                                    ? "No Part No" : g.PartNumber;
+                if (!string.IsNullOrEmpty(g.Revision))
+                    pnText += "   REV " + g.Revision;
                 card.Controls.Add(new Label
                 {
-                    Text = string.IsNullOrEmpty(g.PartNumber)
-                                ? "No Part No" : g.PartNumber,
+                    Text = pnText,
                     Font = new Font("Segoe UI", 3.5f * _scale, FontStyle.Bold),
                     ForeColor = cTextGray,
                     Location = new Point(contentLeft, S(21)),
@@ -671,7 +619,7 @@ namespace PDMLite
                 };
                 btnModel.FlatAppearance.BorderSize = 0;
                 if (hasModel)
-                    btnModel.Click += (s, e) => OpenFile(modelPath);
+                    btnModel.Click += (s, e) => OpenFileConfig(modelPath, configName);
                 card.Controls.Add(btnModel);
 
                 Button btnDrawing = new Button
@@ -688,7 +636,7 @@ namespace PDMLite
                 };
                 btnDrawing.FlatAppearance.BorderSize = 0;
                 btnDrawing.Click += (s, e) =>
-                    OpenDrawingResult(modelPath, drawingPath);
+                    OpenDrawingResult(modelPath, drawingPath, configName);
                 card.Controls.Add(btnDrawing);
 
                 // ── Divider ───────────────────────────────────────────────
@@ -709,7 +657,7 @@ namespace PDMLite
             {
                 _resultsPanel.Controls.Add(new Label
                 {
-                    Text = "Showing first " + order.Count +
+                    Text = "Showing first " + cards.Count +
                            " — refine your search to narrow results.",
                     Font = new Font("Segoe UI", 3.3f * _scale, FontStyle.Italic),
                     ForeColor = cTextLight,
@@ -773,9 +721,11 @@ namespace PDMLite
         }
 
         // Open Drawing from a search card. If the drawing exists, open it; if
-        // none exists yet, open the part/assembly and create one from it (the
-        // same behaviour as the task-pane Open Drawing button).
-        private void OpenDrawingResult(string modelPath, string drawingPath)
+        // none exists yet, open the part/assembly (switched to the card's
+        // configuration) and create one from it — same behaviour as the
+        // task-pane Open Drawing button.
+        private void OpenDrawingResult(string modelPath, string drawingPath,
+            string configName)
         {
             if (!string.IsNullOrEmpty(drawingPath))
             {
@@ -791,23 +741,146 @@ namespace PDMLite
                 return;
             }
 
-            // No drawing yet — open the model, then make one from it.
-            OpenFile(modelPath);
+            // No drawing yet — open the model on the right config, then make one.
+            OpenFileConfig(modelPath, configName);
             ModelDoc2 model = PDMLiteAddin.SwApp
                 ?.GetOpenDocumentByName(modelPath) as ModelDoc2;
             if (model != null) VaultManager.OpenOrCreateDrawing(model);
         }
 
-        // One merged search result: a part/assembly grouped with its drawing.
+        // Open (or activate, if already open) a model and switch it to the
+        // requested configuration. Config name = Part No, so this lands the
+        // engineer on the exact config they clicked in the search card.
+        private void OpenFileConfig(string filePath, string configName)
+        {
+            OpenFile(filePath);
+            if (string.IsNullOrEmpty(configName)) return;
+            try
+            {
+                ModelDoc2 doc = PDMLiteAddin.SwApp
+                    ?.GetOpenDocumentByName(filePath) as ModelDoc2;
+                if (doc != null) doc.ShowConfiguration2(configName);
+            }
+            catch { }
+        }
+
+        // Expand the flat search results into per-configuration cards. A model
+        // file yields one card per configuration that matches the term (or every
+        // config when the file matched by name / is single-config). A drawing
+        // result maps back to its model; if that model also matched it is skipped
+        // (expanded under the model), else the model's matching configs are shown,
+        // or a drawing-only card for a true orphan with no model.
+        private List<SearchGroup> BuildConfigCards(List<VaultFile> results,
+            string termL)
+        {
+            var cards = new List<SearchGroup>();
+
+            var modelPaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (var f in results)
+            {
+                string ext = Path.GetExtension(f.FilePath).ToLower();
+                if (ext == ".sldprt" || ext == ".sldasm")
+                    modelPaths.Add(f.FilePath);
+            }
+
+            foreach (var f in results)
+            {
+                string ext = Path.GetExtension(f.FilePath).ToLower();
+                if (ext == ".slddrw")
+                {
+                    VaultFile model =
+                        DatabaseManager.GetModelForDrawing(f.FilePath);
+                    if (model != null && modelPaths.Contains(model.FilePath))
+                        continue; // model matched too — expanded under it
+                    if (model != null)
+                        AddModelConfigCards(cards, model, termL);
+                    else
+                        cards.Add(new SearchGroup
+                        {
+                            DisplayName = Path.GetFileNameWithoutExtension(f.FileName),
+                            DrawingPath = f.FilePath,
+                            Status = f.Status,
+                            PartNumber = "",
+                            Description = ""
+                        });
+                }
+                else
+                {
+                    AddModelConfigCards(cards, f, termL);
+                }
+            }
+            return cards;
+        }
+
+        // Append one card per matching configuration of a model file.
+        private void AddModelConfigCards(List<SearchGroup> cards,
+            VaultFile model, string termL)
+        {
+            string fileName = string.IsNullOrEmpty(model.FileName)
+                ? Path.GetFileName(model.FilePath) : model.FileName;
+            string baseName = Path.GetFileNameWithoutExtension(fileName);
+            string ext = Path.GetExtension(fileName).ToLower();
+            bool nameMatched = baseName.ToLower().Contains(termL);
+
+            var configs = model.Configurations;
+            if (configs == null || configs.Count == 0)
+                configs = new List<ConfigEntry> { new ConfigEntry {
+                    Name = model.PartNumber, PartNo = model.PartNumber,
+                    Description = model.Description, Revision = model.Revision } };
+
+            int total = configs.Count;
+            var shown = new List<ConfigEntry>();
+            foreach (var c in configs)
+            {
+                bool match = total <= 1 || nameMatched
+                          || (c.PartNo ?? "").ToLower().Contains(termL)
+                          || (c.Description ?? "").ToLower().Contains(termL);
+                if (match) shown.Add(c);
+            }
+            if (shown.Count == 0) shown = configs; // never drop a matched file
+
+            foreach (var c in shown)
+            {
+                // This config's drawing — config-specific, or a shared
+                // config-table drawing that covers all configs.
+                string drawingPath = null;
+                var drws = DatabaseManager.GetDrawingsForConfig(
+                    model.FilePath, c.Name);
+                if (drws != null && drws.Count > 0) drawingPath = drws[0];
+
+                cards.Add(new SearchGroup
+                {
+                    DisplayName  = baseName,
+                    ModelPath    = model.FilePath,
+                    ModelExt     = ext,
+                    ConfigName   = c.Name,
+                    PartNumber   = string.IsNullOrEmpty(c.PartNo)
+                                     ? model.PartNumber : c.PartNo,
+                    Description  = string.IsNullOrEmpty(c.Description)
+                                     ? model.Description : c.Description,
+                    Revision     = c.Revision,
+                    Status       = model.Status,
+                    DrawingPath  = drawingPath,
+                    TotalConfigs = total
+                });
+            }
+        }
+
+        // One search card. With multi-config support a card represents a single
+        // configuration of a model (or a drawing-only orphan), so it carries the
+        // config name, that config's revision, and the file's total config count.
         private class SearchGroup
         {
             public string DisplayName;   // base filename, no extension
             public string ModelPath;     // part/assembly path, or null
             public string ModelExt;      // ".sldprt" / ".sldasm", or null
             public string DrawingPath;   // .slddrw path, or null
-            public string PartNumber;
-            public string Description;
-            public string Status;        // model status if present, else drawing
+            public string ConfigName;    // configuration this card represents
+            public string PartNumber;    // this config's PartNo (= config name)
+            public string Description;   // this config's description
+            public string Revision;      // this config's revision
+            public string Status;        // file-level status
+            public int    TotalConfigs;  // number of configs in the file
         }
 
         // ── Refresh ───────────────────────────────────────────────────
@@ -838,8 +911,22 @@ namespace PDMLite
             bool isDrawing = doc.GetType() ==
                 (int)swDocumentTypes_e.swDocDRAWING;
 
+            // Multi-config indicator. Config name = Part No by convention, so a
+            // part/assembly with several configs shows "(N configs)" after the
+            // file name. The ActiveConfigChangePostNotify hook re-runs Refresh on
+            // every config switch, so the Part No / Revision below always reflect
+            // the config the engineer is currently looking at.
+            int configCount = 0;
+            if (!isDrawing)
+            {
+                try { configCount = PropertyValidator.GetConfigNames(doc).Count; }
+                catch { }
+            }
+
             _fileNameLbl.Text = string.IsNullOrEmpty(fileName)
-                ? "Unsaved new file" : fileName;
+                ? "Unsaved new file"
+                : (configCount > 1 ? fileName + "  (" + configCount + " configs)"
+                                   : fileName);
 
             _statusVal.Text = string.IsNullOrEmpty(status) ? "WIP" : status;
             _statusVal.ForeColor = StatusColor(status);

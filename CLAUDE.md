@@ -120,7 +120,9 @@ PartNo, DrawingNo, Description, DrawnBy, DrawnDate, Material1, FinishType, Revis
 
 Main entry point, ISwAddin implementation.
 
-\- Hooks: FileSaveNotify, FileSaveAsNotify2, FileSavePostNotify, DestroyNotify
+\- Hooks: FileSaveNotify, FileSaveAsNotify2, FileSavePostNotify, DestroyNotify, ActiveConfigChangePostNotify (parts/assemblies)
+
+\- ActiveConfigChangePostNotify (parts + assemblies only — drawings have no configs): fires when the user switches the active configuration. Calls OnActiveConfigChanged() → TaskPaneHost.RefreshPanel() so the Active File card re-reads the now-active config's PartNo/Revision/Description. ActiveDocChangeNotify does NOT fire on a config switch (only a document switch), so this is the only signal that the active config changed. Hooked/detached per-doc alongside the save hooks in DocEventHandler
 
 \- OnFileSaveNotify: suppress-flag check → check lock → check released (blocks EVERYONE incl. Masters) → warn if outside WIP folder (Yes/No override) → validate properties → auto-weight → duplicate part number → broken refs
 
@@ -322,7 +324,7 @@ Sections (top to bottom):
 
 2\. Search (auto-search 600ms timer, ≥2 chars, Enter key via ProcessCmdKey)
 
-3\. Active File card (filename, status, partNo, revision, lockedBy)
+3\. Active File card (filename, status, partNo, revision, lockedBy). Multi-config: the filename shows a "(N configs)" suffix when the part/assembly has more than one configuration; partNo + revision reflect the ACTIVE config (config name = Part No), refreshed live on every config switch via the ActiveConfigChangePostNotify hook. configCount comes from PropertyValidator.GetConfigNames(doc)
 
 4\. Master Actions (Open Drawing/Unlock/Release/New Revision/Rollback) — Masters only
 
@@ -350,9 +352,9 @@ No longer uses StringBuilder/AppendLine — individual labels prevent text overl
 
 
 
-Search results: MERGED cards — a part/assembly and its drawing collapse into ONE card keyed by shared base filename (the model is primary; it owns PartNo + Description). RunSearch groups the flat SearchFiles list by basename, then fills in the counterpart that did NOT match the term (GetModelForDrawing / GetDrawingPathForModel) so both buttons can be offered. Each card shows: thick left status bar with the status text painted VERTICALLY (rotated -90°, custom Panel.Paint), file name (no extension), part number, description, and TWO buttons side by side — "Open PRT"/"Open ASM" (cBrand; disabled+greyed when no model record, e.g. orphan drawing) and "Open DRW" (cBrandDark); abbreviated so labels don't clip at the narrow task-pane width. SearchGroup is a private nested class in TaskPaneControl.
+Search results: PER-CONFIG cards — ONE card per matching configuration (config name = Part No by convention, so a part with 10 configs can yield up to 10 cards, each carrying that config's own PartNo, Description and Revision — never the active config's). RunSearch calls BuildConfigCards(results, term): for each model file it calls AddModelConfigCards, which expands the file's Configurations list and emits a card for every config whose PartNo/Description contains the term (or every config when the file matched by filename, or it is single-config; never drops a matched file — falls back to all configs if none text-match). A drawing result maps back to its model via GetModelForDrawing and is SKIPPED if that model also matched (it is expanded under the model instead); a true orphan drawing (no model) gets a drawing-only card. Each config's drawing comes from DatabaseManager.GetDrawingsForConfig(modelPath, configName) (config-specific OR a shared config-table drawing). Each card shows: thick left status bar with the status text painted VERTICALLY (rotated -90°, custom Panel.Paint), file name (no extension), "PartNo   REV x" line, description, and TWO buttons side by side — "Open PRT"/"Open ASM" (cBrand; disabled+greyed when no model record, e.g. orphan drawing) and "Open DRW" (cBrandDark); abbreviated so labels don't clip at the narrow task-pane width. SearchGroup is a private nested class in TaskPaneControl, now per-config (carries ConfigName, Revision, TotalConfigs).
 
-Open PRT/ASM → OpenFile(modelPath). Open DRW → OpenDrawingResult(modelPath, drawingPath): opens the drawing if it exists, else opens the model and calls VaultManager.OpenOrCreateDrawing to make one (same as the task-pane Open Drawing button).
+Open PRT/ASM → OpenFileConfig(modelPath, configName): opens (or activates) the model then switches it to the card's configuration via ModelDoc2.ShowConfiguration2. Open DRW → OpenDrawingResult(modelPath, drawingPath, configName): opens the drawing if it exists, else opens the model on the right config and calls VaultManager.OpenOrCreateDrawing to make one (same as the task-pane Open Drawing button).
 
 Uses ActivateDoc3 if file already open, OpenDoc6 with correct type if not. Opens the canonical WIP copy (read-only when Released), never the RELEASED snapshot.
 
