@@ -205,6 +205,39 @@ namespace PDMLite
             else { tag = "SLDPRT"; color = cBrand; }
         }
 
+        // Adds a bold "label" + regular "value" side by side on one row and
+        // returns the X where the value ends (so the next pair can follow).
+        private int AddInlinePair(Panel card, string label, string value,
+            Font fLabel, Font fValue, int x, int y, int rightEdge)
+        {
+            var lbl = new Label
+            {
+                Text = label,
+                Font = fLabel,
+                ForeColor = cTextDark,
+                Location = new Point(x, y),
+                AutoSize = true
+            };
+            card.Controls.Add(lbl);
+            int labelW = TextRenderer.MeasureText(label, fLabel).Width;
+
+            int valX = x + labelW + S(3);
+            var val = new Label
+            {
+                Text = value,
+                Font = fValue,
+                ForeColor = cTextGray,
+                Location = new Point(valX, y),
+                AutoSize = false,
+                Width = Math.Max(S(10), rightEdge - valX),
+                Height = S(14),
+                AutoEllipsis = true
+            };
+            card.Controls.Add(val);
+            int valW = TextRenderer.MeasureText(value, fValue).Width;
+            return valX + Math.Min(valW, val.Width);
+        }
+
         private void LoadFiles()
         {
             _checks.Clear();
@@ -215,10 +248,11 @@ namespace PDMLite
             List<VaultFile> files =
                 DatabaseManager.GetReleasableFiles(_filter.Text, out truncated);
 
-            Font fBold = new Font("Segoe UI", 3.7f * _scale, FontStyle.Bold);
-            Font fSub  = new Font("Segoe UI", 3.2f * _scale);
-            Font fTag  = new Font("Segoe UI", 2.9f * _scale, FontStyle.Bold);
-            Font fMeta = new Font("Segoe UI", 3.0f * _scale);
+            Font fBold    = new Font("Segoe UI", 3.7f * _scale, FontStyle.Bold);
+            Font fSub     = new Font("Segoe UI", 3.2f * _scale);
+            Font fSubBold = new Font("Segoe UI", 3.2f * _scale, FontStyle.Bold);
+            Font fTag     = new Font("Segoe UI", 2.9f * _scale, FontStyle.Bold);
+            Font fMeta    = new Font("Segoe UI", 3.0f * _scale);
 
             _countLabel.Text = files.Count + " WIP file" +
                 (files.Count == 1 ? "" : "s") + (truncated ? " (first 50)" : "");
@@ -291,22 +325,38 @@ namespace PDMLite
                     TextAlign = ContentAlignment.MiddleCenter
                 });
 
-                // PN + description, labelled (or a hint when the PN is missing).
+                // PN + description on one line: the "PN:" / "DESC:" labels are
+                // bold so they stand out from their values. Built from a row of
+                // side-by-side AutoSize labels, positioned by measured width.
                 bool hasPn = !string.IsNullOrWhiteSpace(f.PartNumber);
-                string sub = hasPn ? "PN: " + f.PartNumber : "(no part number)";
-                if (!string.IsNullOrWhiteSpace(f.Description))
-                    sub += "    DESC: " + f.Description;
-                card.Controls.Add(new Label
+                bool hasDesc = !string.IsNullOrWhiteSpace(f.Description);
+                int subY = S(24);
+                int subX = S(28);
+                int subRight = card.Width - S(6);
+
+                if (!hasPn)
                 {
-                    Text = sub,
-                    Font = fSub,
-                    ForeColor = hasPn ? cTextGray : cAmber,
-                    Location = new Point(S(28), S(24)),
-                    AutoSize = false,
-                    Width = card.Width - S(34),
-                    Height = S(14),
-                    AutoEllipsis = true
-                });
+                    // No part number — single amber hint, no bold label.
+                    card.Controls.Add(new Label
+                    {
+                        Text = "(no part number)",
+                        Font = fSub,
+                        ForeColor = cAmber,
+                        Location = new Point(subX, subY),
+                        AutoSize = true
+                    });
+                }
+                else
+                {
+                    subX = AddInlinePair(card, "PN:", f.PartNumber,
+                        fSubBold, fSub, subX, subY, subRight);
+                    if (hasDesc)
+                    {
+                        subX += S(10); // gap between the PN and DESC pairs
+                        AddInlinePair(card, "DESC:", f.Description,
+                            fSubBold, fSub, subX, subY, subRight);
+                    }
+                }
 
                 // Modified by / date (extra context for the Master).
                 string meta = "";
