@@ -200,6 +200,8 @@ Methods:
 
 \- GetFileHistory(filePath) → returns List<HistoryEntry> reversed (most recent first)
 
+\- GetFileRecord(filePath) → returns the full VaultFile for an exact path (PartNumber, Revision, Status, etc.), or null if untracked. Used by the Pending Requests cards to show a request's PN + Revision (which live on the File record, not the RevisionRequest).
+
 \- GetModelForDrawing(drawingFilePath) → returns the part/assembly VaultFile sharing the same base filename as the given drawing (PartNo/Description/Status live on the model, not the drawing); null if not found. Used by the merged search card to populate model details when a search matched the drawing.
 
 \- GetDrawingPathForModel(modelFilePath) → returns the WIP path of the .slddrw sharing the same base filename as the given part/assembly (the drawing that documents it); null if none tracked. Used by the merged search card to wire "Open Drawing" when a search matched only the model.
@@ -264,7 +266,7 @@ Core vault operations.
 
 \- ApproveRequest(request) → Master approves, calls StartNewRevision
 
-\- RejectRequest(request) → Master rejects, marks as Rejected in database
+\- RejectRequest(request) → Master rejects; prompts for a rejection REASON (ShowNoteDialog) that is emailed to the engineer (not their own note echoed back); Cancel aborts; marks as Rejected in database
 
 \- ViewMyRequests() → Engineer views their own requests (MessageBox)
 
@@ -332,7 +334,7 @@ Open Drawing button label when a drawing is active: VaultManager.GetDrawingOpenL
 
 6\. File History — Panel (\_historyPanel) with individual labels per entry, Height=S(300), y+=S(305)
 
-7\. PENDING REQUESTS button (Masters only) — shows count, opens PendingRequestsForm popup
+7\. Pending Requests button (Masters only) — custom-painted (TextRenderer): "Pending Requests" CENTERED + count badge "(N)" right-aligned, drawn only when N>0 (no number when zero). \_pendingCount stored in Refresh(), button Invalidate()d to repaint. Opens PendingRequestsForm popup
 
 8\. Send Test Email button (all users) — calls EmailManager.SendTestEmail, shows success/error in MessageBox
 
@@ -364,19 +366,25 @@ DPI-aware Form (680×560 scaled). S(v)=v\*\_scale. Opened from PENDING REQUESTS 
 
 \- Each column has a coloured header (orange/purple/green) and scrollable card list
 
-\- Card: selection checkbox (top-right, Tag=request), filename, requested-by, date, optional note, Approve + Reject buttons
+\- Column headers are title-case ("Unlock Requests" etc.) with a live count; the internal type code stays UPPERCASE for routing/colour logic (display name mapped separately)
 
-\- Single Approve logic by type (ApproveSingle): Unlock→UnlockFile, Revision→ApproveRequest/StartNewRevision, Release→ReleaseFile
+\- Card: selection checkbox (top-right, Tag=request), filename, PN + Revision line (from DatabaseManager.GetFileRecord; drawings fall back to GetModelForDrawing since props live on the model), requested-by, date, optional note, Approve + Reject buttons. Card layout is laid out with a running y-cursor so heights adapt to the optional PN/Rev and Note lines
+
+\- Single Approve (ApproveSingle): confirms (Yes/No), then routes through VaultManager.BulkApprove(new[]{req}) — the SAME success-gated engine the batch buttons use, so it auto-opens the file (OpenByPath) and ONLY resolves the request when the action actually succeeded. A blocked release/revision stays pending instead of vanishing. (Previously it resolved the request BEFORE acting and required the file to be open — both fixed.) Single confirm also covers Unlock (which had no confirm before)
+
+\- Single Reject (VaultManager.RejectRequest): prompts the Master for a rejection REASON (ShowNoteDialog) — that reason is emailed to the engineer (NOT their own original note echoed back); Cancel aborts
 
 \- Legacy requests with no RequestType default to Revision column
+
+\- "All" column checkbox and the card checkboxes are two-way synced (a \_syncing guard prevents recursion): ticking "All" checks every card; unticking any one card clears "All"
 
 \- Batch actions:
 
   \- Per-column "All" select-all checkbox in each header + per-column "Approve Selected" button → VaultManager.BulkApprove(checked requests of that column). Label is "Approve Selected" (type-aware via BulkApprove), NOT "Release" — the Unlock/Revision columns approve their own action
 
-  \- Green "Approve All Pending" (spans cols 1-2) → confirms counts, then BulkApprove(all pending)
+  \- Green "Approve All Pending" (left half of bottom row) → confirms counts, then BulkApprove(all pending)
 
-  \- Blue "Bulk Release…" (col 3) → opens BulkReleaseForm (releases any WIP file, not request-based)
+  \- Blue "Bulk Release - WIP" (right half of bottom row, equal width + S(5) gap) → opens BulkReleaseForm (releases any WIP file, not request-based). Bottom buttons anchored from client bottom (no dead space)
 
   \- Every batch action ends with ONE summary dialog (BatchResult.BuildSummary) then LoadRequests() refresh
 
@@ -384,9 +392,13 @@ DPI-aware Form (680×560 scaled). S(v)=v\*\_scale. Opened from PENDING REQUESTS 
 
 \### BulkReleaseForm.cs
 
-DPI-aware Form (560×560 scaled), Master-only. Opened from the blue "Bulk Release…" button in PendingRequestsForm.
+DPI-aware Form (ClientSize 560×600 scaled — sizes the CLIENT area so bottom buttons never clip), Master-only. Opened from the blue "Bulk Release - WIP" button in PendingRequestsForm.
 
-\- Lists WIP (releasable) files from DatabaseManager.GetReleasableFiles(filter, out truncated) — filter box (Enter or Filter button), "Select all" checkbox, scrollable cards (checkbox + filename + PN/description), count label with "(first 50)" when truncated
+\- Lists WIP (releasable) files from DatabaseManager.GetReleasableFiles(filter, out truncated) — full-width DYNAMIC search box (no Filter button): 600ms debounce timer, fires at ≥2 chars, clears back to all files immediately when emptied (mirrors the task-pane search). Placeholder via Win32 EM_SETCUEBANNER (PlaceholderText doesn't exist on .NET 4.8). Timer is stopped+disposed on FormClosed
+
+\- "Select all" checkbox two-way synced with the card checkboxes (\_syncing guard): unticking one card clears "Select all"
+
+\- Scrollable cards: checkbox + filename (no ext) + right-aligned type tag (SLDPRT=blue / SLDASM=orange / SLDDRW=purple) + a labelled "**PN:** value    **DESC:** value" line (labels bold via AddInlinePair, which measures text width so the DESC pair butts up after the PN value; only the last value fills remaining width with ellipsis) + "Modified by X · date" metadata. A drawing inherits PN/Description from its model (GetModelForDrawing); a genuine orphan with no PN shows an amber "(no part number)" hint. count label with "(first 50)" when truncated
 
 \- "Release Selected" → confirms, then VaultManager.BulkRelease(checked paths) → one summary dialog → reloads (released files drop out, no longer WIP)
 

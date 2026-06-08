@@ -1,4 +1,3 @@
-using SolidWorks.Interop.sldworks;
 using System;
 using System.Collections.Generic;
 using System.Drawing;
@@ -40,6 +39,10 @@ namespace PDMLite
         private readonly List<CheckBox> _unlockChecks   = new List<CheckBox>();
         private readonly List<CheckBox> _revisionChecks = new List<CheckBox>();
         private readonly List<CheckBox> _releaseChecks  = new List<CheckBox>();
+
+        // Guards the two-way sync between a column's "All" box and its cards so
+        // programmatic checks don't recurse.
+        private bool _syncing;
 
         public PendingRequestsForm(float scale)
         {
@@ -93,12 +96,19 @@ namespace PDMLite
             int[] colX = { S(10), S(10) + colW + S(5), S(10) + (colW + S(5)) * 2 };
             int colY = S(40);
 
-            // Bottom action area reserved below the columns.
-            int bottomBarTop = cH - S(96);
+            // Bottom buttons anchored from client bottom — no dead space.
+            int bMargin      = S(8);
+            int row2H        = S(28);
+            int row1H        = S(26);
+            int rowGap       = S(6);
+            int row2Y        = cH - bMargin - row2H;      // Approve All + Bulk Release
+            int row1Y        = row2Y - rowGap - row1H;    // per-column Approve Selected
+            int bottomBarTop = row1Y - rowGap;            // list panels end here
+
             int panelTop = colY + S(22);
             int panelH = bottomBarTop - panelTop - S(6);
 
-            string[] types = { "UNLOCK", "REVISION", "RELEASE" };
+            string[] titles = { "Unlock", "Revision", "Release" };
             Color[] colors = { cPurple, cDark, cGreen };
             Panel[] panels = new Panel[3];
             Label[] headers = new Label[3];
@@ -108,7 +118,7 @@ namespace PDMLite
             {
                 headers[i] = new Label
                 {
-                    Text = types[i] + " REQUESTS",
+                    Text = titles[i] + " Requests",
                     Font = fSection,
                     ForeColor = colors[i],
                     Location = new Point(colX[i], colY),
@@ -145,9 +155,9 @@ namespace PDMLite
                 {
                     Text = "Approve Selected",
                     Font = fBtn,
-                    Location = new Point(colX[i], bottomBarTop + S(2)),
+                    Location = new Point(colX[i], row1Y),
                     Width = colW,
-                    Height = S(26),
+                    Height = row1H,
                     BackColor = colors[i],
                     ForeColor = Color.White,
                     FlatStyle = FlatStyle.Flat,
@@ -174,16 +184,18 @@ namespace PDMLite
             _releaseAll.CheckedChanged  += (s, e) => SetAll(_releaseChecks, _releaseAll.Checked);
 
             // ── Bottom row: Approve All Pending (green) + Bulk Release (blue) ──
-            int row2Y = bottomBarTop + S(32);
-            int greenW = colX[1] + colW - colX[0];   // spans columns 1+2
+            // Equal halves of the full column span, with the same S(5) gap the
+            // three columns use between them so they look uniform.
+            int totalColSpan = colX[2] + colW - colX[0];
+            int halfW        = (totalColSpan - S(5)) / 2;
 
             Button btnApproveAll = new Button
             {
                 Text = "Approve All Pending",
                 Font = fBtn,
                 Location = new Point(colX[0], row2Y),
-                Width = greenW,
-                Height = S(28),
+                Width = halfW,
+                Height = row2H,
                 BackColor = cGreen,
                 ForeColor = Color.White,
                 FlatStyle = FlatStyle.Flat,
@@ -195,11 +207,11 @@ namespace PDMLite
 
             Button btnBulkRelease = new Button
             {
-                Text = "Bulk Release…",
+                Text = "Bulk Release - WIP",
                 Font = fBtn,
-                Location = new Point(colX[2], row2Y),
-                Width = colW,
-                Height = S(28),
+                Location = new Point(colX[0] + halfW + S(5), row2Y),
+                Width = totalColSpan - halfW - S(5),
+                Height = row2H,
                 BackColor = cBrand,
                 ForeColor = Color.White,
                 FlatStyle = FlatStyle.Flat,
@@ -214,9 +226,23 @@ namespace PDMLite
             this.Controls.Add(btnBulkRelease);
         }
 
-        private static void SetAll(List<CheckBox> boxes, bool value)
+        // "All" box → set every card in the column.
+        private void SetAll(List<CheckBox> boxes, bool value)
         {
+            if (_syncing) return;
+            _syncing = true;
             foreach (var cb in boxes) cb.Checked = value;
+            _syncing = false;
+        }
+
+        // Card toggled → keep the column's "All" box in step (checked only when
+        // every card is ticked, cleared the moment one is unticked).
+        private void SyncAllCheckbox(List<CheckBox> boxes, CheckBox allBox)
+        {
+            if (_syncing || allBox == null) return;
+            _syncing = true;
+            allBox.Checked = boxes.Count > 0 && boxes.All(b => b.Checked);
+            _syncing = false;
         }
 
         public void LoadRequests()
@@ -235,20 +261,25 @@ namespace PDMLite
                                               string.IsNullOrEmpty(r.RequestType)).ToList();
             var releaseReqs  = all.Where(r => r.RequestType == "Release").ToList();
 
-            PopulateSection(_unlockPanel,   unlockReqs,   _unlockHeader,   "UNLOCK",   _unlockChecks);
-            PopulateSection(_revisionPanel, revisionReqs, _revisionHeader, "REVISION", _revisionChecks);
-            PopulateSection(_releasePanel,  releaseReqs,  _releaseHeader,  "RELEASE",  _releaseChecks);
+            PopulateSection(_unlockPanel,   unlockReqs,   _unlockHeader,   "UNLOCK",   _unlockChecks,   _unlockAll);
+            PopulateSection(_revisionPanel, revisionReqs, _revisionHeader, "REVISION", _revisionChecks, _revisionAll);
+            PopulateSection(_releasePanel,  releaseReqs,  _releaseHeader,  "RELEASE",  _releaseChecks,  _releaseAll);
         }
 
         private void PopulateSection(Panel panel, List<RevisionRequest> requests,
-                                     Label header, string type, List<CheckBox> checks)
+                                     Label header, string type, List<CheckBox> checks,
+                                     CheckBox allBox)
         {
             panel.Controls.Clear();
-            header.Text = type + " REQUESTS" +
+            string display = type == "UNLOCK"   ? "Unlock"
+                           : type == "REVISION" ? "Revision"
+                           : "Release";
+            header.Text = display + " Requests" +
                 (requests.Count > 0 ? $"  ({requests.Count})" : "");
 
             Font fBold  = new Font("Segoe UI", 3.8f * _scale, FontStyle.Bold);
             Font fSub   = new Font("Segoe UI", 3.3f * _scale);
+            Font fPnBold = new Font("Segoe UI", 3.3f * _scale, FontStyle.Bold);
             Font fBtn   = new Font("Segoe UI", 3.5f * _scale, FontStyle.Bold);
             Color barColor = type == "UNLOCK"   ? cPurple
                            : type == "REVISION" ? cDark
@@ -273,7 +304,33 @@ namespace PDMLite
             foreach (var req in requests)
             {
                 bool hasNote = !string.IsNullOrEmpty(req.Note);
-                int cardH = hasNote ? S(112) : S(96);
+
+                // PN + Revision live on the File record, not the request. For a
+                // drawing (no props of its own) fall back to its model.
+                var rec = DatabaseManager.GetFileRecord(req.FilePath);
+                string pn = rec?.PartNumber ?? "";
+                string rev = rec?.Revision ?? "";
+                if (string.IsNullOrWhiteSpace(pn) &&
+                    req.FileName != null &&
+                    req.FileName.EndsWith(".slddrw", StringComparison.OrdinalIgnoreCase))
+                {
+                    var model = DatabaseManager.GetModelForDrawing(req.FilePath);
+                    if (model != null) { pn = model.PartNumber; rev = model.Revision; }
+                }
+                bool hasPnLine = !string.IsNullOrWhiteSpace(pn) ||
+                                 !string.IsNullOrWhiteSpace(rev);
+
+                // Lay the card out top-down with a running cursor so heights
+                // adapt to the optional PN/Rev and Note lines.
+                int rowH = S(15);
+                int cur = S(5);
+                int yFile = cur;            cur += S(16);
+                int yPn   = hasPnLine ? cur : -1; if (hasPnLine) cur += rowH;
+                int yBy   = cur;            cur += rowH;
+                int yDate = cur;            cur += rowH;
+                int yNote = hasNote ? cur : -1;   if (hasNote) cur += rowH;
+                int btnY  = cur + S(3);
+                int cardH = btnY + S(22) + S(6);
 
                 Panel card = new Panel
                 {
@@ -299,6 +356,7 @@ namespace PDMLite
                     Height = S(16),
                     Tag = req
                 };
+                cb.CheckedChanged += (s, e) => SyncAllCheckbox(checks, allBox);
                 card.Controls.Add(cb);
                 checks.Add(cb);
 
@@ -307,19 +365,38 @@ namespace PDMLite
                     Text = req.FileName,
                     Font = fBold,
                     ForeColor = cTextDark,
-                    Location = new Point(S(8), S(5)),
+                    Location = new Point(S(8), yFile),
                     AutoSize = false,
                     Width = rw - S(36),
                     Height = S(16),
                     AutoEllipsis = true
                 });
 
+                if (hasPnLine)
+                {
+                    string pnRev = "";
+                    if (!string.IsNullOrWhiteSpace(pn)) pnRev = "PN: " + pn;
+                    if (!string.IsNullOrWhiteSpace(rev))
+                        pnRev += (pnRev.Length > 0 ? "    " : "") + "Rev: " + rev;
+                    card.Controls.Add(new Label
+                    {
+                        Text = pnRev,
+                        Font = fPnBold,
+                        ForeColor = cBrandDark,
+                        Location = new Point(S(8), yPn),
+                        AutoSize = false,
+                        Width = rw - S(16),
+                        Height = S(14),
+                        AutoEllipsis = true
+                    });
+                }
+
                 card.Controls.Add(new Label
                 {
                     Text = "By: " + req.RequestedBy,
                     Font = fSub,
                     ForeColor = cTextGray,
-                    Location = new Point(S(8), S(23)),
+                    Location = new Point(S(8), yBy),
                     AutoSize = true
                 });
 
@@ -331,7 +408,7 @@ namespace PDMLite
                     Text = dateStr,
                     Font = fSub,
                     ForeColor = cTextLight,
-                    Location = new Point(S(8), S(38)),
+                    Location = new Point(S(8), yDate),
                     AutoSize = true
                 });
 
@@ -342,7 +419,7 @@ namespace PDMLite
                         Text = "Note: " + req.Note,
                         Font = fSub,
                         ForeColor = cTextGray,
-                        Location = new Point(S(8), S(53)),
+                        Location = new Point(S(8), yNote),
                         AutoSize = false,
                         Width = rw - S(16),
                         Height = S(14),
@@ -350,7 +427,6 @@ namespace PDMLite
                     });
                 }
 
-                int btnY = hasNote ? S(72) : S(58);
                 RevisionRequest capturedReq = req;
 
                 Button btnApprove = new Button
@@ -406,32 +482,25 @@ namespace PDMLite
             }
         }
 
-        // Single-card Approve (unchanged behaviour, routed by type).
+        // Single-card Approve. Confirms first, then routes through the same
+        // BulkApprove engine the batch buttons use, so it auto-opens the file
+        // and ONLY resolves the request when the action actually succeeded — a
+        // blocked release/revision stays pending instead of vanishing.
         private void ApproveSingle(RevisionRequest req, string type)
         {
-            if (type == "UNLOCK")
-            {
-                DatabaseManager.ResolveRequest(req.Id, "Approved");
-                EmailManager.NotifyRequestApproved("Unlock", req.FileName, req.RequestedBy);
-                VaultManager.UnlockFile(req.FilePath);
-            }
-            else if (type == "REVISION" || string.IsNullOrEmpty(req.RequestType))
-            {
-                VaultManager.ApproveRequest(req);
-            }
-            else
-            {
-                DatabaseManager.ResolveRequest(req.Id, "Approved");
-                EmailManager.NotifyRequestApproved("Release", req.FileName, req.RequestedBy);
-                ModelDoc2 doc = PDMLiteAddin.SwApp?
-                    .GetOpenDocumentByName(req.FilePath) as ModelDoc2;
-                if (doc != null)
-                    VaultManager.ReleaseFile(doc);
-                else
-                    MessageBox.Show(
-                        "Open the file first, then release it:\n" + req.FileName,
-                        "BCore PDM", MessageBoxButtons.OK, MessageBoxIcon.Information);
-            }
+            string verb = type == "UNLOCK"  ? "Unlock"
+                        : type == "RELEASE" ? "Release"
+                        : "Start a new revision on";
+
+            if (MessageBox.Show(
+                    verb + " \"" + req.FileName + "\"?\n\n" +
+                    "Requested by: " + req.RequestedBy,
+                    "BCore PDM — Approve Request",
+                    MessageBoxButtons.YesNo, MessageBoxIcon.Question) != DialogResult.Yes)
+                return;
+
+            var result = VaultManager.BulkApprove(new[] { req });
+            ShowSummary("Approve complete.", result);
         }
 
         // Approve all CHECKED requests in one column via the batch engine.

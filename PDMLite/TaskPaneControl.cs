@@ -30,6 +30,7 @@ namespace PDMLite
         private TextBox _searchBox;
         private Panel _resultsPanel;
         private Button _btnRequests;
+        private int _pendingCount;
         private Timer _searchTimer;
 
         private float _scale = 1f;
@@ -335,7 +336,7 @@ namespace PDMLite
 
             _btnRequests = new Button
             {
-                Text = "PENDING REQUESTS",
+                Text = "",   // drawn manually in Paint so we can mix alignments
                 Font = fSection,
                 Width = w,
                 Height = S(26),
@@ -344,11 +345,27 @@ namespace PDMLite
                 ForeColor = Color.White,
                 FlatStyle = FlatStyle.Flat,
                 Cursor = Cursors.Hand,
-                TextAlign = ContentAlignment.MiddleLeft,
-                Padding = new Padding(S(6), 0, 0, 0),
                 Visible = isMaster
             };
             _btnRequests.FlatAppearance.BorderSize = 0;
+            _btnRequests.Paint += (s, pe) =>
+            {
+                var btn = (Button)s;
+                var g = pe.Graphics;
+                // "Pending Requests" — centered
+                TextRenderer.DrawText(g, "Pending Requests", btn.Font,
+                    new Rectangle(0, 0, btn.Width, btn.Height), Color.White,
+                    TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter |
+                    TextFormatFlags.SingleLine);
+                // count badge — right-aligned, only when > 0
+                if (_pendingCount > 0)
+                {
+                    TextRenderer.DrawText(g, "(" + _pendingCount + ")", btn.Font,
+                        new Rectangle(0, 0, btn.Width - S(8), btn.Height), Color.White,
+                        TextFormatFlags.Right | TextFormatFlags.VerticalCenter |
+                        TextFormatFlags.SingleLine);
+                }
+            };
             _btnRequests.Click += (s, e) => OpenRequestsPopup();
             this.Controls.Add(_btnRequests);
             if (isMaster) y += S(30);
@@ -412,10 +429,8 @@ namespace PDMLite
                 PDMLiteAddin.CurrentUser) == "Master";
             if (!isMaster) return;
 
-            var count = DatabaseManager.GetPendingRequests().Count;
-            _btnRequests.Text = count > 0
-                ? $"PENDING REQUESTS  ({count})"
-                : "PENDING REQUESTS";
+            _pendingCount = DatabaseManager.GetPendingRequests().Count;
+            _btnRequests.Invalidate(); // triggers Paint to redraw with latest count
         }
 
         private void OpenRequestsPopup()

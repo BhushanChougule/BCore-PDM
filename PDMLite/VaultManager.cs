@@ -2040,32 +2040,38 @@ namespace PDMLite
         }
 
         // ── APPROVE REQUEST — Master approves and starts new revision ─
+        // Note: PendingRequestsForm now routes all single-card approvals through
+        // BulkApprove. This method is kept for any direct call sites and mirrors
+        // the same success-gated logic: auto-open, act, resolve only on success.
         public static void ApproveRequest(RevisionRequest request)
         {
             string user = PDMLiteAddin.CurrentUser;
             if (!IsMaster(user)) { NotMaster(); return; }
 
-            ModelDoc2 doc = PDMLiteAddin.SwApp
-                .GetOpenDocumentByName(request.FilePath) as ModelDoc2;
-
+            ModelDoc2 doc = OpenByPath(request.FilePath);
             if (doc == null)
             {
                 MessageBox.Show(
-                    "Please open the file first:\n" + request.FileName +
-                    "\n\nThen approve the request.",
-                    "BCore PDM — Open File First",
-                    MessageBoxButtons.OK,
-                    MessageBoxIcon.Information);
+                    "Could not open:\n" + request.FileName +
+                    "\n\nVerify the file exists in the vault.",
+                    "BCore PDM — Approve Request",
+                    MessageBoxButtons.OK, MessageBoxIcon.Warning);
                 return;
             }
 
-            DatabaseManager.ResolveRequest(request.Id, "Approved");
-            EmailManager.NotifyRequestApproved(
-                string.IsNullOrEmpty(request.RequestType) ? "Revision" : request.RequestType,
-                request.FileName, request.RequestedBy);
-            AuditLogger.Log("ApproveRequest", user, request.FileName, "", "",
-                "requested by " + request.RequestedBy);
             StartNewRevision(doc);
+
+            // Only resolve when the revision actually completed.
+            if (DatabaseManager.GetFileStatus(request.FilePath) == "WIP")
+            {
+                DatabaseManager.ResolveRequest(request.Id, "Approved");
+                EmailManager.NotifyRequestApproved(
+                    string.IsNullOrEmpty(request.RequestType) ? "Revision"
+                                                              : request.RequestType,
+                    request.FileName, request.RequestedBy);
+                AuditLogger.Log("ApproveRequest", user, request.FileName, "", "",
+                    "requested by " + request.RequestedBy);
+            }
         }
 
         // ── REJECT REQUEST — Master rejects the request ───────────────
@@ -2074,23 +2080,25 @@ namespace PDMLite
             string user = PDMLiteAddin.CurrentUser;
             if (!IsMaster(user)) { NotMaster(); return; }
 
-            var confirm = MessageBox.Show(
-                "Reject revision request?\n\n" +
-                "File      : " + request.FileName + "\n" +
-                "Requested : " + request.RequestedBy + "\n" +
-                "Note      : " + request.Note,
-                "BCore PDM — Reject Request",
-                MessageBoxButtons.YesNo,
-                MessageBoxIcon.Question);
+            string reqType = string.IsNullOrEmpty(request.RequestType)
+                ? "Revision" : request.RequestType;
 
-            if (confirm != DialogResult.Yes) return;
+            // Prompt the Master for a rejection reason — this is what the engineer
+            // receives in the rejection email (NOT their own original note echoed
+            // back). Cancelling the dialog aborts the rejection.
+            string reason = ShowNoteDialog(
+                "Reject " + reqType + " Request",
+                "Reason for rejecting \"" + request.FileName + "\" (" +
+                request.RequestedBy + "):");
+
+            if (reason == null) return; // cancelled
 
             DatabaseManager.ResolveRequest(request.Id, "Rejected");
             EmailManager.NotifyRequestRejected(
-                string.IsNullOrEmpty(request.RequestType) ? "Revision" : request.RequestType,
-                request.FileName, request.RequestedBy, request.Note);
+                reqType, request.FileName, request.RequestedBy, reason);
             AuditLogger.Log("RejectRequest", user, request.FileName, "", "",
-                "requested by " + request.RequestedBy);
+                "requested by " + request.RequestedBy +
+                (string.IsNullOrEmpty(reason) ? "" : "; reason: " + reason));
 
             MessageBox.Show(
                 "Request rejected and removed from pending list.",
