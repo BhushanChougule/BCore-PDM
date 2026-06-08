@@ -1020,6 +1020,36 @@ namespace PDMLite
             return "";
         }
 
+        // Returns the full VaultFile record for an exact file path, or null if
+        // the path is not tracked. Used by the Pending Requests cards to show
+        // the file's PartNumber + Revision (which live on the File record, not
+        // on the RevisionRequest).
+        public static VaultFile GetFileRecord(string filePath)
+        {
+            if (string.IsNullOrEmpty(filePath)) return null;
+            lock (_lock)
+            {
+                var doc = LoadOrCreate();
+                foreach (var el in doc.Root.Element("Files").Elements("File"))
+                {
+                    if (string.Equals((string)el.Element("FilePath"), filePath,
+                            StringComparison.OrdinalIgnoreCase))
+                    {
+                        return new VaultFile
+                        {
+                            FilePath = (string)el.Element("FilePath") ?? "",
+                            FileName = (string)el.Element("FileName") ?? "",
+                            PartNumber = (string)el.Element("PartNumber") ?? "",
+                            Description = (string)el.Element("Description") ?? "",
+                            Revision = (string)el.Element("Revision") ?? "",
+                            Status = (string)el.Element("Status") ?? ""
+                        };
+                    }
+                }
+            }
+            return null;
+        }
+
         // Returns the part/assembly VaultFile that shares the same base filename
         // as the given drawing (PartNo, Description, Status etc. live on the
         // model, not the drawing). e.g. "TEST 1.SLDDRW" → finds "TEST 1.SLDPRT"

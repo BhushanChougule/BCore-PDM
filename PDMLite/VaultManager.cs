@@ -2074,23 +2074,25 @@ namespace PDMLite
             string user = PDMLiteAddin.CurrentUser;
             if (!IsMaster(user)) { NotMaster(); return; }
 
-            var confirm = MessageBox.Show(
-                "Reject revision request?\n\n" +
-                "File      : " + request.FileName + "\n" +
-                "Requested : " + request.RequestedBy + "\n" +
-                "Note      : " + request.Note,
-                "BCore PDM — Reject Request",
-                MessageBoxButtons.YesNo,
-                MessageBoxIcon.Question);
+            string reqType = string.IsNullOrEmpty(request.RequestType)
+                ? "Revision" : request.RequestType;
 
-            if (confirm != DialogResult.Yes) return;
+            // Prompt the Master for a rejection reason — this is what the engineer
+            // receives in the rejection email (NOT their own original note echoed
+            // back). Cancelling the dialog aborts the rejection.
+            string reason = ShowNoteDialog(
+                "Reject " + reqType + " Request",
+                "Reason for rejecting \"" + request.FileName + "\" (" +
+                request.RequestedBy + "):");
+
+            if (reason == null) return; // cancelled
 
             DatabaseManager.ResolveRequest(request.Id, "Rejected");
             EmailManager.NotifyRequestRejected(
-                string.IsNullOrEmpty(request.RequestType) ? "Revision" : request.RequestType,
-                request.FileName, request.RequestedBy, request.Note);
+                reqType, request.FileName, request.RequestedBy, reason);
             AuditLogger.Log("RejectRequest", user, request.FileName, "", "",
-                "requested by " + request.RequestedBy);
+                "requested by " + request.RequestedBy +
+                (string.IsNullOrEmpty(reason) ? "" : "; reason: " + reason));
 
             MessageBox.Show(
                 "Request rejected and removed from pending list.",

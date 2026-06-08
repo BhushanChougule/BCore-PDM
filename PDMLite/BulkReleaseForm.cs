@@ -54,6 +54,9 @@ namespace PDMLite
         private Timer _searchTimer;
         private readonly List<CheckBox> _checks = new List<CheckBox>();
 
+        // Guards the two-way sync between "Select all" and the card checkboxes.
+        private bool _syncing;
+
         public BulkReleaseForm(float scale)
         {
             _scale = scale;
@@ -117,6 +120,11 @@ namespace PDMLite
 
             _searchTimer = new Timer { Interval = 600 };
             _searchTimer.Tick += (s, e) => { _searchTimer.Stop(); LoadFiles(); };
+            this.FormClosed += (s, e) =>
+            {
+                _searchTimer.Stop();
+                _searchTimer.Dispose();
+            };
 
             _filter.TextChanged += (s, e) =>
             {
@@ -139,7 +147,10 @@ namespace PDMLite
             };
             _selectAll.CheckedChanged += (s, e) =>
             {
+                if (_syncing) return;
+                _syncing = true;
                 foreach (var cb in _checks) cb.Checked = _selectAll.Checked;
+                _syncing = false;
             };
             this.Controls.Add(_selectAll);
 
@@ -310,6 +321,13 @@ namespace PDMLite
                     Width = S(18),
                     Height = S(18),
                     Tag = f.FilePath
+                };
+                cb.CheckedChanged += (s, e) =>
+                {
+                    if (_syncing) return;
+                    _syncing = true;
+                    _selectAll.Checked = _checks.Count > 0 && _checks.All(c => c.Checked);
+                    _syncing = false;
                 };
                 card.Controls.Add(cb);
                 _checks.Add(cb);
