@@ -181,9 +181,10 @@ namespace PDMLite
             _releaseAll.CheckedChanged  += (s, e) => SetAll(_releaseChecks, _releaseAll.Checked);
 
             // ── Bottom row: Approve All Pending (green) + Bulk Release (blue) ──
-            // Equal halves of the full column span so they look uniform.
+            // Equal halves of the full column span, with the same S(5) gap the
+            // three columns use between them so they look uniform.
             int totalColSpan = colX[2] + colW - colX[0];
-            int halfW        = totalColSpan / 2;
+            int halfW        = (totalColSpan - S(5)) / 2;
 
             Button btnApproveAll = new Button
             {
@@ -205,8 +206,8 @@ namespace PDMLite
             {
                 Text = "Bulk Release…",
                 Font = fBtn,
-                Location = new Point(colX[0] + halfW, row2Y),
-                Width = totalColSpan - halfW,
+                Location = new Point(colX[0] + halfW + S(5), row2Y),
+                Width = totalColSpan - halfW - S(5),
                 Height = row2H,
                 BackColor = cBrand,
                 ForeColor = Color.White,

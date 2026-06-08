@@ -291,11 +291,11 @@ namespace PDMLite
                     TextAlign = ContentAlignment.MiddleCenter
                 });
 
-                // PN + description (or a hint when the part number is missing).
+                // PN + description, labelled (or a hint when the PN is missing).
                 bool hasPn = !string.IsNullOrWhiteSpace(f.PartNumber);
                 string sub = hasPn ? "PN: " + f.PartNumber : "(no part number)";
                 if (!string.IsNullOrWhiteSpace(f.Description))
-                    sub += "   " + f.Description;
+                    sub += "    DESC: " + f.Description;
                 card.Controls.Add(new Label
                 {
                     Text = sub,
