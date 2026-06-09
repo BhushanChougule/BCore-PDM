@@ -1554,16 +1554,34 @@ namespace PDMLite
 
         // Move every file in srcDir matching pattern into destDir, overwriting
         // a stale same-named archive copy. No-op if srcDir is missing.
+        // Each file is moved independently: a single failure (e.g. one file open
+        // in a viewer, or a read-only stale archive copy) is logged-and-skipped so
+        // it can NEVER block the other files — moving the old BOM must not stop the
+        // old STEP/PDF from archiving, and vice-versa.
         private static void MoveMatching(string srcDir, string destDir,
             string pattern)
         {
             if (!Directory.Exists(srcDir)) return;
+            string[] files;
+            try { files = Directory.GetFiles(srcDir, pattern); }
+            catch { return; }
+            if (files.Length == 0) return;
+
             Directory.CreateDirectory(destDir);
-            foreach (string file in Directory.GetFiles(srcDir, pattern))
+            foreach (string file in files)
             {
-                string dest = Path.Combine(destDir, Path.GetFileName(file));
-                if (File.Exists(dest)) File.Delete(dest);
-                File.Move(file, dest);
+                try
+                {
+                    string dest = Path.Combine(destDir, Path.GetFileName(file));
+                    if (File.Exists(dest))
+                    {
+                        SetReadOnly(dest, false);   // a prior archive copy may be read-only
+                        File.Delete(dest);
+                    }
+                    SetReadOnly(file, false);       // export shouldn't be, but be safe
+                    File.Move(file, dest);
+                }
+                catch { /* one file failing must not block the rest */ }
             }
         }
 
@@ -1576,50 +1594,29 @@ namespace PDMLite
         {
             try
             {
-                string pdfExport = Path.Combine(ExportRoot, "PDF");
-                string stepExport = Path.Combine(ExportRoot, "STEP");
-                string bomExport = Path.Combine(ExportRoot, "BOM");
-                string pdfArchive = Path.Combine(ObsFolder, "PDF");
-                string stepArchive = Path.Combine(ObsFolder, "STEP");
-                string bomArchive = Path.Combine(ObsFolder, "BOM");
+                // Each MoveMatching is independent (its own per-file try/catch),
+                // so a failure in one type can't skip the others.
 
-                Directory.CreateDirectory(pdfArchive);
-                Directory.CreateDirectory(stepArchive);
+                // STEP (parts/assemblies). fileIdentifier is the dot-stripped PartNo.
+                if (!isDrawing)
+                    MoveMatching(Path.Combine(ExportRoot, "STEP"),
+                        Path.Combine(ObsFolder, "STEP"),
+                        fileIdentifier + "*.step");
 
-                // Move old BOM CSVs matching this assembly's raw PartNo (assemblies
-                // only; parts/drawings never produce a BOM, so nothing matches them)
+                // PDF (drawings, and any part/assembly PDF). fileIdentifier is the
+                // DrawingNo for drawings, dot-stripped PartNo otherwise.
+                MoveMatching(Path.Combine(ExportRoot, "PDF"),
+                    Path.Combine(ObsFolder, "PDF"),
+                    fileIdentifier + "*.pdf");
+
+                // BOM CSV (assemblies only). Uses the RAW PartNo (dots preserved)
+                // because the BOM file is named {partNo}-R{rev}_BOM.csv.
                 if (!isDrawing)
                 {
                     string bid = bomIdentifier ?? fileIdentifier;
-                    MoveMatching(bomExport, bomArchive, bid + "*_BOM.csv");
-                }
-
-                // Move old PDFs matching this identifier
-                if (Directory.Exists(pdfExport))
-                {
-                    foreach (string file in Directory.GetFiles(
-                        pdfExport, fileIdentifier + "*.pdf"))
-                    {
-                        string dest = Path.Combine(pdfArchive,
-                            Path.GetFileName(file));
-                        if (File.Exists(dest))
-                            File.Delete(dest);
-                        File.Move(file, dest);
-                    }
-                }
-
-                // Move old STEP files matching this identifier
-                if (!isDrawing && Directory.Exists(stepExport))
-                {
-                    foreach (string file in Directory.GetFiles(
-                        stepExport, fileIdentifier + "*.step"))
-                    {
-                        string dest = Path.Combine(stepArchive,
-                            Path.GetFileName(file));
-                        if (File.Exists(dest))
-                            File.Delete(dest);
-                        File.Move(file, dest);
-                    }
+                    MoveMatching(Path.Combine(ExportRoot, "BOM"),
+                        Path.Combine(ObsFolder, "BOM"),
+                        bid + "*_BOM.csv");
                 }
             }
             catch { }

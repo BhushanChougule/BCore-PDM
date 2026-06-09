@@ -296,11 +296,11 @@ Core vault operations.
 
 \- SetReadOnly(path, bool) → sets/removes OS-level FileAttributes.ReadOnly
 
-\- ArchiveOldExports(archiveId, isDrawing) → moves old STEP/PDF (and BOM CSV for non-drawings) to archive before release. Uses the MoveMatching(srcDir, destDir, pattern) helper
+\- ArchiveOldExports(archiveId, isDrawing, bomIdentifier=null) → moves old STEP (non-drawings), PDF (all), and BOM CSV (non-drawings, by raw PartNo) to archive before release. All three go through MoveMatching as INDEPENDENT operations — a failure archiving one type can never skip the others
 
-\- CleanupExportsOnRollback(partNoClean, drawingNo) → moves all exports (STEP/PDF/BOM) to archive on rollback
+\- CleanupExportsOnRollback(partNoClean, drawingNo, rawPartNo=null) → moves all exports (STEP/PDF/BOM) to archive on rollback
 
-\- MoveMatching(srcDir, destDir, pattern) → private helper; moves every file in srcDir matching pattern to destDir (overwriting a stale archive copy); no-op if srcDir missing. Used by both ArchiveOldExports and CleanupExportsOnRollback
+\- MoveMatching(srcDir, destDir, pattern) → private helper; moves every file in srcDir matching pattern to destDir. Each file moved in its OWN try/catch (clears read-only on a stale archive copy + on the source first), so one locked/failed file never blocks the rest; GetFiles wrapped in try; no-op if srcDir missing/empty. Used by ArchiveOldExports and CleanupExportsOnRollback
 
 
 
