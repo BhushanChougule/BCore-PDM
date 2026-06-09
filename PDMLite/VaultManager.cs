@@ -1992,6 +1992,32 @@ namespace PDMLite
                 if (!inserted)
                     draw.Create3rdAngleViews2(filePath);
 
+                // Pin every model view to the active configuration so that
+                // config-switching on the model (e.g. during a release export
+                // loop) does not cause this drawing's views to follow and show
+                // the wrong geometry. Only needed for multi-config parts; for
+                // single-config parts the config name is irrelevant but pinning
+                // is harmless.
+                if (!string.IsNullOrEmpty(activeConfig))
+                {
+                    try
+                    {
+                        // GetFirstView() returns the sheet (paper space), not a
+                        // model view. Model views start at sheet.GetNextView().
+                        SolidWorks.Interop.sldworks.View sheet =
+                            (SolidWorks.Interop.sldworks.View)draw.GetFirstView();
+                        SolidWorks.Interop.sldworks.View v = sheet != null
+                            ? (SolidWorks.Interop.sldworks.View)sheet.GetNextView()
+                            : null;
+                        while (v != null)
+                        {
+                            v.ReferencedConfiguration = activeConfig;
+                            v = (SolidWorks.Interop.sldworks.View)v.GetNextView();
+                        }
+                    }
+                    catch { }
+                }
+
                 newDrw.ViewZoomtofit2();
             }
 
