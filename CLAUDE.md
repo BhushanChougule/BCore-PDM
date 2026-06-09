@@ -168,7 +168,7 @@ WinForms dialog for missing properties. Fixed sizes (not DPI-scaled, form is sho
 
 \- CharacterCasing=Upper on TextBoxes
 
-\- Material1 and FinishType use ComboBox dropdowns. The property NAME is Material1 (linked to the drawing template) but the display label is "Material". Material1 dropdown includes "BOM" (material called out in the BOM/table, not on the part). FinishType options: None, Painted, Zinc Plate, Black Zinc, Hot Dipped Galv., FNC, SEE TABLE, Black Oxide, Passivate (casing preserved exactly; DropDownList applies no transform)
+\- Material1 and FinishType use ComboBox dropdowns. The property NAME is Material1 (linked to the drawing template) but the display label is "Material". Material1 dropdown includes "BOM" (material called out in the BOM/table, not on the part). All dropdown VALUES are ALL CAPS (everything on the drawing is uppercase). FinishType options: NONE, PAINTED, ZINC PLATE, BLACK ZINC, HOT DIPPED GALV., FNC, SEE TABLE, BLACK OXIDE, PASSIVATE. The "-- Select --" sentinel keeps its mixed case (it's a UI placeholder, not a value, and ComboValue compares it exactly)
 
 \- DrawnBy (TextBox, editable) auto-defaults to the current user's initials via UserInitials() — first two letters of the Windows username, uppercased (bchougule → BC, rkramarz → RK), same rule as CheckedBy. Only pre-filled when empty; the engineer can overwrite it
 

@@ -34,39 +34,40 @@ namespace PDMLite
             new Dictionary<string, string[]>
         {
             // Finish list mirrors the drawing template's Finish Type options.
-            // Casing is preserved exactly (DropDownList applies no transform).
+            // ALL CAPS — everything on the drawing uses uppercase.
             { "FinishType", new[] {
                 "-- Select --",
-                "None",
-                "Painted",
-                "Zinc Plate",
-                "Black Zinc",
-                "Hot Dipped Galv.",
+                "NONE",
+                "PAINTED",
+                "ZINC PLATE",
+                "BLACK ZINC",
+                "HOT DIPPED GALV.",
                 "FNC",
                 "SEE TABLE",
-                "Black Oxide",
-                "Passivate"
+                "BLACK OXIDE",
+                "PASSIVATE"
             }},
             // Material1 property (linked to drawing template). "BOM" = material
             // is called out in the BOM/table rather than on the part itself.
+            // ALL CAPS — everything on the drawing uses uppercase.
             { "Material1", new[] {
                 "-- Select --",
                 "BOM",
-                "Aluminum 6061-T6",
-                "Aluminum 7075-T6",
-                "Aluminum 5052-H32",
-                "Steel 1018",
-                "Steel 1045",
-                "Stainless 304",
-                "Stainless 316",
-                "Mild Steel A36",
+                "ALUMINUM 6061-T6",
+                "ALUMINUM 7075-T6",
+                "ALUMINUM 5052-H32",
+                "STEEL 1018",
+                "STEEL 1045",
+                "STAINLESS 304",
+                "STAINLESS 316",
+                "MILD STEEL A36",
                 "HDPE",
-                "Nylon 6/6",
-                "Polycarbonate",
-                "Acetal (Delrin)",
-                "Titanium Grade 5",
-                "Brass C360",
-                "Copper 110"
+                "NYLON 6/6",
+                "POLYCARBONATE",
+                "ACETAL (DELRIN)",
+                "TITANIUM GRADE 5",
+                "BRASS C360",
+                "COPPER 110"
             }},
             { "Revision", new[] {
                 "-- Select --",
