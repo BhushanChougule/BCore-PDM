@@ -22,7 +22,7 @@ namespace PDMLite
             using (var g = CreateGraphics())
                 _scale = g.DpiX / 96f;
 
-            ClientSize      = new Size(S(460), S(232));
+            ClientSize      = new Size(S(440), S(220));
             Text            = "BCore PDM — New Drawing";
             FormBorderStyle = FormBorderStyle.FixedDialog;
             StartPosition   = FormStartPosition.CenterParent;
@@ -31,54 +31,77 @@ namespace PDMLite
 
             Controls.Add(new Label
             {
-                Text      = "This file has " + configCount + " configurations and no " +
-                            "drawing yet.\nHow should the new drawing be created?",
-                Location  = new Point(S(16), S(14)),
-                Size      = new Size(S(428), S(48)),
-                Font      = new Font("Segoe UI", 9.5f * _scale),
+                Text      = "This file has " + configCount +
+                            " configurations and no drawing yet.\n" +
+                            "Select how the new drawing should be created:",
+                Location  = new Point(S(12), S(12)),
+                Size      = new Size(S(416), S(44)),
+                Font      = new Font("Segoe UI", 9f * _scale),
                 TextAlign = ContentAlignment.MiddleLeft
             });
 
-            var btnCommon = new Button
+            var rbCommon = new RadioButton
             {
-                Text     = "Common drawing\n(one drawing for ALL configurations)",
-                Location = new Point(S(16), S(72)),
-                Size     = new Size(S(428), S(52)),
+                Text     = "Common drawing (one drawing for ALL configurations)",
+                Location = new Point(S(18), S(66)),
+                Size     = new Size(S(410), S(22)),
                 Font     = new Font("Segoe UI", 9.5f * _scale),
-                TextAlign = ContentAlignment.MiddleCenter
+                Checked  = true
             };
-            btnCommon.Click += (s, e) =>
-            {
-                Result = Scope.Common;
-                DialogResult = DialogResult.OK;
-            };
-            Controls.Add(btnCommon);
+            Controls.Add(rbCommon);
 
-            var btnPerCfg = new Button
+            Controls.Add(new Label
             {
-                Text     = "This configuration only\n(\"" + activeConfig + "\")",
-                Location = new Point(S(16), S(132)),
-                Size     = new Size(S(428), S(52)),
-                Font     = new Font("Segoe UI", 9.5f * _scale),
-                TextAlign = ContentAlignment.MiddleCenter
-            };
-            btnPerCfg.Click += (s, e) =>
+                Text      = "Use a config table or design table to differentiate configurations.",
+                Location  = new Point(S(38), S(90)),
+                Size      = new Size(S(390), S(18)),
+                Font      = new Font("Segoe UI", 8f * _scale),
+                ForeColor = System.Drawing.Color.FromArgb(100, 100, 100)
+            });
+
+            var rbPerCfg = new RadioButton
             {
-                Result = Scope.PerConfig;
-                DialogResult = DialogResult.OK;
+                Text     = "This configuration only  (\"" + activeConfig + "\")",
+                Location = new Point(S(18), S(120)),
+                Size     = new Size(S(410), S(22)),
+                Font     = new Font("Segoe UI", 9.5f * _scale)
             };
-            Controls.Add(btnPerCfg);
+            Controls.Add(rbPerCfg);
+
+            Controls.Add(new Label
+            {
+                Text      = "Other configurations can get their own drawings later.",
+                Location  = new Point(S(38), S(144)),
+                Size      = new Size(S(390), S(18)),
+                Font      = new Font("Segoe UI", 8f * _scale),
+                ForeColor = System.Drawing.Color.FromArgb(100, 100, 100)
+            });
+
+            var btnOk = new Button
+            {
+                Text         = "OK",
+                Location     = new Point(S(248), S(180)),
+                Size         = new Size(S(80), S(28)),
+                Font         = new Font("Segoe UI", 9f * _scale),
+                DialogResult = DialogResult.OK
+            };
+            btnOk.Click += (s, e) =>
+            {
+                Result = rbPerCfg.Checked ? Scope.PerConfig : Scope.Common;
+            };
+            Controls.Add(btnOk);
 
             var btnCancel = new Button
             {
                 Text         = "Cancel",
-                Location     = new Point(S(364), S(194)),
-                Size         = new Size(S(80), S(28)),
+                Location     = new Point(S(340), S(180)),
+                Size         = new Size(S(88), S(28)),
                 Font         = new Font("Segoe UI", 9f * _scale),
                 DialogResult = DialogResult.Cancel
             };
             Controls.Add(btnCancel);
 
+            AcceptButton = btnOk;
             CancelButton = btnCancel;
         }
     }
