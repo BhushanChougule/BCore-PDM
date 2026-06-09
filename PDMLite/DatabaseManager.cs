@@ -270,9 +270,17 @@ namespace PDMLite
 
                     // Per-config metadata: replace the whole block on each save so
                     // adding/removing configs is always reflected correctly.
-                    existing.Element("Configurations")?.Remove();
+                    // BUT only when we actually have configs to write. Every real
+                    // part/assembly has at least one configuration, so an empty
+                    // list means enumeration failed transiently (GetConfigNames
+                    // swallows exceptions) — in that case PRESERVE the existing
+                    // block rather than wiping every config's PartNo/Revision and
+                    // silently collapsing the file to a single phantom config.
                     if (f.Configurations != null && f.Configurations.Count > 0)
+                    {
+                        existing.Element("Configurations")?.Remove();
                         existing.Add(BuildConfigsElement(f.Configurations));
+                    }
                 }
                 else
                 {
@@ -1337,6 +1345,17 @@ namespace PDMLite
         // Match logic: drawing's ReferencedModel == modelFilePath AND
         //   ReferencedConfigs is blank (covers all) OR contains configName.
         // Falls back to basename convention for old/unsaved drawings.
+        // Mirrors the sanitisation in VaultManager.OpenOrCreateDrawing: a config
+        // name used as a drawing filename has Windows-illegal characters replaced
+        // with '_'. Kept here so config→drawing lookup agrees with creation.
+        private static string SanitizeFileName(string name)
+        {
+            if (string.IsNullOrEmpty(name)) return name;
+            var invalid = System.IO.Path.GetInvalidFileNameChars();
+            return new string(name.Select(
+                c => System.Array.IndexOf(invalid, c) >= 0 ? '_' : c).ToArray());
+        }
+
         public static List<string> GetDrawingsForConfig(string modelFilePath, string configName)
         {
             var result = new List<string>();
@@ -1387,9 +1406,16 @@ namespace PDMLite
                     string modelBase   = System.IO.Path.GetFileNameWithoutExtension(modelFilePath);
                     bool sharedMatch   = string.Equals(fnBase, modelBase,
                                             StringComparison.OrdinalIgnoreCase);
+                    // Config-specific drawings are saved with a filename-SAFE
+                    // version of the config name (illegal chars → '_'), so match
+                    // the raw config name OR its sanitised form — otherwise a
+                    // PartNo containing a slash/quote/etc. would never resolve its
+                    // drawing here and New Revision would skip bumping it.
                     bool configMatch   = !string.IsNullOrEmpty(configName) &&
-                                        string.Equals(fnBase, configName,
-                                            StringComparison.OrdinalIgnoreCase);
+                                        (string.Equals(fnBase, configName,
+                                            StringComparison.OrdinalIgnoreCase) ||
+                                         string.Equals(fnBase, SanitizeFileName(configName),
+                                            StringComparison.OrdinalIgnoreCase));
                     if ((sharedMatch || configMatch) && !seen.Contains(fp))
                     {
                         result.Add(fp);

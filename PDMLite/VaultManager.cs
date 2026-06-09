@@ -1069,23 +1069,10 @@ namespace PDMLite
             Directory.CreateDirectory(swArchive);
             string archiveBase = Path.GetFileNameWithoutExtension(filePath);
             string archiveExt  = Path.GetExtension(filePath);
-            string archiveName = archiveBase + " REV " + currentRev + archiveExt;
-            string archiveDest = Path.Combine(swArchive, archiveName);
-            // Multi-config archives are FILE-level but named after the ACTIVE
-            // config's rev. A partial bump can leave the active config's rev
-            // unchanged, so two DIFFERENT file snapshots would map to the same
-            // "Name REV X" archive and ArchiveCopy would silently overwrite
-            // (destroy) the earlier one. Keep both by inserting a timestamp into
-            // the basename — placed BEFORE " REV " so RollbackDialog.Extract-
-            // Revision still reads the rev letter. Single-config keeps the old
-            // overwrite behaviour (re-archiving the same rev is harmless).
-            if (isMultiCfg && File.Exists(archiveDest))
-            {
-                string snap = DateTime.Now.ToString("yyyyMMdd_HHmmss");
-                archiveName = archiveBase + "_" + snap +
-                              " REV " + currentRev + archiveExt;
-                archiveDest = Path.Combine(swArchive, archiveName);
-            }
+            // Collision-safe (see CollisionSafeArchivePath): a partial multi-
+            // config bump can map two different snapshots to the same rev letter.
+            string archiveDest = CollisionSafeArchivePath(
+                swArchive, archiveBase, currentRev, archiveExt, isMultiCfg);
             ArchiveCopy(filePath, archiveDest);
 
             // If the drawing is open, close it BEFORE we close/reopen the part.
@@ -1472,7 +1459,16 @@ namespace PDMLite
             {
                 ModelDoc2 cd = comp.GetModelDoc2() as ModelDoc2;
                 if (cd == null) return "";
-                return PropertyValidator.GetProperty(cd, "PartType");
+                // PartType is a config-specific property, so read it from the
+                // configuration the ASSEMBLY actually references — not the
+                // component's active in-memory config, which may be any config
+                // (a shared child can be Manufactured in one config, Purchased in
+                // another). Falls back to the active-config read when the
+                // referenced config is unknown.
+                string refCfg = comp.ReferencedConfiguration;
+                return !string.IsNullOrEmpty(refCfg)
+                    ? PropertyValidator.GetProperty(cd, "PartType", refCfg)
+                    : PropertyValidator.GetProperty(cd, "PartType");
             }
             catch { return ""; }
         }
@@ -1636,6 +1632,8 @@ namespace PDMLite
             // archived state. Configs that were independently bumped to a higher
             // revision since that archive will lose those changes. Rollback is
             // not config-aware — make the Master acknowledge this before proceeding.
+            bool rbMultiCfg = ext != ".slddrw"
+                && PropertyValidator.GetConfigNames(doc).Count > 1;
             if (ext != ".slddrw")
             {
                 var rbCfgs = PropertyValidator.GetConfigNames(doc);
@@ -1684,10 +1682,11 @@ namespace PDMLite
                     SetReadOnly(releasedCopy, false);
 
                 // ── Step 2: Archive current version ───────────────────────
-                string currentArchiveName = fileName +
-                    " REV " + currentRev + ext;
-                string currentArchivePath = Path.Combine(
-                    archivePath, currentArchiveName);
+                // Collision-safe: a New Revision may already have archived this
+                // file at the same rev letter; don't let the rollback overwrite
+                // (destroy) that distinct snapshot for a multi-config file.
+                string currentArchivePath = CollisionSafeArchivePath(
+                    archivePath, fileName, currentRev, ext, rbMultiCfg);
                 ArchiveCopy(filePath, currentArchivePath);
 
                 // ── Step 3: Remove read-only from archived file ───────────
@@ -1749,12 +1748,14 @@ namespace PDMLite
                                 Path.Combine(Path.GetDirectoryName(filePath),
                                     fileName + ".slddrw");
 
-                            // Archive the current drawing before overwriting it.
+                            // Archive the current drawing before overwriting it
+                            // (collision-safe, same rationale as the model above).
                             if (File.Exists(drwTarget))
                             {
                                 SetReadOnly(drwTarget, false);
-                                ArchiveCopy(drwTarget, Path.Combine(drwArchiveDir,
-                                    fileName + " REV " + currentRev + ".slddrw"));
+                                ArchiveCopy(drwTarget, CollisionSafeArchivePath(
+                                    drwArchiveDir, fileName, currentRev,
+                                    ".slddrw", rbMultiCfg));
                             }
 
                             // Restore the archived drawing to the WIP path.
@@ -2789,6 +2790,29 @@ namespace PDMLite
                 File.Delete(dest);
             }
             File.Copy(source, dest);
+        }
+
+        // Builds an archive path "{baseName} REV {rev}{ext}". Multi-config files
+        // are archived at FILE level but named after a single config's rev, so a
+        // partial bump (or a rollback after a New Revision) can map two DIFFERENT
+        // file snapshots to the same name — and ArchiveCopy is delete-then-copy,
+        // so the earlier snapshot would be silently destroyed. When the target
+        // already exists for a multi-config file, insert a yyyyMMdd_HHmmss stamp
+        // BEFORE " REV " so both survive AND RollbackDialog.ExtractRevision (which
+        // parses the token after " REV ") still reads the rev letter. Single-
+        // config keeps the old overwrite behaviour (re-archiving the same rev is
+        // harmless).
+        private static string CollisionSafeArchivePath(
+            string dir, string baseName, string rev, string ext, bool multiCfg)
+        {
+            string dest = Path.Combine(dir, baseName + " REV " + rev + ext);
+            if (multiCfg && File.Exists(dest))
+            {
+                string snap = DateTime.Now.ToString("yyyyMMdd_HHmmss");
+                dest = Path.Combine(dir,
+                    baseName + "_" + snap + " REV " + rev + ext);
+            }
+            return dest;
         }
     }
 }
