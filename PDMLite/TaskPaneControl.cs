@@ -491,6 +491,18 @@ namespace PDMLite
             // skipped if that model also matched (it is expanded there instead).
             var cards = BuildConfigCards(results, term.ToLower());
 
+            // Cap the rendered cards. SearchFiles caps at 50 FILES, but a
+            // multi-config part expands to ONE card per configuration, so 50
+            // files could still explode into hundreds of cards and freeze the
+            // panel at scale. Trim to MaxCards and flag truncation so the
+            // "refine your search" hint shows below.
+            const int MaxCards = 50;
+            if (cards.Count > MaxCards)
+            {
+                cards = cards.GetRange(0, MaxCards);
+                truncated = true;
+            }
+
             int barW = S(15);
             int cardH = S(74);
             int contentLeft = barW + S(6);

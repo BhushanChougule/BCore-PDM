@@ -530,6 +530,42 @@ namespace PDMLite
                         }
                     }
 
+                    // Rule 3.7: surface incomplete NON-active configurations
+                    // early (multi-config only). Rule 3 hard-blocks on the
+                    // ACTIVE config, but the other configs are otherwise only
+                    // validated at the release gate (ValidateAllConfigs) — so an
+                    // engineer could carry an incomplete config for days and
+                    // only discover it when release blocks. Warn (Yes/No, non-
+                    // blocking) listing the gaps so they get fixed while the work
+                    // is fresh; the release gate stays the hard stop.
+                    if (allCfgsVS.Count > 1)
+                    {
+                        string activeCfg37 = (doc.GetActiveConfiguration()
+                            as SolidWorks.Interop.sldworks.Configuration)
+                            ?.Name ?? "";
+                        var otherGaps = PropertyValidator.ValidateAllConfigs(doc)
+                            .Where(kv => !string.Equals(kv.Key, activeCfg37,
+                                StringComparison.OrdinalIgnoreCase))
+                            .ToList();
+                        if (otherGaps.Count > 0)
+                        {
+                            string gapLines = string.Join("\n", otherGaps.Select(
+                                kv => "  \"" + kv.Key + "\" — missing: " +
+                                      string.Join(", ", kv.Value)));
+                            int choice = SwApp.SendMsgToUser2(
+                                "OTHER CONFIGURATIONS ARE INCOMPLETE:\n\n" +
+                                gapLines + "\n\n" +
+                                "These configurations will block the release gate " +
+                                "until every required property is filled. You can " +
+                                "finish them later, but it is easiest now.\n\n" +
+                                "Save anyway?",
+                                (int)swMessageBoxIcon_e.swMbWarning,
+                                (int)swMessageBoxBtn_e.swMbYesNo);
+                            if (choice == (int)swMessageBoxResult_e.swMbHitNo)
+                                return 1;
+                        }
+                    }
+
                     // Rule 4: duplicate part number (another file already uses it)
                     string partNo = PropertyValidator.GetProperty(doc, "PartNo");
                     string conflict = DatabaseManager.FindPartNumberConflict(partNo, filePath);

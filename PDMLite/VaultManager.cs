@@ -1067,11 +1067,26 @@ namespace PDMLite
                                : "PARTS";
             string swArchive = Path.Combine(ObsFolder, swSubFolder);
             Directory.CreateDirectory(swArchive);
-            string archiveName =
-                Path.GetFileNameWithoutExtension(filePath) +
-                " REV " + currentRev +
-                Path.GetExtension(filePath);
-            ArchiveCopy(filePath, Path.Combine(swArchive, archiveName));
+            string archiveBase = Path.GetFileNameWithoutExtension(filePath);
+            string archiveExt  = Path.GetExtension(filePath);
+            string archiveName = archiveBase + " REV " + currentRev + archiveExt;
+            string archiveDest = Path.Combine(swArchive, archiveName);
+            // Multi-config archives are FILE-level but named after the ACTIVE
+            // config's rev. A partial bump can leave the active config's rev
+            // unchanged, so two DIFFERENT file snapshots would map to the same
+            // "Name REV X" archive and ArchiveCopy would silently overwrite
+            // (destroy) the earlier one. Keep both by inserting a timestamp into
+            // the basename — placed BEFORE " REV " so RollbackDialog.Extract-
+            // Revision still reads the rev letter. Single-config keeps the old
+            // overwrite behaviour (re-archiving the same rev is harmless).
+            if (isMultiCfg && File.Exists(archiveDest))
+            {
+                string snap = DateTime.Now.ToString("yyyyMMdd_HHmmss");
+                archiveName = archiveBase + "_" + snap +
+                              " REV " + currentRev + archiveExt;
+                archiveDest = Path.Combine(swArchive, archiveName);
+            }
+            ArchiveCopy(filePath, archiveDest);
 
             // If the drawing is open, close it BEFORE we close/reopen the part.
             // When a drawing is open and references the part, OpenDoc6 on the part

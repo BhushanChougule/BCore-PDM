@@ -348,7 +348,7 @@ Open Drawing button label when a drawing is active: VaultManager.GetDrawingOpenL
 
 9\. Remove from Vault button (Masters only, cSwRed — muted SOLIDWORKS red) — DoAction("remove") → VaultManager.RemoveFromVault on the active file (moves to SCRAP + deletes record; blocked if Released)
 
-Search results are capped at 50; when SearchFiles reports truncated=true a "Showing first N — refine your search" hint is rendered below the cards.
+Search results are capped at 50; when SearchFiles reports truncated=true a "Showing first N — refine your search" hint is rendered below the cards. SECOND cap at the CARD level (MaxCards=50 in RunSearch): SearchFiles caps at 50 FILES, but a multi-config part expands to one card PER configuration, so the card list is trimmed to MaxCards and truncated is forced true (the same hint shows) — prevents hundreds of cards freezing the panel even when only a few files matched.
 
 
 
@@ -618,7 +618,7 @@ blocker dialogs still show.
 
 \- suppressPrompts (bulk approve): skips picker, bumps ALL configs automatically
 
-\- Archive naming: file-level (one SW archive per revision bump, regardless of config count)
+\- Archive naming: file-level (one SW archive per revision bump, regardless of config count). Named "{basename} REV {activeConfigRev}.ext". COLLISION GUARD (multi-config only): a partial bump can leave the active config's rev unchanged, so two different file snapshots would map to the same archive name and ArchiveCopy (delete-then-copy) would silently overwrite the earlier one. When the target already exists, a yyyyMMdd_HHmmss stamp is inserted into the basename BEFORE " REV " ("{basename}_{stamp} REV {rev}.ext") so both snapshots survive AND RollbackDialog.ExtractRevision (parses the token after " REV ") still reads the rev letter. Single-config keeps the old overwrite behaviour (re-archiving the same rev is harmless)
 
 \- StartDrawingRevisionWith(modelPath, currentRev, nextRev, user, explicitDrwPath=null) — optional explicit drawing path lets multi-config path pass a pre-resolved drawing (skips FindDrawingPath)
 
@@ -769,6 +769,8 @@ GetNextRevision() in VaultManager.cs handles this
 \- Intra-file duplicate PartNo detection on save (Rule 3.5 in ValidateSave): when a file has multiple configs and two or more share the same PartNo (e.g. after creating a new config from an existing one), the "new" configs (not yet tracked in vault.xml) are identified, the UI switches to each in turn, shows a warning + PropertyForm pre-populated with PartNo/DrawingNo/Description, then blocks the save if duplicates remain. Uses DatabaseManager.GetConfigsForFile to distinguish new vs established configs.
 
 \- Config-name-matches-PartNo check on save (Rule 3.6 in ValidateSave, multi-config ONLY): the whole system keys per-config drawings (GetDrawingsForConfig), search cards and revision tracking on the convention config name == PartNo. A newly added config keeps its default name ("Default"/"Copy of …") until renamed; Rule 3.6 lists every config whose name ≠ its PartNo (case-insensitive, trimmed; configs with no PartNo yet are skipped) and warns with a Yes/No "Save anyway?" override (consistent with the outside-WIP and cross-file dup-PN warnings). No = go back and rename the config in the tree. Caught EARLY on purpose — renaming a config after it is referenced by an assembly breaks those references. Single-config files keep the default config name and are exempt (no rename needed).
+
+\- Incomplete non-active config warning on save (Rule 3.7 in ValidateSave, multi-config ONLY): Rule 3 hard-blocks on the ACTIVE config only; the other configs are otherwise validated solely at the release gate (ValidateAllConfigs), so an incomplete config could go unnoticed until release blocks. Rule 3.7 runs ValidateAllConfigs, drops the active config (already enforced by Rule 3) and, for any remaining config with missing required properties, warns with a Yes/No "Save anyway?" override listing each config + its missing fields. Non-blocking — the release gate stays the hard stop; this just surfaces the gap while the work is fresh.
 
 \- Per-config drawing support in OpenOrCreateDrawing: config-specific drawing ({configName}.slddrw) is searched for first; shared drawing ({modelBasename}.slddrw) is the fallback. When neither exists for a multi-config part, DrawingScopeDialog prompts ONCE — Common drawing (one for all configs, {modelBasename}.slddrw) vs This configuration only ({configName}.slddrw) vs Cancel — so the common-vs-per-config decision is an explicit user choice at creation time, not a guess. After that the file name on disk carries the decision and the prompt never repeats. Both patterns coexist — switching active config and clicking "Open Drawing" opens (or creates) the right drawing for that config. Single-config parts skip the prompt (always shared).
 
