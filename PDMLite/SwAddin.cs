@@ -485,79 +485,68 @@ namespace PDMLite
                         }
                     }
 
-                    // Rule 3.6: configuration name must match its Part Number
-                    // (multi-config only). The whole system keys per-config
-                    // drawings (GetDrawingsForConfig), search cards and revision
-                    // tracking on the convention config name == PartNo. A new
-                    // configuration keeps its default name ("Default", "Copy of
-                    // ...") until the engineer renames it; catch the mismatch
-                    // here — BEFORE the config is referenced by an assembly,
-                    // because renaming a config later breaks those references.
-                    // Single-config files keep the default name and are exempt.
+                    // Rule 3.6: per-configuration health warning (multi-config
+                    // only, non-blocking). Combines two checks into ONE dialog so
+                    // a freshly-added config never triggers a chain of pop-ups —
+                    // each affected config gets a single line listing ALL its
+                    // issues, then one Yes/No "Save anyway?" override:
+                    //   (a) config name must match its PartNo — the convention
+                    //       config name == PartNo underpins per-config drawings
+                    //       (GetDrawingsForConfig), search and revision tracking.
+                    //       Caught BEFORE the config is referenced by an assembly,
+                    //       where renaming it would break those references.
+                    //   (b) every NON-active config must have its required
+                    //       properties. Rule 3 already hard-blocks the ACTIVE
+                    //       config; the others are otherwise only validated at the
+                    //       release gate, so an incomplete config could go
+                    //       unnoticed until release blocks.
+                    // Single-config files are exempt from both checks. (Rule 3.5's
+                    // duplicate-PartNo block stays separate — it's an interactive
+                    // fix flow that hard-blocks, not a passive warning.)
                     if (allCfgsVS.Count > 1)
                     {
-                        var nameMismatches = new List<string>();
-                        foreach (string c in allCfgsVS)
-                        {
-                            string cpn = PropertyValidator.GetProperty(
-                                doc, "PartNo", c);
-                            // Skip configs with no PartNo yet — nothing to match
-                            // against (Rule 3 only fills the active config).
-                            if (string.IsNullOrWhiteSpace(cpn)) continue;
-                            if (!string.Equals(c.Trim(), cpn.Trim(),
-                                    StringComparison.OrdinalIgnoreCase))
-                                nameMismatches.Add(
-                                    "  \"" + c + "\"  →  Part No " + cpn);
-                        }
-
-                        if (nameMismatches.Count > 0)
-                        {
-                            int choice = SwApp.SendMsgToUser2(
-                                "CONFIGURATION NAME DOES NOT MATCH PART NUMBER:\n\n" +
-                                string.Join("\n", nameMismatches) + "\n\n" +
-                                "By convention each configuration is named after " +
-                                "its Part Number. Per-config drawings, search and " +
-                                "revision tracking all rely on this.\n\n" +
-                                "Rename the configuration(s) in the tree to match " +
-                                "the Part No — do it now, before this file is used " +
-                                "in an assembly (renaming a config later breaks " +
-                                "references).\n\n" +
-                                "Save anyway?",
-                                (int)swMessageBoxIcon_e.swMbWarning,
-                                (int)swMessageBoxBtn_e.swMbYesNo);
-                            if (choice == (int)swMessageBoxResult_e.swMbHitNo)
-                                return 1;
-                        }
-                    }
-
-                    // Rule 3.7: surface incomplete NON-active configurations
-                    // early (multi-config only). Rule 3 hard-blocks on the
-                    // ACTIVE config, but the other configs are otherwise only
-                    // validated at the release gate (ValidateAllConfigs) — so an
-                    // engineer could carry an incomplete config for days and
-                    // only discover it when release blocks. Warn (Yes/No, non-
-                    // blocking) listing the gaps so they get fixed while the work
-                    // is fresh; the release gate stays the hard stop.
-                    if (allCfgsVS.Count > 1)
-                    {
-                        string activeCfg37 = (doc.GetActiveConfiguration()
+                        string activeCfg36 = (doc.GetActiveConfiguration()
                             as SolidWorks.Interop.sldworks.Configuration)
                             ?.Name ?? "";
-                        var otherGaps = PropertyValidator.ValidateAllConfigs(doc)
-                            .Where(kv => !string.Equals(kv.Key, activeCfg37,
-                                StringComparison.OrdinalIgnoreCase))
-                            .ToList();
-                        if (otherGaps.Count > 0)
+                        var cfgGaps = PropertyValidator.ValidateAllConfigs(doc);
+
+                        var issueLines = new List<string>();
+                        foreach (string c in allCfgsVS)
                         {
-                            string gapLines = string.Join("\n", otherGaps.Select(
-                                kv => "  \"" + kv.Key + "\" — missing: " +
-                                      string.Join(", ", kv.Value)));
+                            var issues = new List<string>();
+
+                            // (a) name == PartNo (skip configs with no PartNo yet)
+                            string cpn = PropertyValidator.GetProperty(
+                                doc, "PartNo", c);
+                            if (!string.IsNullOrWhiteSpace(cpn) &&
+                                !string.Equals(c.Trim(), cpn.Trim(),
+                                    StringComparison.OrdinalIgnoreCase))
+                                issues.Add("name should match Part No " + cpn);
+
+                            // (b) completeness — non-active configs only
+                            // (Rule 3 already covers the active config)
+                            if (!string.Equals(c, activeCfg36,
+                                    StringComparison.OrdinalIgnoreCase)
+                                && cfgGaps.ContainsKey(c))
+                                issues.Add("missing: " +
+                                    string.Join(", ", cfgGaps[c]));
+
+                            if (issues.Count > 0)
+                                issueLines.Add("  \"" + c + "\" — " +
+                                    string.Join("; ", issues));
+                        }
+
+                        if (issueLines.Count > 0)
+                        {
                             int choice = SwApp.SendMsgToUser2(
-                                "OTHER CONFIGURATIONS ARE INCOMPLETE:\n\n" +
-                                gapLines + "\n\n" +
-                                "These configurations will block the release gate " +
-                                "until every required property is filled. You can " +
-                                "finish them later, but it is easiest now.\n\n" +
+                                "SOME CONFIGURATIONS NEED ATTENTION:\n\n" +
+                                string.Join("\n", issueLines) + "\n\n" +
+                                "Config names should match their Part No (per-config " +
+                                "drawings, search and revision tracking rely on it), " +
+                                "and every config needs all required properties " +
+                                "before the release gate will pass.\n\n" +
+                                "Fix them now — renaming a config after an assembly " +
+                                "references it breaks those references.\n\n" +
                                 "Save anyway?",
                                 (int)swMessageBoxIcon_e.swMbWarning,
                                 (int)swMessageBoxBtn_e.swMbYesNo);
