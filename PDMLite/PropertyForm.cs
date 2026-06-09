@@ -22,7 +22,9 @@ namespace PDMLite
             { "Description", "Description"    },
             { "DrawnBy",     "Drawn By"       },
             { "DrawnDate",   "Drawn Date"     },
-            { "Material",   "Material"       },
+            // Property name is Material1 (linked to the drawing template);
+            // display label stays "Material".
+            { "Material1",   "Material"       },
             { "FinishType",  "Finish Type"    },
             { "Revision",    "Revision"       },
             { "PartType",    "Part Type"      }
@@ -31,22 +33,25 @@ namespace PDMLite
         private static readonly Dictionary<string, string[]> Dropdowns =
             new Dictionary<string, string[]>
         {
+            // Finish list mirrors the drawing template's Finish Type options.
+            // Casing is preserved exactly (DropDownList applies no transform).
             { "FinishType", new[] {
                 "-- Select --",
-                "As Machined",
-                "Anodized - Clear",
-                "Anodized - Black",
-                "Anodized - Custom Color",
-                "Powder Coat - Black",
-                "Powder Coat - Custom",
-                "Zinc Plated",
-                "Chrome Plated",
+                "None",
                 "Painted",
-                "Galvanized",
-                "None / Raw"
+                "Zinc Plate",
+                "Black Zinc",
+                "Hot Dipped Galv.",
+                "FNC",
+                "SEE TABLE",
+                "Black Oxide",
+                "Passivate"
             }},
-            { "Material", new[] {
+            // Material1 property (linked to drawing template). "BOM" = material
+            // is called out in the BOM/table rather than on the part itself.
+            { "Material1", new[] {
                 "-- Select --",
+                "BOM",
                 "Aluminum 6061-T6",
                 "Aluminum 7075-T6",
                 "Aluminum 5052-H32",
@@ -203,13 +208,21 @@ namespace PDMLite
                 }
                 else
                 {
+                    // DrawnBy defaults to the current user's initials (first two
+                    // letters of the username, uppercased — e.g. bchougule → BC,
+                    // rkramarz → RK), matching the CheckedBy convention. The
+                    // engineer can edit it; only pre-fill when it's empty.
+                    string defaultText = existing;
+                    if (field == "DrawnBy" && string.IsNullOrEmpty(existing))
+                        defaultText = UserInitials();
+
                     TextBox tb = new TextBox
                     {
                         Font = inputFont,
                         Width = inputWidth,
                         Height = 50,
                         Location = new Point(inputLeft, y),
-                        Text = existing,
+                        Text = defaultText,
                         BackColor = Color.White,
                         BorderStyle = BorderStyle.FixedSingle,
                         CharacterCasing = CharacterCasing.Upper
@@ -256,6 +269,14 @@ namespace PDMLite
 
             // ── Set form height to fit all rows + buttons ─────────────────
             this.Height = y + 340;
+        }
+
+        // Current user's initials: first two letters of the Windows username,
+        // uppercased (bchougule → BC, rkramarz → RK). Same rule as CheckedBy.
+        private static string UserInitials()
+        {
+            string u = PDMLiteAddin.CurrentUser ?? "";
+            return u.Length >= 2 ? u.Substring(0, 2).ToUpper() : u.ToUpper();
         }
 
         // Reads a ComboBox's value. Dropdowns whose first item is the
