@@ -346,6 +346,18 @@ namespace PDMLite
                         string statusDisplay =
                             string.IsNullOrEmpty(modelStatus) ? "WIP" : modelStatus;
 
+                        // If the referenced model has multiple configs, releasing
+                        // it freezes EVERY config (status is file-level) — warn so
+                        // the user isn't surprised that sibling configs lock too.
+                        int refCfgCount = DatabaseManager
+                            .GetConfigsForFile(referencedModel).Count;
+                        string multiCfgNote = refCfgCount > 1
+                            ? "\n\nNOTE: the " + (isRefAsm ? "assembly" : "part") +
+                              " has " + refCfgCount + " configurations — releasing " +
+                              "it freezes ALL of them (read-only), and every config " +
+                              "must have complete properties to pass validation."
+                            : "";
+
                         var chain = MessageBox.Show(
                             "The referenced " + (isRefAsm ? "Assembly" : "Part") +
                             " is still " + statusDisplay + ".\n\n" +
@@ -354,7 +366,7 @@ namespace PDMLite
                                 "  (" + (isRefAsm ? "Assembly" : "Part") + ")\n" +
                             "  • " + Path.GetFileName(filePath) + "  (Drawing)\n\n" +
                             "Each file's properties and references are still " +
-                            "validated before release.",
+                            "validated before release." + multiCfgNote,
                             "BCore PDM — Release Drawing + " +
                                 (isRefAsm ? "Assembly" : "Part"),
                             MessageBoxButtons.YesNo, MessageBoxIcon.Question);
@@ -642,7 +654,10 @@ namespace PDMLite
                             "  • Auto-fill Part Weight per config\n" +
                             "  • Export STEP per config\n" +
                             "  • Lock file as Released\n" +
-                            "  • Log the revision";
+                            "  • Log the revision\n\n" +
+                            "NOTE: status is file-level — releasing freezes ALL " +
+                            (relCfgsCfm.Count) + " configurations (read-only). " +
+                            "Use Unlock or New Revision to edit any of them again.";
                     }
                     else
                     {

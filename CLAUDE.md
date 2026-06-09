@@ -280,7 +280,9 @@ Core vault operations.
 
 \- GetDrawingNo(doc) → gets DrawingNo from referenced model
 
-\- GetDrawingPartNo(doc) → gets PartNo from the model a drawing references (falls back to the drawing's own PartNo, then ""); used by the task-pane Active File card so a drawing shows its part/assembly's number instead of literal "Drawing"
+\- GetDrawingPartNo(doc) → gets PartNo from the model a drawing references, reading the SPECIFIC config the drawing documents (via GetDrawingPrimaryConfig) NOT the model's active config (which may be any config after a release/export loop switched it); falls back to the active-config read, then the drawing's own PartNo, then ""; used by the task-pane Active File card. GetDrawingNo and the drawing-release revision sync use the same config-specific read.
+
+\- GetDrawingPrimaryConfig(doc) → returns the ReferencedConfiguration of the drawing's first model view (the config the drawing documents), or "" if unreadable (treat as "use active config"). Underpins GetDrawingPartNo/GetDrawingNo and the drawing-release rev sync so a config-specific drawing always reports its OWN config's PartNo/DrawingNo/Revision.
 
 \- GetDrawingReferencedModel(doc) → gets path of model referenced by drawing
 
@@ -650,6 +652,8 @@ offer to roll the drawing back too (archives current drawing, restores, updates 
 
 warn about parent assemblies
 
+\- Multi-config rollback: archives are FILE-level snapshots, so rollback reverts the WHOLE file (every config) to the archived revision — configs independently bumped to a newer rev since that archive lose those changes. Rollback is NOT config-aware; a multi-config file shows a Yes/No warning (config count + "ALL configurations revert together") that the Master must acknowledge before proceeding.
+
 
 
 \### Engineer Requests (Unlock / Revision / Release)
@@ -756,9 +760,11 @@ GetNextRevision() in VaultManager.cs handles this
 
 \- Bulk operations (all in PendingRequestsForm, so the task pane stays uncluttered): per-column checkboxes + "Approve Selected" (type-aware via VaultManager.BulkApprove), green "Approve All Pending", and blue "Bulk Release…" → BulkReleaseForm (pick any WIP files, release in one pass). Batch releases ordered parts→assemblies→drawings; one summary dialog reports done/skipped; blocked files stay pending
 
-\- Multi-config Release: ValidateAllConfigs before release; CheckedBy/CheckedDate/PartWeight set on every config; one STEP per config exported (ExportStepOnly per config, config switched before each); flat DXF once for original active config (ExportFlatPatternOnly); confirm + success dialogs list all configs with PN + Rev
+\- Multi-config Release: ValidateAllConfigs before release; CheckedBy/CheckedDate/PartWeight set on every config; one STEP per config exported (ExportStepOnly per config, config switched before each); flat DXF once for original active config (ExportFlatPatternOnly); confirm + success dialogs list all configs with PN + Rev. Both config-switch loops (auto-fill + STEP export) are wrapped in try/finally so an export failure can't leave the model on the wrong config. STEP export has a collision guard: two configs sharing PartNo+Rev would overwrite each other's .step, so the duplicate is skipped and reported in one warning dialog. The drawing-release revision sync reads the rev from the drawing's documented config (GetDrawingPrimaryConfig), not the model's active config.
 
-\- Multi-config New Revision: ConfigRevisionPickerForm checklist (all configs pre-checked, current→next per config); Master selects which configs to bump; selected configs get their own next Revision via SetProperty(doc, "Revision", nextRev, cfgName); drawings collected via FindDrawingPath (shared) + GetDrawingsForConfig per selected config and all started via StartDrawingRevisionWith; suppressPrompts bumps all configs with no picker; archive naming remains file-level
+\- Multi-config New Revision: ConfigRevisionPickerForm checklist (all configs pre-checked, current→next per config); Master selects which configs to bump; selected configs get their own next Revision via SetProperty(doc, "Revision", nextRev, cfgName); drawings collected via FindDrawingPath (shared) + GetDrawingsForConfig per selected config. Each drawing is bumped to the CORRECT revision: a config-specific drawing gets ITS config's next rev (from cfgNextRevs), while the shared {modelBasename}.slddrw keeps the file-level active-config rev (first-assignment-wins map drawing→rev). suppressPrompts bumps all configs with no picker; archive naming remains file-level
+
+\- File-level status in multi-config: status (WIP/Released/Locked) is tracked per-FILE, not per-config — a multi-config part is one .sldprt, and OS read-only is file-level. Releasing one config (or its config-specific drawing, which chains to release the model) freezes ALL configurations read-only, and the release gate (ValidateAllConfigs) requires EVERY config's properties complete. This is intentional (all-or-nothing release); the multi-config confirm dialog and the chained drawing-release prompt both warn that all N configs freeze together. To edit any config again, Unlock or New Revision the whole file. Rule 3.5 on save: on the first save of a brand-new multi-config file the active config (just filled via Rule 3) is treated as established so it isn't re-prompted with a PropertyForm.
 
 \- Intra-file duplicate PartNo detection on save (Rule 3.5 in ValidateSave): when a file has multiple configs and two or more share the same PartNo (e.g. after creating a new config from an existing one), the "new" configs (not yet tracked in vault.xml) are identified, the UI switches to each in turn, shows a warning + PropertyForm pre-populated with PartNo/DrawingNo/Description, then blocks the save if duplicates remain. Uses DatabaseManager.GetConfigsForFile to distinguish new vs established configs.
 
