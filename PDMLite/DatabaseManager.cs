@@ -135,14 +135,114 @@ namespace PDMLite
             return XDocument.Load(DataFile);
         }
 
+        // Write atomically: serialise to a temp file, then atomically replace the
+        // live vault.xml. A crash or network blip mid-write can therefore never
+        // leave a truncated/corrupt vault.xml — readers always see a whole file.
+        // Always called while the cross-process lock is held (see AcquireProcessLock).
         private static void Save(XDocument doc)
         {
-            doc.Save(DataFile);
+            // Per-process temp name (machine + PID). Under the lock only one
+            // writer is ever active, but in degraded mode (lock unavailable on a
+            // network blip) two machines must NOT share one .tmp — interleaved
+            // writes would let File.Replace promote a corrupt temp into place.
+            string tmp = DataFile + "." + Environment.MachineName + "."
+                + System.Diagnostics.Process.GetCurrentProcess().Id + ".tmp";
+            doc.Save(tmp);
+            try
+            {
+                if (File.Exists(DataFile))
+                    File.Replace(tmp, DataFile, null);
+                else
+                    File.Move(tmp, DataFile);
+            }
+            catch
+            {
+                // File.Replace can fail on some SMB configs — fall back to a
+                // direct overwrite so the save still lands.
+                doc.Save(DataFile);
+                try { if (File.Exists(tmp)) File.Delete(tmp); } catch { }
+            }
+        }
+
+        // ── Cross-process (cross-machine) write lock ──────────────────────────
+        // The in-process _lock only serialises threads inside ONE SOLIDWORKS
+        // instance. vault.xml lives on a shared drive hit by 10+ machines, so
+        // without cross-machine mutual exclusion the read-modify-write cycle is
+        // last-writer-wins: A loads, B loads, A saves, B saves → A's changes
+        // (status, locks, per-config metadata) are silently lost.
+        //
+        // A named Mutex is machine-local and does NOT help across PCs. An
+        // exclusive lock FILE does: SMB honours FileShare.None across machines,
+        // so only one machine at a time can hold vault.lock. Every DB critical
+        // section acquires it for the full load→save, so writes never interleave.
+        // Reentrant per-thread (a DB method may call another) since a single
+        // process cannot re-open its own FileShare.None handle.
+        private const string LockFile = @"N:\PDM-SolidWorks\VAULT\vault.lock";
+
+        [ThreadStatic] private static FileStream _procLockStream;
+        [ThreadStatic] private static int _procLockDepth;
+
+        private static IDisposable AcquireProcessLock()
+        {
+            // Already held on this thread — just go deeper (reentrant).
+            if (_procLockDepth > 0)
+            {
+                _procLockDepth++;
+                return new LockReleaser();
+            }
+
+            // Spin only on genuine sharing violations (another machine holds the
+            // lock). Anything else (path unreachable / access denied) means the
+            // network is down or misconfigured — don't waste seconds retrying;
+            // fall through and let the subsequent vault.xml load surface the error.
+            for (int attempt = 0; attempt < 30; attempt++)
+            {
+                try
+                {
+                    _procLockStream = new FileStream(LockFile,
+                        FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None);
+                    _procLockDepth = 1;
+                    return new LockReleaser();
+                }
+                catch (IOException ex)
+                {
+                    int hr = ex.HResult & 0xFFFF;
+                    bool sharing = hr == 32 /* ERROR_SHARING_VIOLATION */
+                                || hr == 33 /* ERROR_LOCK_VIOLATION   */;
+                    if (!sharing) break;
+                    System.Threading.Thread.Sleep(100);
+                }
+                catch (UnauthorizedAccessException) { break; }
+            }
+
+            // Couldn't acquire (persistent contention or network issue). Proceed
+            // WITHOUT the lock rather than blocking the user forever — this is the
+            // pre-existing last-writer-wins behaviour, never worse than before.
+            // depth=1 so the matching using-dispose stays balanced.
+            _procLockStream = null;
+            _procLockDepth = 1;
+            return new LockReleaser();
+        }
+
+        private sealed class LockReleaser : IDisposable
+        {
+            private bool _done;
+            public void Dispose()
+            {
+                if (_done) return;
+                _done = true;
+                if (_procLockDepth > 0) _procLockDepth--;
+                if (_procLockDepth == 0 && _procLockStream != null)
+                {
+                    try { _procLockStream.Dispose(); } catch { }
+                    _procLockStream = null;
+                }
+            }
         }
 
         public static void Initialize()
         {
-            lock (_lock) { LoadOrCreate(); }
+            lock (_lock) using (AcquireProcessLock()) { LoadOrCreate(); }
 
             // Ensure WIP division subfolders exist so engineers can
             // navigate to them from the first day without manual setup.
@@ -226,7 +326,7 @@ namespace PDMLite
         public static void UpsertFile(VaultFile f)
         {
             bool wasCreate;
-            lock (_lock)
+            lock (_lock) using (AcquireProcessLock())
             {
                 var doc = LoadOrCreate();
                 var files = doc.Root.Element("Files");
@@ -314,7 +414,7 @@ namespace PDMLite
 
         public static string GetFileStatus(string filePath)
         {
-            lock (_lock)
+            lock (_lock) using (AcquireProcessLock())
             {
                 var doc = LoadOrCreate();
                 foreach (var el in doc.Root.Element("Files").Elements("File"))
@@ -330,7 +430,7 @@ namespace PDMLite
         public static void SetFileStatus(string filePath, string status,
                                          string changedBy, string note = "")
         {
-            lock (_lock)
+            lock (_lock) using (AcquireProcessLock())
             {
                 var doc = LoadOrCreate();
 
@@ -360,7 +460,7 @@ namespace PDMLite
 
         public static void SetBrokenRefFlag(string filePath, bool hasBroken)
         {
-            lock (_lock)
+            lock (_lock) using (AcquireProcessLock())
             {
                 var doc = LoadOrCreate();
                 foreach (var el in doc.Root.Element("Files").Elements("File"))
@@ -390,7 +490,7 @@ namespace PDMLite
             if (string.IsNullOrWhiteSpace(filePath)) return 0;
             string fileName = Path.GetFileName(filePath);
 
-            lock (_lock)
+            lock (_lock) using (AcquireProcessLock())
             {
                 var doc = LoadOrCreate();
                 var toRemove = new List<XElement>();
@@ -447,7 +547,7 @@ namespace PDMLite
         // ════════════════════════════════════════════════════════════════
         public static void LockFile(string filePath, string lockedBy)
         {
-            lock (_lock)
+            lock (_lock) using (AcquireProcessLock())
             {
                 var doc = LoadOrCreate();
                 foreach (var el in doc.Root.Element("Files").Elements("File"))
@@ -466,7 +566,7 @@ namespace PDMLite
 
         public static void UnlockFile(string filePath)
         {
-            lock (_lock)
+            lock (_lock) using (AcquireProcessLock())
             {
                 var doc = LoadOrCreate();
                 foreach (var el in doc.Root.Element("Files").Elements("File"))
@@ -485,7 +585,7 @@ namespace PDMLite
 
         public static LockInfo GetLockInfo(string filePath)
         {
-            lock (_lock)
+            lock (_lock) using (AcquireProcessLock())
             {
                 var doc = LoadOrCreate();
                 foreach (var el in doc.Root.Element("Files").Elements("File"))
@@ -538,7 +638,7 @@ namespace PDMLite
             string machine)
         {
             if (string.IsNullOrWhiteSpace(filePath)) return;
-            lock (_lock)
+            lock (_lock) using (AcquireProcessLock())
             {
                 var doc = LoadOrCreate();
                 var sessions = EnsureOpenSessions(doc);
@@ -584,7 +684,7 @@ namespace PDMLite
             var others = new List<OpenSession>();
             if (string.IsNullOrWhiteSpace(filePath)) return others;
 
-            lock (_lock)
+            lock (_lock) using (AcquireProcessLock())
             {
                 var doc = LoadOrCreate();
                 var sessions = doc.Root.Element("OpenSessions");
@@ -634,7 +734,7 @@ namespace PDMLite
             string machine)
         {
             if (string.IsNullOrWhiteSpace(filePath)) return;
-            lock (_lock)
+            lock (_lock) using (AcquireProcessLock())
             {
                 var doc = LoadOrCreate();
                 var sessions = doc.Root.Element("OpenSessions");
@@ -666,7 +766,7 @@ namespace PDMLite
         public static void ClearMachineSessions(string machine)
         {
             if (string.IsNullOrWhiteSpace(machine)) return;
-            lock (_lock)
+            lock (_lock) using (AcquireProcessLock())
             {
                 var doc = LoadOrCreate();
                 var sessions = doc.Root.Element("OpenSessions");
@@ -693,7 +793,7 @@ namespace PDMLite
         // ════════════════════════════════════════════════════════════════
         public static string GetUserRole(string username)
         {
-            lock (_lock)
+            lock (_lock) using (AcquireProcessLock())
             {
                 var doc = LoadOrCreate();
                 foreach (var el in doc.Root.Element("Users").Elements("User"))
@@ -708,7 +808,7 @@ namespace PDMLite
 
         public static void AddUser(string username, string role)
         {
-            lock (_lock)
+            lock (_lock) using (AcquireProcessLock())
             {
                 var doc = LoadOrCreate();
                 var users = doc.Root.Element("Users");
@@ -764,7 +864,7 @@ namespace PDMLite
             var seenFileNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             var purged = new List<VaultFile>();
 
-            lock (_lock)
+            lock (_lock) using (AcquireProcessLock())
             {
                 var doc = LoadOrCreate();
 
@@ -884,7 +984,7 @@ namespace PDMLite
             string term = (filter ?? "").ToLower().Trim();
             var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
-            lock (_lock)
+            lock (_lock) using (AcquireProcessLock())
             {
                 var doc = LoadOrCreate();
                 foreach (var el in doc.Root.Element("Files").Elements("File"))
@@ -950,7 +1050,7 @@ namespace PDMLite
             // file (different path, same filename) never triggers a false conflict.
             string excludeFileName = System.IO.Path.GetFileName(exclude);
 
-            lock (_lock)
+            lock (_lock) using (AcquireProcessLock())
             {
                 var doc = LoadOrCreate();
                 foreach (var el in doc.Root.Element("Files").Elements("File"))
@@ -991,7 +1091,7 @@ namespace PDMLite
         private static void AddRequest(string requestType, string filePath,
             string requestedBy, string note)
         {
-            lock (_lock)
+            lock (_lock) using (AcquireProcessLock())
             {
                 var doc = LoadOrCreate();
                 if (doc.Root.Element("RevisionRequests") == null)
@@ -1029,7 +1129,7 @@ namespace PDMLite
             System.Func<XElement, bool> predicate)
         {
             var requests = new List<RevisionRequest>();
-            lock (_lock)
+            lock (_lock) using (AcquireProcessLock())
             {
                 var doc = LoadOrCreate();
                 var reqElement = doc.Root.Element("RevisionRequests");
@@ -1064,7 +1164,7 @@ namespace PDMLite
 
         public static void ResolveRequest(string id, string status)
         {
-            lock (_lock)
+            lock (_lock) using (AcquireProcessLock())
             {
                 var doc = LoadOrCreate();
                 var reqElement = doc.Root.Element("RevisionRequests");
@@ -1090,7 +1190,7 @@ namespace PDMLite
             var entries = new List<HistoryEntry>();
             string fileName = System.IO.Path.GetFileName(filePath);
 
-            lock (_lock)
+            lock (_lock) using (AcquireProcessLock())
             {
                 var doc = LoadOrCreate();
                 foreach (var el in doc.Root
@@ -1128,7 +1228,7 @@ namespace PDMLite
         public static List<string> GetTrackedFilePathsByExtension(string ext)
         {
             var paths = new List<string>();
-            lock (_lock)
+            lock (_lock) using (AcquireProcessLock())
             {
                 var doc = LoadOrCreate();
                 foreach (var el in doc.Root.Element("Files").Elements("File"))
@@ -1146,7 +1246,7 @@ namespace PDMLite
         public static string GetFileStatusByName(string filePath)
         {
             string fileName = System.IO.Path.GetFileName(filePath);
-            lock (_lock)
+            lock (_lock) using (AcquireProcessLock())
             {
                 var doc = LoadOrCreate();
                 // Exact path first
@@ -1174,7 +1274,7 @@ namespace PDMLite
         public static VaultFile GetFileRecord(string filePath)
         {
             if (string.IsNullOrEmpty(filePath)) return null;
-            lock (_lock)
+            lock (_lock) using (AcquireProcessLock())
             {
                 var doc = LoadOrCreate();
                 foreach (var el in doc.Root.Element("Files").Elements("File"))
@@ -1211,7 +1311,7 @@ namespace PDMLite
         public static VaultFile GetModelForDrawing(string drawingFilePath)
         {
             if (string.IsNullOrEmpty(drawingFilePath)) return null;
-            lock (_lock)
+            lock (_lock) using (AcquireProcessLock())
             {
                 var doc = LoadOrCreate();
 
@@ -1295,7 +1395,7 @@ namespace PDMLite
         {
             if (string.IsNullOrEmpty(modelFilePath)) return null;
             string modelName = System.IO.Path.GetFileName(modelFilePath);
-            lock (_lock)
+            lock (_lock) using (AcquireProcessLock())
             {
                 var doc = LoadOrCreate();
 
@@ -1364,7 +1464,7 @@ namespace PDMLite
             string modelName = System.IO.Path.GetFileName(modelFilePath);
             var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
-            lock (_lock)
+            lock (_lock) using (AcquireProcessLock())
             {
                 var doc = LoadOrCreate();
                 foreach (var el in doc.Root.Element("Files").Elements("File"))
@@ -1431,7 +1531,7 @@ namespace PDMLite
         public static List<ConfigEntry> GetConfigsForFile(string filePath)
         {
             if (string.IsNullOrEmpty(filePath)) return new List<ConfigEntry>();
-            lock (_lock)
+            lock (_lock) using (AcquireProcessLock())
             {
                 var doc = LoadOrCreate();
                 foreach (var el in doc.Root.Element("Files").Elements("File"))
