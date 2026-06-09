@@ -485,6 +485,51 @@ namespace PDMLite
                         }
                     }
 
+                    // Rule 3.6: configuration name must match its Part Number
+                    // (multi-config only). The whole system keys per-config
+                    // drawings (GetDrawingsForConfig), search cards and revision
+                    // tracking on the convention config name == PartNo. A new
+                    // configuration keeps its default name ("Default", "Copy of
+                    // ...") until the engineer renames it; catch the mismatch
+                    // here — BEFORE the config is referenced by an assembly,
+                    // because renaming a config later breaks those references.
+                    // Single-config files keep the default name and are exempt.
+                    if (allCfgsVS.Count > 1)
+                    {
+                        var nameMismatches = new List<string>();
+                        foreach (string c in allCfgsVS)
+                        {
+                            string cpn = PropertyValidator.GetProperty(
+                                doc, "PartNo", c);
+                            // Skip configs with no PartNo yet — nothing to match
+                            // against (Rule 3 only fills the active config).
+                            if (string.IsNullOrWhiteSpace(cpn)) continue;
+                            if (!string.Equals(c.Trim(), cpn.Trim(),
+                                    StringComparison.OrdinalIgnoreCase))
+                                nameMismatches.Add(
+                                    "  \"" + c + "\"  →  Part No " + cpn);
+                        }
+
+                        if (nameMismatches.Count > 0)
+                        {
+                            int choice = SwApp.SendMsgToUser2(
+                                "CONFIGURATION NAME DOES NOT MATCH PART NUMBER:\n\n" +
+                                string.Join("\n", nameMismatches) + "\n\n" +
+                                "By convention each configuration is named after " +
+                                "its Part Number. Per-config drawings, search and " +
+                                "revision tracking all rely on this.\n\n" +
+                                "Rename the configuration(s) in the tree to match " +
+                                "the Part No — do it now, before this file is used " +
+                                "in an assembly (renaming a config later breaks " +
+                                "references).\n\n" +
+                                "Save anyway?",
+                                (int)swMessageBoxIcon_e.swMbWarning,
+                                (int)swMessageBoxBtn_e.swMbYesNo);
+                            if (choice == (int)swMessageBoxResult_e.swMbHitNo)
+                                return 1;
+                        }
+                    }
+
                     // Rule 4: duplicate part number (another file already uses it)
                     string partNo = PropertyValidator.GetProperty(doc, "PartNo");
                     string conflict = DatabaseManager.FindPartNumberConflict(partNo, filePath);

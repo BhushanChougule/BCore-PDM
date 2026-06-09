@@ -556,7 +556,7 @@ FileSaveAsNotify2/FileSaveNotify → check lock → check released →
 
 warn if outside WIP folder → validate properties (show PropertyForm if missing) → 
 
-auto-weight → duplicate part number → check refs → allow save → post-save updates DB
+auto-weight → (multi-config) unique PartNo per config + config-name-matches-PartNo warn → duplicate part number → check refs → allow save → post-save updates DB
 
 
 
@@ -767,6 +767,8 @@ GetNextRevision() in VaultManager.cs handles this
 \- File-level status in multi-config: status (WIP/Released/Locked) is tracked per-FILE, not per-config — a multi-config part is one .sldprt, and OS read-only is file-level. Releasing one config (or its config-specific drawing, which chains to release the model) freezes ALL configurations read-only, and the release gate (ValidateAllConfigs) requires EVERY config's properties complete. This is intentional (all-or-nothing release); the multi-config confirm dialog and the chained drawing-release prompt both warn that all N configs freeze together. To edit any config again, Unlock or New Revision the whole file. Rule 3.5 on save: on the first save of a brand-new multi-config file the active config (just filled via Rule 3) is treated as established so it isn't re-prompted with a PropertyForm.
 
 \- Intra-file duplicate PartNo detection on save (Rule 3.5 in ValidateSave): when a file has multiple configs and two or more share the same PartNo (e.g. after creating a new config from an existing one), the "new" configs (not yet tracked in vault.xml) are identified, the UI switches to each in turn, shows a warning + PropertyForm pre-populated with PartNo/DrawingNo/Description, then blocks the save if duplicates remain. Uses DatabaseManager.GetConfigsForFile to distinguish new vs established configs.
+
+\- Config-name-matches-PartNo check on save (Rule 3.6 in ValidateSave, multi-config ONLY): the whole system keys per-config drawings (GetDrawingsForConfig), search cards and revision tracking on the convention config name == PartNo. A newly added config keeps its default name ("Default"/"Copy of …") until renamed; Rule 3.6 lists every config whose name ≠ its PartNo (case-insensitive, trimmed; configs with no PartNo yet are skipped) and warns with a Yes/No "Save anyway?" override (consistent with the outside-WIP and cross-file dup-PN warnings). No = go back and rename the config in the tree. Caught EARLY on purpose — renaming a config after it is referenced by an assembly breaks those references. Single-config files keep the default config name and are exempt (no rename needed).
 
 \- Per-config drawing support in OpenOrCreateDrawing: config-specific drawing ({configName}.slddrw) is searched for first; shared drawing ({modelBasename}.slddrw) is the fallback. When neither exists for a multi-config part, DrawingScopeDialog prompts ONCE — Common drawing (one for all configs, {modelBasename}.slddrw) vs This configuration only ({configName}.slddrw) vs Cancel — so the common-vs-per-config decision is an explicit user choice at creation time, not a guess. After that the file name on disk carries the decision and the prompt never repeats. Both patterns coexist — switching active config and clicking "Open Drawing" opens (or creates) the right drawing for that config. Single-config parts skip the prompt (always shared).
 
