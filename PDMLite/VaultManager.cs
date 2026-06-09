@@ -2477,8 +2477,14 @@ namespace PDMLite
 
                     if (refModel != null)
                     {
-                        string drawingNo = PropertyValidator.GetProperty(
-                            refModel, "DrawingNo");
+                        // Read from the config this drawing documents, not the
+                        // model's active config (which may be any config for a
+                        // multi-config model). Otherwise the released PDF gets
+                        // named after the wrong configuration's DrawingNo.
+                        string drwCfg = GetDrawingPrimaryConfig(drawingDoc);
+                        string drawingNo = !string.IsNullOrEmpty(drwCfg)
+                            ? PropertyValidator.GetProperty(refModel, "DrawingNo", drwCfg)
+                            : PropertyValidator.GetProperty(refModel, "DrawingNo");
                         if (!string.IsNullOrEmpty(drawingNo))
                             return drawingNo;
                     }
@@ -2506,8 +2512,15 @@ namespace PDMLite
                         .GetOpenDocumentByName(referencedPath) as ModelDoc2;
                     if (refModel != null)
                     {
-                        string pn = PropertyValidator.GetProperty(
-                            refModel, "PartNo");
+                        // Read PartNo from the SPECIFIC configuration this drawing
+                        // documents — not the model's currently-active config. A
+                        // multi-config model may have any config active (e.g. after
+                        // releasing a different config's drawing switched it), so
+                        // reading the active config would return the wrong PartNo.
+                        string drwCfg = GetDrawingPrimaryConfig(drawingDoc);
+                        string pn = !string.IsNullOrEmpty(drwCfg)
+                            ? PropertyValidator.GetProperty(refModel, "PartNo", drwCfg)
+                            : PropertyValidator.GetProperty(refModel, "PartNo");
                         if (!string.IsNullOrEmpty(pn)) return pn;
                     }
                 }
@@ -2516,6 +2529,25 @@ namespace PDMLite
 
             // Fallback to the drawing's own PartNo property (inherited).
             try { return PropertyValidator.GetProperty(drawingDoc, "PartNo"); }
+            catch { return ""; }
+        }
+
+        // ── Config the drawing's primary (first) model view references ────────
+        // Returns the ReferencedConfiguration of the first model view on the
+        // sheet, or "" if it can't be read (treat as "use active config").
+        public static string GetDrawingPrimaryConfig(ModelDoc2 drawingDoc)
+        {
+            try
+            {
+                DrawingDoc drw = (DrawingDoc)drawingDoc;
+                SolidWorks.Interop.sldworks.View sheet =
+                    (SolidWorks.Interop.sldworks.View)drw.GetFirstView();
+                if (sheet == null) return "";
+                SolidWorks.Interop.sldworks.View v =
+                    (SolidWorks.Interop.sldworks.View)sheet.GetNextView();
+                if (v == null) return "";
+                return v.ReferencedConfiguration ?? "";
+            }
             catch { return ""; }
         }
 
