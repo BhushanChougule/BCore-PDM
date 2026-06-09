@@ -61,7 +61,13 @@
     <Compile Include="BulkReleaseForm.cs">
       <SubType>Form</SubType>
     </Compile>
+    <Compile Include="ConfigRevisionPickerForm.cs">
+      <SubType>Form</SubType>
+    </Compile>
     <Compile Include="DatabaseManager.cs" />
+    <Compile Include="DrawingScopeDialog.cs">
+      <SubType>Form</SubType>
+    </Compile>
     <Compile Include="EmailManager.cs" />
     <Compile Include="ExportManager.cs" />
     <Compile Include="PendingRequestsForm.cs">

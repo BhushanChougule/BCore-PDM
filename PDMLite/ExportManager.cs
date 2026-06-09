@@ -38,6 +38,26 @@ namespace PDMLite
             }
         }
 
+        // Export STEP only — called once per config during multi-config release.
+        // The active configuration at call time determines the exported geometry.
+        public static void ExportStepOnly(ModelDoc2 doc, string exportRoot,
+            string stamp)
+        {
+            string stepFolder = Path.Combine(exportRoot, "STEP");
+            Directory.CreateDirectory(stepFolder);
+            ExportFile(doc, Path.Combine(stepFolder, stamp + ".step"));
+        }
+
+        // Export flat pattern DXF only — called for the original active config
+        // after the per-config STEP loop in a multi-config release.
+        public static void ExportFlatPatternOnly(ModelDoc2 doc, string exportRoot,
+            string stamp)
+        {
+            string dxfFolder = Path.Combine(exportRoot, "DXF");
+            Directory.CreateDirectory(dxfFolder);
+            ExportFlatPattern(doc, Path.Combine(dxfFolder, stamp + "_FLAT.dxf"));
+        }
+
         // Universal export — SOLIDWORKS picks format from file extension
         private static void ExportFile(ModelDoc2 doc, string outPath)
         {

@@ -2,6 +2,7 @@
 using SolidWorks.Interop.swconst;
 using System;
 using System.Collections.Generic;
+using System.Linq;
 
 namespace PDMLite
 {
@@ -98,6 +99,85 @@ namespace PDMLite
                          (int)swCustomPropertyAddOption_e.swCustomPropertyReplaceValue);
             }
             catch { }
+        }
+
+        // Returns all configuration names in the document (parts/assemblies only).
+        // For drawings returns an empty list — drawings have no configurations.
+        public static List<string> GetConfigNames(ModelDoc2 doc)
+        {
+            var names = new List<string>();
+            try
+            {
+                if (doc.GetType() == (int)swDocumentTypes_e.swDocDRAWING) return names;
+                object raw = doc.GetConfigurationNames();
+                string[] arr = raw as string[];
+                if (arr != null) names.AddRange(arr);
+            }
+            catch { }
+            return names;
+        }
+
+        // Read a single property from a specific named configuration.
+        // Useful when the caller knows which config to target (e.g. during
+        // multi-config save or per-config revision bump).
+        public static string GetProperty(ModelDoc2 doc, string propName,
+            string configName)
+        {
+            try
+            {
+                var cpm = doc.Extension.get_CustomPropertyManager(configName ?? "");
+                string val = "", resolvedVal = "";
+                cpm.Get4(propName, false, out val, out resolvedVal);
+                return resolvedVal ?? "";
+            }
+            catch { return ""; }
+        }
+
+        // Write a property to a specific named configuration.
+        public static void SetProperty(ModelDoc2 doc, string propName,
+            string value, string configName)
+        {
+            try
+            {
+                var cpm = doc.Extension.get_CustomPropertyManager(configName ?? "");
+                cpm.Add3(propName,
+                         (int)swCustomInfoType_e.swCustomInfoText,
+                         value,
+                         (int)swCustomPropertyAddOption_e.swCustomPropertyReplaceValue);
+            }
+            catch { }
+        }
+
+        // Validate all configurations and return a dictionary of
+        //   configName → list of missing/empty required field names
+        // for every config that has at least one problem. An empty dict means
+        // all configurations are complete. Only call on parts/assemblies.
+        public static Dictionary<string, List<string>> ValidateAllConfigs(ModelDoc2 doc)
+        {
+            var result = new Dictionary<string, List<string>>(
+                StringComparer.OrdinalIgnoreCase);
+            try
+            {
+                if (doc.GetType() == (int)swDocumentTypes_e.swDocDRAWING)
+                    return result;
+
+                foreach (string cfgName in GetConfigNames(doc))
+                {
+                    var missing = new List<string>();
+                    var cpm = doc.Extension.get_CustomPropertyManager(cfgName);
+                    foreach (string propName in RequiredProperties)
+                    {
+                        string val = "", resolvedVal = "";
+                        bool ok = cpm.Get4(propName, false, out val, out resolvedVal);
+                        if (!ok || string.IsNullOrWhiteSpace(resolvedVal))
+                            missing.Add(propName);
+                    }
+                    if (missing.Count > 0)
+                        result[cfgName] = missing;
+                }
+            }
+            catch { }
+            return result;
         }
 
         // Auto-calculate PartWeight from SOLIDWORKS mass properties

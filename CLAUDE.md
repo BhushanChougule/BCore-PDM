@@ -120,7 +120,9 @@ PartNo, DrawingNo, Description, DrawnBy, DrawnDate, Material1, FinishType, Revis
 
 Main entry point, ISwAddin implementation.
 
-\- Hooks: FileSaveNotify, FileSaveAsNotify2, FileSavePostNotify, DestroyNotify
+\- Hooks: FileSaveNotify, FileSaveAsNotify2, FileSavePostNotify, DestroyNotify, ActiveConfigChangePostNotify (parts/assemblies)
+
+\- ActiveConfigChangePostNotify (parts + assemblies only — drawings have no configs): fires when the user switches the active configuration. Calls OnActiveConfigChanged() → TaskPaneHost.RefreshPanel() so the Active File card re-reads the now-active config's PartNo/Revision/Description. ActiveDocChangeNotify does NOT fire on a config switch (only a document switch), so this is the only signal that the active config changed. Hooked/detached per-doc alongside the save hooks in DocEventHandler
 
 \- OnFileSaveNotify: suppress-flag check → check lock → check released (blocks EVERYONE incl. Masters) → warn if outside WIP folder (Yes/No override) → validate properties → auto-weight → duplicate part number → broken refs
 
@@ -182,7 +184,7 @@ RevisionRequest.RequestType = "Unlock" | "Revision" | "Release"
 
 Methods:
 
-\- Initialize, UpsertFile (audit-logs Create vs Save), GetFileStatus, SetFileStatus
+\- Initialize, UpsertFile (audit-logs Create vs Save; rewrites the per-config <Configurations> block from the live doc on every save — but ONLY when the incoming list is non-empty: every real part/assembly has ≥1 config, so an empty list means GetConfigNames failed transiently and the existing block is PRESERVED rather than wiped, so a transient enumeration failure can't collapse a multi-config file to a single phantom config), GetFileStatus, SetFileStatus
 
 \- SetBrokenRefFlag, LockFile, UnlockFile, GetLockInfo
 
@@ -256,7 +258,7 @@ Core vault operations.
 
 \- IsToolboxComponent(comp) → heuristic: path contains "\\Toolbox\\". Secondary net; PartType=Purchased is the authoritative mechanism
 
-\- GetComponentPartType(comp) → reads PartType from the loaded component model ("" if unreadable)
+\- GetComponentPartType(comp) → reads PartType from the loaded component model ("" if unreadable). Reads the property from the config the ASSEMBLY references (comp.ReferencedConfiguration), NOT the component's active in-memory config — PartType is config-specific, so a shared child that is Manufactured in one config and Purchased in another is classified by the config actually used in the assembly; falls back to the active-config read when the referenced config is unknown
 
 \- RemoveFromVault(doc) → Master only; retires the active file — MOVES its WIP copy, RELEASED snapshot and exports (STEP + PDF) to SCRAP (timestamped) and deletes the vault record; BLOCKED while Released (Unlock/New Revision first); matching drawing is ALWAYS scrapped automatically (even if Released — a drawing without its model is blank and useless); confirmation dialog; audit-logged. Orphans are NOT handled here (can't open a deleted file) — SearchFiles auto-purges them instead
 
@@ -270,7 +272,7 @@ Core vault operations.
 
 \- ViewMyRequests() → Engineer views their own requests (MessageBox)
 
-\- OpenOrCreateDrawing(doc) → searches for matching .slddrw (model folder + every WIP division); opens it if found, else creates a new drawing FROM the model immediately (no prompt) — opens the default drawing template and calls DrawingDoc.InsertModelInPredefinedView to populate its predefined views (the "Make Drawing from Part/Assembly" equivalent); falls back to Create3rdAngleViews2 if the template has no predefined views, so the sheet is never blank. The part/assembly side of the context-aware Open button
+\- OpenOrCreateDrawing(doc) → searches for matching .slddrw (model folder + every WIP division); opens it if found, else creates a new drawing FROM the model immediately (no prompt) — opens the default drawing template and calls DrawingDoc.InsertModelInPredefinedView to populate its predefined views (the "Make Drawing from Part/Assembly" equivalent); falls back to Create3rdAngleViews2 if the template has no predefined views, so the sheet is never blank. The part/assembly side of the context-aware Open button. Multi-config: searches for config-specific drawing ({configName}.slddrw) FIRST, then falls back to the shared drawing ({modelBasename}.slddrw); if NEITHER exists, prompts ONCE via DrawingScopeDialog (Common drawing for ALL configs → {modelBasename}.slddrw, or This configuration only → {configName}.slddrw, or Cancel) — the chosen file name on disk carries the decision so the prompt never repeats; the new drawing is auto-saved to the model's folder via SuppressSaveValidation; config name is sanitised for Windows filename safety before use. Single-config always creates the shared {modelBasename}.slddrw with no prompt. Unsaved in-memory drawings are matched to the active config via GetDrawingReferencedConfigs.
 
 \- OpenReferencedModel(doc) → from a drawing, opens (or activates if already open) the part/assembly it references; warns if the referenced model can't be found. The drawing side of the context-aware Open button
 
@@ -278,7 +280,9 @@ Core vault operations.
 
 \- GetDrawingNo(doc) → gets DrawingNo from referenced model
 
-\- GetDrawingPartNo(doc) → gets PartNo from the model a drawing references (falls back to the drawing's own PartNo, then ""); used by the task-pane Active File card so a drawing shows its part/assembly's number instead of literal "Drawing"
+\- GetDrawingPartNo(doc) → gets PartNo from the model a drawing references, reading the SPECIFIC config the drawing documents (via GetDrawingPrimaryConfig) NOT the model's active config (which may be any config after a release/export loop switched it); falls back to the active-config read, then the drawing's own PartNo, then ""; used by the task-pane Active File card. GetDrawingNo and the drawing-release revision sync use the same config-specific read.
+
+\- GetDrawingPrimaryConfig(doc) → returns the ReferencedConfiguration of the drawing's first model view (the config the drawing documents), or "" if unreadable (treat as "use active config"). Underpins GetDrawingPartNo/GetDrawingNo and the drawing-release rev sync so a config-specific drawing always reports its OWN config's PartNo/DrawingNo/Revision.
 
 \- GetDrawingReferencedModel(doc) → gets path of model referenced by drawing
 
@@ -292,7 +296,11 @@ Core vault operations.
 
 \### ExportManager.cs
 
-\- ExportAll(doc, exportRoot, stamp) → routes to correct export by file type
+\- ExportAll(doc, exportRoot, stamp) → routes to correct export by file type (single-config path)
+
+\- ExportStepOnly(doc, exportRoot, stamp) → exports STEP only; active config at call time = exported geometry. Called once per config in the multi-config release loop
+
+\- ExportFlatPatternOnly(doc, exportRoot, stamp) → exports flat-pattern DXF only; called once for the original active config after the multi-config STEP loop
 
 \- ExportDrawingPdf(doc, outPath) → drawing to PDF (all sheets)
 
@@ -322,7 +330,7 @@ Sections (top to bottom):
 
 2\. Search (auto-search 600ms timer, ≥2 chars, Enter key via ProcessCmdKey)
 
-3\. Active File card (filename, status, partNo, revision, lockedBy)
+3\. Active File card (filename, status, partNo, revision, lockedBy). Multi-config: the filename shows a "(N configs)" suffix when the part/assembly has more than one configuration; partNo + revision reflect the ACTIVE config (config name = Part No), refreshed live on every config switch via the ActiveConfigChangePostNotify hook. configCount comes from PropertyValidator.GetConfigNames(doc)
 
 4\. Master Actions (Open Drawing/Unlock/Release/New Revision/Rollback) — Masters only
 
@@ -340,7 +348,7 @@ Open Drawing button label when a drawing is active: VaultManager.GetDrawingOpenL
 
 9\. Remove from Vault button (Masters only, cSwRed — muted SOLIDWORKS red) — DoAction("remove") → VaultManager.RemoveFromVault on the active file (moves to SCRAP + deletes record; blocked if Released)
 
-Search results are capped at 50; when SearchFiles reports truncated=true a "Showing first N — refine your search" hint is rendered below the cards.
+Search results are capped at 50; when SearchFiles reports truncated=true a "Showing first N — refine your search" hint is rendered below the cards. SECOND cap at the CARD level (MaxCards=50 in RunSearch): SearchFiles caps at 50 FILES, but a multi-config part expands to one card PER configuration, so the card list is trimmed to MaxCards and truncated is forced true (the same hint shows) — prevents hundreds of cards freezing the panel even when only a few files matched.
 
 
 
@@ -350,9 +358,9 @@ No longer uses StringBuilder/AppendLine — individual labels prevent text overl
 
 
 
-Search results: MERGED cards — a part/assembly and its drawing collapse into ONE card keyed by shared base filename (the model is primary; it owns PartNo + Description). RunSearch groups the flat SearchFiles list by basename, then fills in the counterpart that did NOT match the term (GetModelForDrawing / GetDrawingPathForModel) so both buttons can be offered. Each card shows: thick left status bar with the status text painted VERTICALLY (rotated -90°, custom Panel.Paint), file name (no extension), part number, description, and TWO buttons side by side — "Open PRT"/"Open ASM" (cBrand; disabled+greyed when no model record, e.g. orphan drawing) and "Open DRW" (cBrandDark); abbreviated so labels don't clip at the narrow task-pane width. SearchGroup is a private nested class in TaskPaneControl.
+Search results: PER-CONFIG cards — ONE card per matching configuration (config name = Part No by convention, so a part with 10 configs can yield up to 10 cards, each carrying that config's own PartNo, Description and Revision — never the active config's). RunSearch calls BuildConfigCards(results, term): for each model file it calls AddModelConfigCards, which expands the file's Configurations list and emits a card for every config whose PartNo/Description contains the term (or every config when the file matched by filename, or it is single-config; never drops a matched file — falls back to all configs if none text-match). A drawing result maps back to its model via GetModelForDrawing and is SKIPPED if that model also matched (it is expanded under the model instead); a true orphan drawing (no model) gets a drawing-only card. Each config's drawing comes from DatabaseManager.GetDrawingsForConfig(modelPath, configName) (config-specific OR a shared config-table drawing; its basename fallback matches the raw config name OR its filename-sanitised form via SanitizeFileName, so a config-specific drawing whose PartNo contains a filename-illegal char — saved on disk with '_' substitutions — still resolves, keeping its rev in sync during New Revision). Each card shows: thick left status bar with the status text painted VERTICALLY (rotated -90°, custom Panel.Paint), file name (no extension), "PartNo   REV x" line, description, and TWO buttons side by side — "Open PRT"/"Open ASM" (cBrand; disabled+greyed when no model record, e.g. orphan drawing) and "Open DRW" (cBrandDark); abbreviated so labels don't clip at the narrow task-pane width. SearchGroup is a private nested class in TaskPaneControl, now per-config (carries ConfigName, Revision, TotalConfigs).
 
-Open PRT/ASM → OpenFile(modelPath). Open DRW → OpenDrawingResult(modelPath, drawingPath): opens the drawing if it exists, else opens the model and calls VaultManager.OpenOrCreateDrawing to make one (same as the task-pane Open Drawing button).
+Open PRT/ASM → OpenFileConfig(modelPath, configName): opens (or activates) the model then switches it to the card's configuration via ModelDoc2.ShowConfiguration2. Open DRW → OpenDrawingResult(modelPath, drawingPath, configName): opens the drawing if it exists, else opens the model on the right config and calls VaultManager.OpenOrCreateDrawing to make one (same as the task-pane Open Drawing button).
 
 Uses ActivateDoc3 if file already open, OpenDoc6 with correct type if not. Opens the canonical WIP copy (read-only when Released), never the RELEASED snapshot.
 
@@ -548,19 +556,29 @@ FileSaveAsNotify2/FileSaveNotify → check lock → check released →
 
 warn if outside WIP folder → validate properties (show PropertyForm if missing) → 
 
-auto-weight → duplicate part number → check refs → allow save → post-save updates DB
+auto-weight → (multi-config) unique PartNo per config (block) + combined per-config health warn (name==PartNo + completeness) → duplicate part number → check refs → allow save → post-save updates DB
 
 
 
 \### Master Release (Part/Assembly)
 
-validate properties → check broken refs → (assembly) check child parts Released →
+validate ALL configs (ValidateAllConfigs) → offer PropertyForm for active config → check broken refs →
 
-(assembly) drawing-release gate: each component with a drawing must have it Released
+(assembly) check child parts Released → (assembly) drawing-release gate →
 
-(blocks); Manufactured components with no drawing warn (override); Purchased/Toolbox
+confirm dialog: single-config shows PartNo/Rev; multi-config lists all configs with PartNo + Rev →
 
-skipped → archive old exports → export STEP → copy to RELEASED → set read-only → update DB
+auto-fill CheckedBy, CheckedDate, PartWeight on EVERY configuration →
+
+archive old exports + export files:
+
+\- Single-config: ArchiveOldExports(partNoClean) + ExportAll (STEP + DXF)
+
+\- Multi-config: archive per-config → ExportStepOnly per config (switch config before each) → restore active config → ExportFlatPatternOnly once (sheet metal DXF for original active config)
+
+→ copy to RELEASED → set read-only → update DB
+
+Success dialog lists all configs (PN + Rev) for multi-config files.
 
 
 
@@ -594,19 +612,21 @@ blocker dialogs still show.
 
 \### Master New Revision
 
-remove read-only → archive SW file to ARCHIVE\\{type}\\ → bump revision letter →
+\- Single-config: confirm dialog (current REV → new REV) → remove read-only → archive SW file to ARCHIVE\\{type}\\ → bump revision letter → save → reset to WIP in DB → StartDrawingRevisionWith (basename drawing) → warn about parent assemblies
 
-save → reset to WIP in DB → auto-start associated drawing revision (archive drawing as
+\- Multi-config: ConfigRevisionPickerForm (checklist, all configs pre-checked, current→next per config) → Master picks which configs to bump → archive SW file (file-level, at active config's currentRev) → reopen writable → loop: SetProperty(Revision, nextRevForConfig, cfgName) for each selected config → save → reset to WIP → drawing revision: collect unique drawings (FindDrawingPath for shared + GetDrawingsForConfig per selected config) → StartDrawingRevisionWith for each unique drawing → warn parent assemblies
 
-matched pair at old rev, return to WIP — drawing rev letter syncs at drawing release) →
+\- suppressPrompts (bulk approve): skips picker, bumps ALL configs automatically
 
-warn about parent assemblies that reference this file
+\- Archive naming: file-level (one SW archive per revision bump, regardless of config count). Named "{basename} REV {activeConfigRev}.ext". COLLISION GUARD via shared helper CollisionSafeArchivePath(dir, baseName, rev, ext, multiCfg) — used by BOTH New Revision AND Rollback's archive-current steps (model + drawing): for a multi-config file a partial bump can leave the active config's rev unchanged, and a rollback can hit a rev a New Revision already archived, so two different file snapshots would map to the same name and ArchiveCopy (delete-then-copy) would silently overwrite the earlier one. When the target already exists, a yyyyMMdd_HHmmss stamp is inserted into the basename BEFORE " REV " ("{basename}_{stamp} REV {rev}.ext") so both snapshots survive AND RollbackDialog.ExtractRevision (parses the token after " REV ") still reads the rev letter. Single-config keeps the old overwrite behaviour (re-archiving the same rev is harmless)
+
+\- StartDrawingRevisionWith(modelPath, currentRev, nextRev, user, explicitDrwPath=null) — optional explicit drawing path lets multi-config path pass a pre-resolved drawing (skips FindDrawingPath)
 
 
 
 \### Drawing / Assembly linkage (Option B — automatic)
 
-\- Drawing filename MUST match the part/assembly basename ({name}.slddrw). PDF export name still comes from the DrawingNo property.
+\- Drawing filename conventions: single-config uses {modelBasename}.slddrw (shared); multi-config ALSO supports {configName}.slddrw (config-specific, takes priority over shared). Both patterns can coexist — a shared drawing covers all configs; a config-specific drawing covers only that config. PDF export name still comes from the DrawingNo property.
 
 \- Part rev drives the drawing rev (part is the master). Drawing letter syncs to the model immediately at New Revision time (StartDrawingRevisionWith opens the drawing, sets Revision = nextRev, saves, closes). The sync at drawing-release time is still a no-op confirmation.
 
@@ -631,6 +651,8 @@ set read-only → update DB → if a matching drawing archive exists at the targ
 offer to roll the drawing back too (archives current drawing, restores, updates RELEASED) →
 
 warn about parent assemblies
+
+\- Multi-config rollback: archives are FILE-level snapshots, so rollback reverts the WHOLE file (every config) to the archived revision — configs independently bumped to a newer rev since that archive lose those changes. Rollback is NOT config-aware; a multi-config file shows a Yes/No warning (config count + "ALL configurations revert together") that the Master must acknowledge before proceeding.
 
 
 
@@ -737,6 +759,18 @@ GetNextRevision() in VaultManager.cs handles this
 \- Multi-user conflict detection: opening a WIP file already open by another engineer warns "FILE ALREADY OPEN — last save wins" (soft presence in vault.xml <OpenSessions>, distinct from the Master Lock). Presence follows the active doc (assembly/drawing components don't register), warns once per open, cleared on close; per-machine sessions wiped on addin load/unload + 24h staleness backstop so a crash never leaves a false warning
 
 \- Bulk operations (all in PendingRequestsForm, so the task pane stays uncluttered): per-column checkboxes + "Approve Selected" (type-aware via VaultManager.BulkApprove), green "Approve All Pending", and blue "Bulk Release…" → BulkReleaseForm (pick any WIP files, release in one pass). Batch releases ordered parts→assemblies→drawings; one summary dialog reports done/skipped; blocked files stay pending
+
+\- Multi-config Release: ValidateAllConfigs before release; CheckedBy/CheckedDate/PartWeight set on every config; one STEP per config exported (ExportStepOnly per config, config switched before each); flat DXF once for original active config (ExportFlatPatternOnly); confirm + success dialogs list all configs with PN + Rev. Both config-switch loops (auto-fill + STEP export) are wrapped in try/finally so an export failure can't leave the model on the wrong config. STEP export has a collision guard: two configs sharing PartNo+Rev would overwrite each other's .step, so the duplicate is skipped and reported in one warning dialog. The drawing-release revision sync reads the rev from the drawing's documented config (GetDrawingPrimaryConfig), not the model's active config.
+
+\- Multi-config New Revision: ConfigRevisionPickerForm checklist (all configs pre-checked, current→next per config); Master selects which configs to bump; selected configs get their own next Revision via SetProperty(doc, "Revision", nextRev, cfgName); drawings collected via FindDrawingPath (shared) + GetDrawingsForConfig per selected config. Each drawing is bumped to the CORRECT revision: a config-specific drawing gets ITS config's next rev (from cfgNextRevs), while the shared {modelBasename}.slddrw keeps the file-level active-config rev (first-assignment-wins map drawing→rev). suppressPrompts bumps all configs with no picker; archive naming remains file-level
+
+\- File-level status in multi-config: status (WIP/Released/Locked) is tracked per-FILE, not per-config — a multi-config part is one .sldprt, and OS read-only is file-level. Releasing one config (or its config-specific drawing, which chains to release the model) freezes ALL configurations read-only, and the release gate (ValidateAllConfigs) requires EVERY config's properties complete. This is intentional (all-or-nothing release); the multi-config confirm dialog and the chained drawing-release prompt both warn that all N configs freeze together. To edit any config again, Unlock or New Revision the whole file. Rule 3.5 on save: on the first save of a brand-new multi-config file the active config (just filled via Rule 3) is treated as established so it isn't re-prompted with a PropertyForm.
+
+\- Intra-file duplicate PartNo detection on save (Rule 3.5 in ValidateSave): when a file has multiple configs and two or more share the same PartNo (e.g. after creating a new config from an existing one), the "new" configs (not yet tracked in vault.xml) are identified, the UI switches to each in turn, shows a warning + PropertyForm pre-populated with PartNo/DrawingNo/Description, then blocks the save if duplicates remain. Uses DatabaseManager.GetConfigsForFile to distinguish new vs established configs.
+
+\- Per-config health warning on save (Rule 3.6 in ValidateSave, multi-config ONLY, non-blocking): ONE combined dialog (so a freshly-added config never triggers a chain of pop-ups) that scans every config once and lists each affected config on a single line with ALL its issues, then a single Yes/No "Save anyway?" override. Two checks combined: (a) config name ≠ its PartNo — the convention config name == PartNo underpins per-config drawings (GetDrawingsForConfig), search and revision tracking; configs with no PartNo yet are skipped; caught EARLY because renaming a config after an assembly references it breaks those references; (b) any NON-active config missing required properties (via ValidateAllConfigs) — Rule 3 already hard-blocks the ACTIVE config, the others are otherwise only validated at the release gate, so an incomplete config could go unnoticed until release blocks. Single-config files are exempt from both. Rule 3.5's duplicate-PartNo block stays SEPARATE — it's an interactive PropertyForm fix flow that hard-blocks the save, not a passive warning, and it short-circuits (return 1) before Rule 3.6 runs.
+
+\- Per-config drawing support in OpenOrCreateDrawing: config-specific drawing ({configName}.slddrw) is searched for first; shared drawing ({modelBasename}.slddrw) is the fallback. When neither exists for a multi-config part, DrawingScopeDialog prompts ONCE — Common drawing (one for all configs, {modelBasename}.slddrw) vs This configuration only ({configName}.slddrw) vs Cancel — so the common-vs-per-config decision is an explicit user choice at creation time, not a guess. After that the file name on disk carries the decision and the prompt never repeats. Both patterns coexist — switching active config and clicking "Open Drawing" opens (or creates) the right drawing for that config. Single-config parts skip the prompt (always shared).
 
 
 

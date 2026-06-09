@@ -346,6 +346,18 @@ namespace PDMLite
                         string statusDisplay =
                             string.IsNullOrEmpty(modelStatus) ? "WIP" : modelStatus;
 
+                        // If the referenced model has multiple configs, releasing
+                        // it freezes EVERY config (status is file-level) — warn so
+                        // the user isn't surprised that sibling configs lock too.
+                        int refCfgCount = DatabaseManager
+                            .GetConfigsForFile(referencedModel).Count;
+                        string multiCfgNote = refCfgCount > 1
+                            ? "\n\nNOTE: the " + (isRefAsm ? "assembly" : "part") +
+                              " has " + refCfgCount + " configurations — releasing " +
+                              "it freezes ALL of them (read-only), and every config " +
+                              "must have complete properties to pass validation."
+                            : "";
+
                         var chain = MessageBox.Show(
                             "The referenced " + (isRefAsm ? "Assembly" : "Part") +
                             " is still " + statusDisplay + ".\n\n" +
@@ -354,7 +366,7 @@ namespace PDMLite
                                 "  (" + (isRefAsm ? "Assembly" : "Part") + ")\n" +
                             "  • " + Path.GetFileName(filePath) + "  (Drawing)\n\n" +
                             "Each file's properties and references are still " +
-                            "validated before release.",
+                            "validated before release." + multiCfgNote,
                             "BCore PDM — Release Drawing + " +
                                 (isRefAsm ? "Assembly" : "Part"),
                             MessageBoxButtons.YesNo, MessageBoxIcon.Question);
@@ -513,37 +525,40 @@ namespace PDMLite
                 }
             }
 
-            // ── Validate properties (Parts and Assemblies only) ───────────
+            // ── Validate properties — all configurations ─────────────────
             if (!isDrawing)
             {
-                var validation = PropertyValidator.Validate(doc);
-                if (!validation.IsValid)
+                var cfgIssues = PropertyValidator.ValidateAllConfigs(doc);
+                if (cfgIssues.Count > 0)
                 {
-                    // Show PropertyForm so the Master can fill missing fields
-                    // without closing this dialog and doing a manual save first.
-                    using (var form = new PropertyForm(doc, validation.EmptyFields))
+                    // Offer PropertyForm for the active config first so the
+                    // Master can fix its fields without a separate manual save.
+                    string activeCfg = (doc.GetActiveConfiguration()
+                        as SolidWorks.Interop.sldworks.Configuration)?.Name ?? "";
+                    if (cfgIssues.ContainsKey(activeCfg))
                     {
-                        form.ShowDialog();
-                        if (!form.PropertiesSaved)
+                        using (var form = new PropertyForm(
+                            doc, cfgIssues[activeCfg]))
                         {
-                            MessageBox.Show(
-                                "Release blocked — required properties incomplete:\n\n• " +
-                                string.Join("\n• ", validation.EmptyFields),
-                                "BCore PDM — Release Blocked",
-                                MessageBoxButtons.OK,
-                                MessageBoxIcon.Stop);
-                            return;
+                            form.ShowDialog();
+                            if (form.PropertiesSaved)
+                                cfgIssues = PropertyValidator.ValidateAllConfigs(doc);
                         }
                     }
-                    var recheck = PropertyValidator.Validate(doc);
-                    if (!recheck.IsValid)
+
+                    if (cfgIssues.Count > 0)
                     {
-                        MessageBox.Show(
-                            "Release blocked — required properties still incomplete:\n\n• " +
-                            string.Join("\n• ", recheck.EmptyFields),
+                        var sb2 = new StringBuilder(
+                            "Release blocked — required properties incomplete:\n");
+                        foreach (var kv in cfgIssues)
+                        {
+                            sb2.AppendLine();
+                            sb2.AppendLine("Config \"" + kv.Key + "\":");
+                            sb2.Append("  • " + string.Join("\n  • ", kv.Value));
+                        }
+                        MessageBox.Show(sb2.ToString(),
                             "BCore PDM — Release Blocked",
-                            MessageBoxButtons.OK,
-                            MessageBoxIcon.Stop);
+                            MessageBoxButtons.OK, MessageBoxIcon.Stop);
                         return;
                     }
                 }
@@ -578,8 +593,14 @@ namespace PDMLite
 
                     if (refModel != null)
                     {
-                        string partRev = PropertyValidator.GetProperty(
-                            refModel, "Revision");
+                        // Read the revision from the SPECIFIC config this drawing
+                        // documents — not the model's active config (which may be
+                        // any config after a release/export loop switched it).
+                        // Mirrors GetDrawingPartNo / GetDrawingNo.
+                        string drwCfg = GetDrawingPrimaryConfig(doc);
+                        string partRev = !string.IsNullOrEmpty(drwCfg)
+                            ? PropertyValidator.GetProperty(refModel, "Revision", drwCfg)
+                            : PropertyValidator.GetProperty(refModel, "Revision");
                         if (!string.IsNullOrEmpty(partRev))
                         {
                             rev = partRev;
@@ -613,17 +634,57 @@ namespace PDMLite
             string fileTypeLabel = isDrawing ? "Drawing No" : "Part No";
             if (!suppressPrompts && !chainedRelease)
             {
+                string confirmBody;
+                if (!isDrawing)
+                {
+                    var relCfgsCfm = PropertyValidator.GetConfigNames(doc);
+                    if (relCfgsCfm.Count > 1)
+                    {
+                        var cfgLines = string.Join("\n", relCfgsCfm.Select(c =>
+                        {
+                            string cp = PropertyValidator.GetProperty(doc, "PartNo", c);
+                            string cr = PropertyValidator.GetProperty(doc, "Revision", c);
+                            return "  • " + (string.IsNullOrEmpty(cp) ? c : cp)
+                                + "   REV " + cr;
+                        }));
+                        confirmBody =
+                            "File          : " + Path.GetFileName(filePath) + "\n\n" +
+                            "Configurations:\n" + cfgLines + "\n\n" +
+                            "This will:\n" +
+                            "  • Auto-fill Part Weight per config\n" +
+                            "  • Export STEP per config\n" +
+                            "  • Lock file as Released\n" +
+                            "  • Log the revision\n\n" +
+                            "NOTE: status is file-level — releasing freezes ALL " +
+                            (relCfgsCfm.Count) + " configurations (read-only). " +
+                            "Use Unlock or New Revision to edit any of them again.";
+                    }
+                    else
+                    {
+                        confirmBody =
+                            fileTypeLabel + "  : " + partNo + "\n" +
+                            "Revision      : REV " + rev + "\n" +
+                            "File          : " + Path.GetFileName(filePath) + "\n\n" +
+                            "This will:\n" +
+                            "  • Auto-fill Part Weight\n  • Export STEP file\n" +
+                            "  • Lock file as Released\n" +
+                            "  • Log the revision";
+                    }
+                }
+                else
+                {
+                    confirmBody =
+                        fileTypeLabel + "  : " + partNo + "\n" +
+                        "Revision      : REV " + rev + "\n" +
+                        "File          : " + Path.GetFileName(filePath) + "\n\n" +
+                        "This will:\n" +
+                        "  • Export PDF\n" +
+                        "  • Lock file as Released\n" +
+                        "  • Log the revision";
+                }
+
                 var confirm = MessageBox.Show(
-                    "Release this file?\n\n" +
-                    fileTypeLabel + "  : " + partNo + "\n" +
-                    "Revision      : REV " + rev + "\n" +
-                    "File          : " + Path.GetFileName(filePath) + "\n\n" +
-                    "This will:\n" +
-                    (isDrawing
-                        ? "  • Export PDF\n"
-                        : "  • Auto-fill Part Weight\n  • Export STEP file\n") +
-                    "  • Lock file as Released\n" +
-                    "  • Log the revision",
+                    "Release this file?\n\n" + confirmBody,
                     "BCore PDM — Confirm Release",
                     MessageBoxButtons.YesNo,
                     MessageBoxIcon.Question);
@@ -631,27 +692,133 @@ namespace PDMLite
                 if (confirm != DialogResult.Yes) return;
             }
 
-            // ── Auto-fill fields ──────────────────────────────────────────
-            PropertyValidator.SetProperty(doc, "CheckedBy",
-                user.Length >= 2 ? user.Substring(0, 2).ToUpper() : user.ToUpper());
-            PropertyValidator.SetProperty(doc, "CheckedDate",
-                DateTime.Now.ToString("MM/dd/yyyy"));
+            // ── Auto-fill fields (all configurations for parts/assemblies) ─
+            string checkedByVal = user.Length >= 2
+                ? user.Substring(0, 2).ToUpper() : user.ToUpper();
+            string checkedDateVal = DateTime.Now.ToString("MM/dd/yyyy");
 
             if (!isDrawing)
-                PropertyValidator.AutoFillWeight(doc);
+            {
+                var relCfgsAF = PropertyValidator.GetConfigNames(doc);
+                if (relCfgsAF.Count > 1)
+                {
+                    // Multi-config: set on every config; mass is config-specific
+                    // so switch to each one before reading mass properties.
+                    // try/finally guarantees we restore the original config even
+                    // if a mass-property read throws mid-loop.
+                    string origCfgAF = (doc.GetActiveConfiguration()
+                        as SolidWorks.Interop.sldworks.Configuration)?.Name;
+                    try
+                    {
+                        foreach (string c in relCfgsAF)
+                        {
+                            PropertyValidator.SetProperty(doc, "CheckedBy",
+                                checkedByVal, c);
+                            PropertyValidator.SetProperty(doc, "CheckedDate",
+                                checkedDateVal, c);
+                            doc.ShowConfiguration2(c);
+                            PropertyValidator.AutoFillWeight(doc);
+                        }
+                    }
+                    finally
+                    {
+                        if (!string.IsNullOrEmpty(origCfgAF))
+                            doc.ShowConfiguration2(origCfgAF);
+                    }
+                }
+                else
+                {
+                    PropertyValidator.SetProperty(doc, "CheckedBy", checkedByVal);
+                    PropertyValidator.SetProperty(doc, "CheckedDate", checkedDateVal);
+                    PropertyValidator.AutoFillWeight(doc);
+                }
+            }
+            else
+            {
+                PropertyValidator.SetProperty(doc, "CheckedBy", checkedByVal);
+                PropertyValidator.SetProperty(doc, "CheckedDate", checkedDateVal);
+            }
 
             // This programmatic save must bypass the released-file save lock.
             PDMLiteAddin.SuppressSaveValidation = true;
             try { doc.Save3((int)swSaveAsOptions_e.swSaveAsOptions_Silent, 0, 0); }
             finally { PDMLiteAddin.SuppressSaveValidation = false; }
 
-            // ── Archive old exports before creating new ones ──────────────
-            // Parts use cleaned part number (dots removed) for STEP naming
-            string archiveId = isDrawing ? partNo : partNo.Replace(".", "");
-            ArchiveOldExports(archiveId, isDrawing);
+            // ── Archive old exports + export files ────────────────────────
+            if (isDrawing)
+            {
+                ArchiveOldExports(partNo, isDrawing: true);
+                ExportManager.ExportAll(doc, ExportRoot, stamp);
+            }
+            else
+            {
+                var relCfgsEx = PropertyValidator.GetConfigNames(doc);
+                if (relCfgsEx.Count <= 1)
+                {
+                    // Single-config: existing path
+                    ArchiveOldExports(partNo.Replace(".", ""), isDrawing: false);
+                    ExportManager.ExportAll(doc, ExportRoot, stamp);
+                }
+                else
+                {
+                    // Multi-config: archive old + export STEP for every config
+                    string origCfgEx = (doc.GetActiveConfiguration()
+                        as SolidWorks.Interop.sldworks.Configuration)?.Name;
 
-            // ── Export files ──────────────────────────────────────────────
-            ExportManager.ExportAll(doc, ExportRoot, stamp);
+                    // Archive old STEP files for all configs before exporting new ones
+                    foreach (string c in relCfgsEx)
+                    {
+                        string cp = PropertyValidator.GetProperty(doc, "PartNo", c);
+                        if (!string.IsNullOrEmpty(cp))
+                            ArchiveOldExports(cp.Replace(".", ""), isDrawing: false);
+                    }
+
+                    // Export one STEP per config (switch → export → next).
+                    // try/finally restores the original config even if a SaveAs
+                    // throws mid-loop. A HashSet guards against two configs that
+                    // share PartNo+Rev silently overwriting each other's STEP.
+                    var emittedStamps = new HashSet<string>(
+                        StringComparer.OrdinalIgnoreCase);
+                    var collidedStamps = new List<string>();
+                    try
+                    {
+                        foreach (string c in relCfgsEx)
+                        {
+                            string cp = PropertyValidator.GetProperty(doc, "PartNo", c);
+                            string cr = PropertyValidator.GetProperty(doc, "Revision", c);
+                            if (string.IsNullOrEmpty(cp)) continue;
+                            string cfgStamp = cp.Replace(".", "") + "-R" + cr;
+                            if (!emittedStamps.Add(cfgStamp))
+                            {
+                                // Another config already exported this exact name —
+                                // exporting again would overwrite it. Skip + report.
+                                collidedStamps.Add(cfgStamp);
+                                continue;
+                            }
+                            doc.ShowConfiguration2(c);
+                            ExportManager.ExportStepOnly(doc, ExportRoot, cfgStamp);
+                        }
+                    }
+                    finally
+                    {
+                        // Restore original config; export flat DXF once (sheet metal)
+                        if (!string.IsNullOrEmpty(origCfgEx))
+                            doc.ShowConfiguration2(origCfgEx);
+                    }
+                    ExportManager.ExportFlatPatternOnly(doc, ExportRoot, stamp);
+
+                    if (collidedStamps.Count > 0)
+                        MessageBox.Show(
+                            "Warning: these STEP exports were SKIPPED because two " +
+                            "or more configurations share the same Part No + " +
+                            "Revision (they would overwrite each other):\n\n  • " +
+                            string.Join("\n  • ", collidedStamps.Distinct()) +
+                            "\n\nGive each configuration a unique Part No and " +
+                            "release again to export all of them.",
+                            "BCore PDM — Duplicate Export Skipped",
+                            MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                }
+            }
 
             // ── Copy to RELEASED folder ───────────────────────────────────
             Directory.CreateDirectory(RelFolder);
@@ -726,9 +893,32 @@ namespace PDMLite
             }
             else if (!suppressPrompts)
             {
+                string successDetail;
+                if (!isDrawing)
+                {
+                    var sucCfgs = PropertyValidator.GetConfigNames(doc);
+                    if (sucCfgs.Count > 1)
+                    {
+                        var lines = string.Join("\n", sucCfgs.Select(c =>
+                        {
+                            string cp = PropertyValidator.GetProperty(doc, "PartNo", c);
+                            string cr = PropertyValidator.GetProperty(doc, "Revision", c);
+                            return "  • " + (string.IsNullOrEmpty(cp) ? c : cp)
+                                + "   REV " + cr;
+                        }));
+                        successDetail = "Configurations:\n" + lines;
+                    }
+                    else
+                    {
+                        successDetail = fileTypeLabel + " : " + partNo + "  REV " + rev;
+                    }
+                }
+                else
+                {
+                    successDetail = fileTypeLabel + " : " + partNo + "  REV " + rev;
+                }
                 MessageBox.Show(
-                    "File Released Successfully!\n\n" +
-                    fileTypeLabel + " : " + partNo + "  REV " + rev + "\n" +
+                    "File Released Successfully!\n\n" + successDetail + "\n" +
                     "Exports saved to:\n" + ExportRoot,
                     "BCore PDM — Released",
                     MessageBoxButtons.OK,
@@ -796,24 +986,74 @@ namespace PDMLite
                 return;
             }
 
-            string filePath = doc.GetPathName();
+            string filePath   = doc.GetPathName();
+            int docTypeSNR    = doc.GetType();
+            bool isDrawingSNR = docTypeSNR == (int)swDocumentTypes_e.swDocDRAWING;
             string currentRev = PropertyValidator.GetProperty(doc, "Revision");
-            string nextRev = GetNextRevision(currentRev);
-            string partNo = PropertyValidator.GetProperty(doc, "PartNo");
+            string nextRev    = GetNextRevision(currentRev);
+            string partNo     = PropertyValidator.GetProperty(doc, "PartNo");
 
-            if (!suppressPrompts)
+            // ── Multi-config: per-config revision picker ──────────────────
+            var allCfgsSNR = !isDrawingSNR
+                ? PropertyValidator.GetConfigNames(doc)
+                : new List<string>();
+            bool isMultiCfg = allCfgsSNR.Count > 1;
+
+            // Per-config current/next revision maps
+            var cfgCurrentRevs = new Dictionary<string, string>(
+                StringComparer.OrdinalIgnoreCase);
+            var cfgNextRevs = new Dictionary<string, string>(
+                StringComparer.OrdinalIgnoreCase);
+            List<string> selectedCfgs = allCfgsSNR; // default = all configs
+
+            if (isMultiCfg)
             {
-                var confirm = MessageBox.Show(
-                    "Start a new revision?\n\n" +
-                    "Current : REV " + currentRev + "\n" +
-                    "New     : REV " + nextRev + "\n\n" +
-                    "The current released file will be archived.\n" +
-                    "A new WIP revision will begin.",
-                    "BCore PDM — New Revision",
-                    MessageBoxButtons.YesNo,
-                    MessageBoxIcon.Question);
+                foreach (string c in allCfgsSNR)
+                {
+                    string r = PropertyValidator.GetProperty(doc, "Revision", c);
+                    cfgCurrentRevs[c] = r;
+                    cfgNextRevs[c]    = GetNextRevision(r);
+                }
 
-                if (confirm != DialogResult.Yes) return;
+                if (!suppressPrompts)
+                {
+                    using (var picker = new ConfigRevisionPickerForm(
+                        allCfgsSNR,
+                        allCfgsSNR.Select(c => cfgCurrentRevs[c]).ToList(),
+                        allCfgsSNR.Select(c => cfgNextRevs[c]).ToList()))
+                    {
+                        if (picker.ShowDialog() != DialogResult.OK) return;
+                        selectedCfgs = picker.SelectedConfigs ?? new List<string>();
+                        if (selectedCfgs.Count == 0)
+                        {
+                            MessageBox.Show(
+                                "No configurations selected.",
+                                "BCore PDM — New Revision",
+                                MessageBoxButtons.OK,
+                                MessageBoxIcon.Information);
+                            return;
+                        }
+                    }
+                }
+                // suppressPrompts (bulk approve): bump ALL configs, no picker
+            }
+            else
+            {
+                // Single-config: existing confirm dialog
+                if (!suppressPrompts)
+                {
+                    var confirm = MessageBox.Show(
+                        "Start a new revision?\n\n" +
+                        "Current : REV " + currentRev + "\n" +
+                        "New     : REV " + nextRev + "\n\n" +
+                        "The current released file will be archived.\n" +
+                        "A new WIP revision will begin.",
+                        "BCore PDM — New Revision",
+                        MessageBoxButtons.YesNo,
+                        MessageBoxIcon.Question);
+
+                    if (confirm != DialogResult.Yes) return;
+                }
             }
 
             int reopenType = doc.GetType();
@@ -827,11 +1067,13 @@ namespace PDMLite
                                : "PARTS";
             string swArchive = Path.Combine(ObsFolder, swSubFolder);
             Directory.CreateDirectory(swArchive);
-            string archiveName =
-                Path.GetFileNameWithoutExtension(filePath) +
-                " REV " + currentRev +
-                Path.GetExtension(filePath);
-            ArchiveCopy(filePath, Path.Combine(swArchive, archiveName));
+            string archiveBase = Path.GetFileNameWithoutExtension(filePath);
+            string archiveExt  = Path.GetExtension(filePath);
+            // Collision-safe (see CollisionSafeArchivePath): a partial multi-
+            // config bump can map two different snapshots to the same rev letter.
+            string archiveDest = CollisionSafeArchivePath(
+                swArchive, archiveBase, currentRev, archiveExt, isMultiCfg);
+            ArchiveCopy(filePath, archiveDest);
 
             // If the drawing is open, close it BEFORE we close/reopen the part.
             // When a drawing is open and references the part, OpenDoc6 on the part
@@ -887,7 +1129,19 @@ namespace PDMLite
             // Bump revision on the now-writable document and save. This save
             // happens while the file is still "Released" in the DB, so it must
             // bypass the released-file lock.
-            PropertyValidator.SetProperty(fresh, "Revision", nextRev);
+            if (isMultiCfg)
+            {
+                foreach (string cfgN in selectedCfgs)
+                {
+                    string nr = cfgNextRevs.ContainsKey(cfgN)
+                        ? cfgNextRevs[cfgN] : nextRev;
+                    PropertyValidator.SetProperty(fresh, "Revision", nr, cfgN);
+                }
+            }
+            else
+            {
+                PropertyValidator.SetProperty(fresh, "Revision", nextRev);
+            }
             PDMLiteAddin.SuppressSaveValidation = true;
             try { fresh.Save3((int)swSaveAsOptions_e.swSaveAsOptions_Silent, 0, 0); }
             finally { PDMLiteAddin.SuppressSaveValidation = false; }
@@ -901,11 +1155,57 @@ namespace PDMLite
 
             // ── Auto-start the associated drawing revision (Option B) ─────
             // Done AFTER the model is writable/bumped so the drawing reopens
-            // against the new model state. Skipped if THIS file is a drawing
-            // (it was already handled as the primary file above).
-            string drwSummary = ext == ".slddrw"
-                ? "n/a (this file is a drawing)"
-                : StartDrawingRevisionWith(filePath, currentRev, nextRev, user);
+            // against the new model state. Skipped if THIS file is a drawing.
+            string drwSummary;
+            if (ext == ".slddrw")
+            {
+                drwSummary = "n/a (this file is a drawing)";
+            }
+            else if (isMultiCfg)
+            {
+                // Map each unique drawing path to the (current,next) revision it
+                // should receive. A config-specific drawing gets ITS config's
+                // revision (not the active config's); the shared basename drawing
+                // covers all configs so it gets the file-level active-config rev.
+                // First assignment wins, so the shared drawing keeps the file-
+                // level rev even if GetDrawingsForConfig also returns it (covers-
+                // all). This fixes config-specific drawings being stamped with the
+                // wrong config's revision letter.
+                var drwRevs = new Dictionary<string, string[]>(
+                    StringComparer.OrdinalIgnoreCase);
+                string baseDrw = FindDrawingPath(filePath);
+                if (baseDrw != null)
+                    drwRevs[baseDrw] = new[] { currentRev, nextRev };
+                foreach (string cfgN in selectedCfgs)
+                {
+                    string cCur = cfgCurrentRevs.ContainsKey(cfgN)
+                        ? cfgCurrentRevs[cfgN] : currentRev;
+                    string cNext = cfgNextRevs.ContainsKey(cfgN)
+                        ? cfgNextRevs[cfgN] : nextRev;
+                    foreach (string d in
+                        DatabaseManager.GetDrawingsForConfig(filePath, cfgN))
+                        if (!string.IsNullOrEmpty(d) && !drwRevs.ContainsKey(d))
+                            drwRevs[d] = new[] { cCur, cNext };
+                }
+
+                if (drwRevs.Count == 0)
+                {
+                    drwSummary = "none found";
+                }
+                else
+                {
+                    var summaries = new List<string>();
+                    foreach (var kv in drwRevs)
+                        summaries.Add(StartDrawingRevisionWith(
+                            filePath, kv.Value[0], kv.Value[1], user, kv.Key));
+                    drwSummary = string.Join("; ", summaries);
+                }
+            }
+            else
+            {
+                drwSummary =
+                    StartDrawingRevisionWith(filePath, currentRev, nextRev, user);
+            }
 
             // Reopen the drawing if we pre-closed it above. By this point
             // the drawing's read-only flag is cleared and the DB is WIP, so
@@ -927,8 +1227,20 @@ namespace PDMLite
             List<string> parents = GetParentAssemblies(filePath);
 
             // ── Build summary message ─────────────────────────────────────
-            string msg = "Revision bumped to REV " + nextRev +
-                ".\nFile is now back in WIP and ready to edit.\n";
+            string msg;
+            if (isMultiCfg && selectedCfgs.Count > 0)
+            {
+                var cfgLines = string.Join("\n", selectedCfgs.Select(c =>
+                    "  • " + c + ":  REV " +
+                    (cfgNextRevs.ContainsKey(c) ? cfgNextRevs[c] : nextRev)));
+                msg = "Revisions bumped:\n" + cfgLines +
+                      "\nFile is now back in WIP and ready to edit.\n";
+            }
+            else
+            {
+                msg = "Revision bumped to REV " + nextRev +
+                      ".\nFile is now back in WIP and ready to edit.\n";
+            }
 
             msg += "\nDrawing: " + (drwSummary ?? "none found (no matching .slddrw)");
 
@@ -1053,9 +1365,10 @@ namespace PDMLite
         // editing. Returns a human-readable summary line, or null if there is
         // no drawing at all.
         private static string StartDrawingRevisionWith(
-            string modelPath, string currentRev, string nextRev, string user)
+            string modelPath, string currentRev, string nextRev, string user,
+            string explicitDrwPath = null)
         {
-            string drwPath = FindDrawingPath(modelPath);
+            string drwPath = explicitDrwPath ?? FindDrawingPath(modelPath);
             if (drwPath == null) return null; // no drawing — nothing to do
 
             string drwName = Path.GetFileName(drwPath);
@@ -1146,7 +1459,16 @@ namespace PDMLite
             {
                 ModelDoc2 cd = comp.GetModelDoc2() as ModelDoc2;
                 if (cd == null) return "";
-                return PropertyValidator.GetProperty(cd, "PartType");
+                // PartType is a config-specific property, so read it from the
+                // configuration the ASSEMBLY actually references — not the
+                // component's active in-memory config, which may be any config
+                // (a shared child can be Manufactured in one config, Purchased in
+                // another). Falls back to the active-config read when the
+                // referenced config is unknown.
+                string refCfg = comp.ReferencedConfiguration;
+                return !string.IsNullOrEmpty(refCfg)
+                    ? PropertyValidator.GetProperty(cd, "PartType", refCfg)
+                    : PropertyValidator.GetProperty(cd, "PartType");
             }
             catch { return ""; }
         }
@@ -1305,6 +1627,31 @@ namespace PDMLite
             // Get current revision
             string currentRev = PropertyValidator.GetProperty(doc, "Revision");
 
+            // Multi-config warning: archives are file-level snapshots, so a
+            // rollback restores the WHOLE file (every configuration) to the
+            // archived state. Configs that were independently bumped to a higher
+            // revision since that archive will lose those changes. Rollback is
+            // not config-aware — make the Master acknowledge this before proceeding.
+            bool rbMultiCfg = ext != ".slddrw"
+                && PropertyValidator.GetConfigNames(doc).Count > 1;
+            if (ext != ".slddrw")
+            {
+                var rbCfgs = PropertyValidator.GetConfigNames(doc);
+                if (rbCfgs.Count > 1)
+                {
+                    var ack = MessageBox.Show(
+                        "This file has " + rbCfgs.Count + " configurations.\n\n" +
+                        "Rollback restores the ENTIRE file to the archived " +
+                        "revision — ALL configurations revert together. Any " +
+                        "configuration that was bumped to a newer revision since " +
+                        "that archive will LOSE those changes.\n\n" +
+                        "Rollback is not per-configuration. Continue?",
+                        "BCore PDM — Multi-Config Rollback",
+                        MessageBoxButtons.YesNo, MessageBoxIcon.Warning);
+                    if (ack != DialogResult.Yes) return;
+                }
+            }
+
             // Show rollback dialog
             var dialog = new RollbackDialog(archivedFiles, currentRev);
             if (dialog.ShowDialog() != DialogResult.OK) return;
@@ -1335,10 +1682,11 @@ namespace PDMLite
                     SetReadOnly(releasedCopy, false);
 
                 // ── Step 2: Archive current version ───────────────────────
-                string currentArchiveName = fileName +
-                    " REV " + currentRev + ext;
-                string currentArchivePath = Path.Combine(
-                    archivePath, currentArchiveName);
+                // Collision-safe: a New Revision may already have archived this
+                // file at the same rev letter; don't let the rollback overwrite
+                // (destroy) that distinct snapshot for a multi-config file.
+                string currentArchivePath = CollisionSafeArchivePath(
+                    archivePath, fileName, currentRev, ext, rbMultiCfg);
                 ArchiveCopy(filePath, currentArchivePath);
 
                 // ── Step 3: Remove read-only from archived file ───────────
@@ -1400,12 +1748,14 @@ namespace PDMLite
                                 Path.Combine(Path.GetDirectoryName(filePath),
                                     fileName + ".slddrw");
 
-                            // Archive the current drawing before overwriting it.
+                            // Archive the current drawing before overwriting it
+                            // (collision-safe, same rationale as the model above).
                             if (File.Exists(drwTarget))
                             {
                                 SetReadOnly(drwTarget, false);
-                                ArchiveCopy(drwTarget, Path.Combine(drwArchiveDir,
-                                    fileName + " REV " + currentRev + ".slddrw"));
+                                ArchiveCopy(drwTarget, CollisionSafeArchivePath(
+                                    drwArchiveDir, fileName, currentRev,
+                                    ".slddrw", rbMultiCfg));
                             }
 
                             // Restore the archived drawing to the WIP path.
@@ -1611,34 +1961,69 @@ namespace PDMLite
                 return;
             }
 
-            string dir = Path.GetDirectoryName(filePath);
-            string name = Path.GetFileNameWithoutExtension(filePath);
+            string dir           = Path.GetDirectoryName(filePath);
+            string modelBasename = Path.GetFileNameWithoutExtension(filePath);
 
-            // Build search list: same folder as the part first (fastest, most
-            // common case), then each WIP division subfolder as a fallback in
-            // case the drawing was saved in a different division than the part.
-            var searchDirs = new System.Collections.Generic.List<string> { dir };
+            // Active configuration — relevant for multi-config parts/assemblies
+            string activeConfig  = "";
+            bool   isMultiConfig = false;
+            int    docType       = doc.GetType();
+            if (docType != (int)swDocumentTypes_e.swDocDRAWING)
+            {
+                try
+                {
+                    var cfg = doc.GetActiveConfiguration()
+                        as SolidWorks.Interop.sldworks.Configuration;
+                    activeConfig  = cfg?.Name ?? "";
+                    isMultiConfig = PropertyValidator.GetConfigNames(doc).Count > 1;
+                }
+                catch { }
+            }
+
+            // Sanitise the config name for use as a filename (config = PartNo by
+            // convention, but guard against any characters Windows disallows).
+            var   invalidChars   = Path.GetInvalidFileNameChars();
+            string safeCfgName   = string.IsNullOrEmpty(activeConfig) ? "" :
+                new string(activeConfig.Select(
+                    c => invalidChars.Contains(c) ? '_' : c).ToArray());
+
+            // Build an ORDERED list of drawing names to search for:
+            //   1. Config-specific: {configName}.slddrw  (multi-config only, first)
+            //   2. Shared:          {modelBasename}.slddrw
+            // The first one found on disk wins, giving config-specific drawings
+            // priority over the shared config-table drawing.
+            var candidateNames = new List<string>();
+            if (isMultiConfig && !string.IsNullOrEmpty(safeCfgName))
+                candidateNames.Add(safeCfgName + ".slddrw");
+            candidateNames.Add(modelBasename + ".slddrw");
+
+            // Folders to search: model's own folder first, then every WIP division
+            var searchDirs = new List<string>();
+            if (!string.IsNullOrEmpty(dir)) searchDirs.Add(dir);
             foreach (string div in DatabaseManager.WipDivisions)
                 searchDirs.Add(Path.Combine(WipFolder, div));
 
-            foreach (string searchDir in searchDirs)
+            foreach (string candidateName in candidateNames)
             {
-                string candidate = Path.Combine(searchDir, name + ".slddrw");
-                if (File.Exists(candidate))
+                foreach (string searchDir in searchDirs)
                 {
-                    // Already open → bring it to the front without reopening.
+                    string fullPath = Path.Combine(searchDir, candidateName);
+                    if (!File.Exists(fullPath)) continue;
+
+                    // Already open → bring to front without reopening
                     ModelDoc2 already = PDMLiteAddin.SwApp
-                        .GetOpenDocumentByName(candidate) as ModelDoc2;
+                        .GetOpenDocumentByName(fullPath) as ModelDoc2;
                     if (already != null)
                     {
                         int ae = 0;
-                        PDMLiteAddin.SwApp.ActivateDoc3(candidate, false,
-                            (int)swRebuildOnActivation_e.swDontRebuildActiveDoc, ref ae);
+                        PDMLiteAddin.SwApp.ActivateDoc3(fullPath, false,
+                            (int)swRebuildOnActivation_e.swDontRebuildActiveDoc,
+                            ref ae);
                     }
                     else
                     {
                         int errs = 0, warnings = 0;
-                        PDMLiteAddin.SwApp.OpenDoc6(candidate,
+                        PDMLiteAddin.SwApp.OpenDoc6(fullPath,
                             (int)swDocumentTypes_e.swDocDRAWING,
                             (int)swOpenDocOptions_e.swOpenDocOptions_Silent,
                             "", ref errs, ref warnings);
@@ -1657,25 +2042,55 @@ namespace PDMLite
                 {
                     ModelDoc2 openDoc = obj as ModelDoc2;
                     if (openDoc == null) continue;
-                    if (openDoc.GetType() != (int)swDocumentTypes_e.swDocDRAWING) continue;
+                    if (openDoc.GetType() !=
+                        (int)swDocumentTypes_e.swDocDRAWING) continue;
                     if (!string.IsNullOrEmpty(openDoc.GetPathName())) continue;
-                    // Unsaved drawing — check if it was created for this model.
+
                     string refModel = GetDrawingReferencedModel(openDoc);
-                    if (string.Equals(refModel, filePath,
-                            StringComparison.OrdinalIgnoreCase))
+                    if (!string.Equals(refModel, filePath,
+                            StringComparison.OrdinalIgnoreCase)) continue;
+
+                    // For multi-config: the unsaved drawing must reference the
+                    // same config — don't reuse a drawing created for a different
+                    // config that happens to reference the same model.
+                    if (isMultiConfig && !string.IsNullOrEmpty(activeConfig))
                     {
-                        int ae = 0;
-                        PDMLiteAddin.SwApp.ActivateDoc3(openDoc.GetTitle(), false,
-                            (int)swRebuildOnActivation_e.swDontRebuildActiveDoc, ref ae);
-                        return;
+                        string refCfgs = GetDrawingReferencedConfigs(openDoc);
+                        if (!string.IsNullOrEmpty(refCfgs))
+                        {
+                            bool matches = refCfgs.Split(',').Any(c =>
+                                string.Equals(c.Trim(), activeConfig,
+                                    StringComparison.OrdinalIgnoreCase));
+                            if (!matches) continue;
+                        }
                     }
+
+                    int ae2 = 0;
+                    PDMLiteAddin.SwApp.ActivateDoc3(openDoc.GetTitle(), false,
+                        (int)swRebuildOnActivation_e.swDontRebuildActiveDoc, ref ae2);
+                    return;
                 }
             }
 
-            // No drawing found — create one from the model immediately (no
-            // prompt), the API equivalent of File > Make Drawing from Part/
-            // Assembly. Open the default drawing template and populate its
-            // predefined views with this model so the new drawing isn't blank.
+            // No drawing found — create one from the model immediately.
+            // Single-config → always the shared {modelBasename}.slddrw.
+            // Multi-config  → ask ONCE whether this should be a common drawing
+            //               (shared by every config) or a config-specific one
+            //               ({configName}.slddrw). The name chosen here is the
+            //               only place the decision is made; after that the file
+            //               on disk carries it and the prompt never repeats.
+            bool createPerConfig = false;
+            if (isMultiConfig && !string.IsNullOrEmpty(safeCfgName))
+            {
+                int cfgCount = PropertyValidator.GetConfigNames(doc).Count;
+                using (var scopeDlg = new DrawingScopeDialog(cfgCount, activeConfig))
+                {
+                    if (scopeDlg.ShowDialog() != DialogResult.OK) return; // cancelled
+                    createPerConfig =
+                        scopeDlg.Result == DrawingScopeDialog.Scope.PerConfig;
+                }
+            }
+
             string drwTemplate = PDMLiteAddin.SwApp.GetUserPreferenceStringValue(
                 (int)swUserPreferenceStringValue_e.swDefaultTemplateDrawing);
             ModelDoc2 newDrw = PDMLiteAddin.SwApp
@@ -1684,15 +2099,69 @@ namespace PDMLite
             DrawingDoc draw = newDrw as DrawingDoc;
             if (draw != null)
             {
-                // Fill the template's predefined views with the model. Returns
-                // true on success; if it fails (e.g. the template has no
-                // predefined views) fall back to standard 3rd-angle views so
-                // the engineer never gets a blank sheet.
                 bool inserted = draw.InsertModelInPredefinedView(filePath);
                 if (!inserted)
                     draw.Create3rdAngleViews2(filePath);
 
+                // Pin every model view to the active configuration so that
+                // config-switching on the model (e.g. during a release export
+                // loop) does not cause this drawing's views to follow and show
+                // the wrong geometry. Only needed for multi-config parts; for
+                // single-config parts the config name is irrelevant but pinning
+                // is harmless.
+                if (!string.IsNullOrEmpty(activeConfig))
+                {
+                    try
+                    {
+                        // GetFirstView() returns the sheet (paper space), not a
+                        // model view. Model views start at sheet.GetNextView().
+                        SolidWorks.Interop.sldworks.View sheet =
+                            (SolidWorks.Interop.sldworks.View)draw.GetFirstView();
+                        SolidWorks.Interop.sldworks.View v = sheet != null
+                            ? (SolidWorks.Interop.sldworks.View)sheet.GetNextView()
+                            : null;
+                        while (v != null)
+                        {
+                            v.ReferencedConfiguration = activeConfig;
+                            v = (SolidWorks.Interop.sldworks.View)v.GetNextView();
+                        }
+                    }
+                    catch { }
+                }
+
                 newDrw.ViewZoomtofit2();
+            }
+
+            // Auto-save the new drawing to the correct WIP path so it is
+            // immediately findable (and tracked in vault.xml via OnSavePost).
+            if (newDrw != null && !string.IsNullOrEmpty(dir))
+            {
+                string newDrwName = createPerConfig
+                    ? safeCfgName + ".slddrw"
+                    : modelBasename + ".slddrw";
+                string newDrwPath = Path.Combine(dir, newDrwName);
+
+                // Only auto-save if the target path does not already exist —
+                // if it does, something else created it between our search and
+                // now (race condition); the user can deal with it manually.
+                if (!File.Exists(newDrwPath))
+                {
+                    try
+                    {
+                        int sErr = 0, sWarn = 0;
+                        PDMLiteAddin.SuppressSaveValidation = true;
+                        try
+                        {
+                            newDrw.Extension.SaveAs(
+                                newDrwPath,
+                                (int)swSaveAsVersion_e.swSaveAsCurrentVersion,
+                                (int)swSaveAsOptions_e.swSaveAsOptions_Silent,
+                                null, ref sErr, ref sWarn);
+                        }
+                        finally { PDMLiteAddin.SuppressSaveValidation = false; }
+                    }
+                    catch { }
+                }
             }
         }
 
@@ -2119,8 +2588,14 @@ namespace PDMLite
 
                     if (refModel != null)
                     {
-                        string drawingNo = PropertyValidator.GetProperty(
-                            refModel, "DrawingNo");
+                        // Read from the config this drawing documents, not the
+                        // model's active config (which may be any config for a
+                        // multi-config model). Otherwise the released PDF gets
+                        // named after the wrong configuration's DrawingNo.
+                        string drwCfg = GetDrawingPrimaryConfig(drawingDoc);
+                        string drawingNo = !string.IsNullOrEmpty(drwCfg)
+                            ? PropertyValidator.GetProperty(refModel, "DrawingNo", drwCfg)
+                            : PropertyValidator.GetProperty(refModel, "DrawingNo");
                         if (!string.IsNullOrEmpty(drawingNo))
                             return drawingNo;
                     }
@@ -2148,8 +2623,15 @@ namespace PDMLite
                         .GetOpenDocumentByName(referencedPath) as ModelDoc2;
                     if (refModel != null)
                     {
-                        string pn = PropertyValidator.GetProperty(
-                            refModel, "PartNo");
+                        // Read PartNo from the SPECIFIC configuration this drawing
+                        // documents — not the model's currently-active config. A
+                        // multi-config model may have any config active (e.g. after
+                        // releasing a different config's drawing switched it), so
+                        // reading the active config would return the wrong PartNo.
+                        string drwCfg = GetDrawingPrimaryConfig(drawingDoc);
+                        string pn = !string.IsNullOrEmpty(drwCfg)
+                            ? PropertyValidator.GetProperty(refModel, "PartNo", drwCfg)
+                            : PropertyValidator.GetProperty(refModel, "PartNo");
                         if (!string.IsNullOrEmpty(pn)) return pn;
                     }
                 }
@@ -2161,8 +2643,29 @@ namespace PDMLite
             catch { return ""; }
         }
 
+        // ── Config the drawing's primary (first) model view references ────────
+        // Returns the ReferencedConfiguration of the first model view on the
+        // sheet, or "" if it can't be read (treat as "use active config").
+        public static string GetDrawingPrimaryConfig(ModelDoc2 drawingDoc)
+        {
+            try
+            {
+                DrawingDoc drw = (DrawingDoc)drawingDoc;
+                SolidWorks.Interop.sldworks.View sheet =
+                    (SolidWorks.Interop.sldworks.View)drw.GetFirstView();
+                if (sheet == null) return "";
+                SolidWorks.Interop.sldworks.View v =
+                    (SolidWorks.Interop.sldworks.View)sheet.GetNextView();
+                if (v == null) return "";
+                return v.ReferencedConfiguration ?? "";
+            }
+            catch { return ""; }
+        }
+
         // ── Get referenced model path from drawing ────────────────────────
-        private static string GetDrawingReferencedModel(ModelDoc2 doc)
+        // Public so SwAddin.OnSavePost can call it when writing drawing records
+        // (it needs the model path to populate ReferencedModel in the DB).
+        public static string GetDrawingReferencedModel(ModelDoc2 doc)
         {
             try
             {
@@ -2179,6 +2682,36 @@ namespace PDMLite
                 return refDoc?.GetPathName() ?? "";
             }
             catch { return ""; }
+        }
+
+        // Returns unique config names referenced across all views on the active
+        // sheet of a drawing, as a comma-separated string. Used by OnSavePost to
+        // populate ReferencedConfigs in the vault DB so the DB knows which
+        // configurations a drawing documents.
+        // Returns "" when no config info can be read (treat as "covers all").
+        public static string GetDrawingReferencedConfigs(ModelDoc2 doc)
+        {
+            var configs = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            try
+            {
+                DrawingDoc drw = (DrawingDoc)doc;
+                // GetFirstView() returns the sheet/paper view (not a model view).
+                // Model views start at GetNextView() from the sheet view.
+                SolidWorks.Interop.sldworks.View sheet =
+                    (SolidWorks.Interop.sldworks.View)drw.GetFirstView();
+                if (sheet == null) return "";
+
+                SolidWorks.Interop.sldworks.View v =
+                    (SolidWorks.Interop.sldworks.View)sheet.GetNextView();
+                while (v != null)
+                {
+                    string cfg = v.ReferencedConfiguration;
+                    if (!string.IsNullOrEmpty(cfg)) configs.Add(cfg);
+                    v = (SolidWorks.Interop.sldworks.View)v.GetNextView();
+                }
+            }
+            catch { }
+            return string.Join(",", configs);
         }
         // ── Move ALL exports for this part to archive on rollback ─────
         private static void CleanupExportsOnRollback(string partNoClean,
@@ -2257,6 +2790,29 @@ namespace PDMLite
                 File.Delete(dest);
             }
             File.Copy(source, dest);
+        }
+
+        // Builds an archive path "{baseName} REV {rev}{ext}". Multi-config files
+        // are archived at FILE level but named after a single config's rev, so a
+        // partial bump (or a rollback after a New Revision) can map two DIFFERENT
+        // file snapshots to the same name — and ArchiveCopy is delete-then-copy,
+        // so the earlier snapshot would be silently destroyed. When the target
+        // already exists for a multi-config file, insert a yyyyMMdd_HHmmss stamp
+        // BEFORE " REV " so both survive AND RollbackDialog.ExtractRevision (which
+        // parses the token after " REV ") still reads the rev letter. Single-
+        // config keeps the old overwrite behaviour (re-archiving the same rev is
+        // harmless).
+        private static string CollisionSafeArchivePath(
+            string dir, string baseName, string rev, string ext, bool multiCfg)
+        {
+            string dest = Path.Combine(dir, baseName + " REV " + rev + ext);
+            if (multiCfg && File.Exists(dest))
+            {
+                string snap = DateTime.Now.ToString("yyyyMMdd_HHmmss");
+                dest = Path.Combine(dir,
+                    baseName + "_" + snap + " REV " + rev + ext);
+            }
+            return dest;
         }
     }
 }

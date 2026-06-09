@@ -3,6 +3,7 @@ using SolidWorks.Interop.swpublished;
 using SolidWorks.Interop.swconst;
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Runtime.InteropServices;
 using System.Windows.Forms;
 
@@ -171,6 +172,17 @@ namespace PDMLite
                     System.Environment.MachineName);
             }
             catch { }
+        }
+
+        // Called from DocEventHandler when the user switches the active
+        // configuration of a part/assembly. Config name = Part No by convention,
+        // so each config carries its own PartNo / Description / Revision; the
+        // Active File card must re-read them when the active config changes.
+        // (ActiveDocChangeNotify does NOT fire on a config switch — only on a
+        // document switch — so this is the only signal for it.)
+        internal void OnActiveConfigChanged()
+        {
+            try { _taskPane?.RefreshPanel(); } catch { }
         }
 
         // Called from DocEventHandler.OnDestroy. Removes the stale handler, then
@@ -346,6 +358,203 @@ namespace PDMLite
                     PropertyValidator.FixDateFormats(doc);
                     PropertyValidator.AutoFillWeight(doc);
 
+                    // Rule 3.5: every configuration in the file must have a
+                    // unique Part Number. SOLIDWORKS copies all properties when
+                    // a new config is created, so duplicate PartNos are the
+                    // normal result of "right-click → Add Configuration". Detect
+                    // and force the user to enter unique values before saving.
+                    var allCfgsVS = PropertyValidator.GetConfigNames(doc);
+                    if (allCfgsVS.Count > 1)
+                    {
+                        // Map PartNo → [configs that share it]
+                        var pnMap = new Dictionary<string, List<string>>(
+                            StringComparer.OrdinalIgnoreCase);
+                        foreach (string c in allCfgsVS)
+                        {
+                            string pn = PropertyValidator.GetProperty(
+                                doc, "PartNo", c);
+                            if (!pnMap.ContainsKey(pn))
+                                pnMap[pn] = new List<string>();
+                            pnMap[pn].Add(c);
+                        }
+
+                        // Groups of configs that share a PartNo (size > 1 = dup)
+                        var dupGroups = pnMap.Values
+                            .Where(g => g.Count > 1).ToList();
+
+                        if (dupGroups.Count > 0)
+                        {
+                            string activeCfgVS = (doc.GetActiveConfiguration()
+                                as SolidWorks.Interop.sldworks.Configuration)
+                                ?.Name ?? "";
+
+                            // Configs already tracked in vault are "established".
+                            // Configs NOT in vault are newly added (the copy).
+                            var vaultCfgNames = DatabaseManager
+                                .GetConfigsForFile(filePath)
+                                .Select(c => c.Name)
+                                .ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+                            // On the FIRST save the file isn't in vault yet, so
+                            // every config looks "new" and the user would be
+                            // prompted for the active config they just filled in
+                            // (Rule 3). Treat the active config as established so
+                            // only the genuine duplicates get a form.
+                            if (vaultCfgNames.Count == 0 &&
+                                !string.IsNullOrEmpty(activeCfgVS))
+                                vaultCfgNames.Add(activeCfgVS);
+
+                            // Collect configs to fix: prefer new (not-in-vault)
+                            // ones; fall back to non-active ones when all are
+                            // established (user manually duplicated a PartNo).
+                            var toFix = new List<string>();
+                            foreach (var grp in dupGroups)
+                            {
+                                var newOnes = grp
+                                    .Where(c => !vaultCfgNames.Contains(c))
+                                    .ToList();
+                                if (newOnes.Count > 0)
+                                    toFix.AddRange(newOnes);
+                                else
+                                    toFix.AddRange(grp.Where(c =>
+                                        !string.Equals(c, activeCfgVS,
+                                            StringComparison.OrdinalIgnoreCase)));
+                            }
+                            toFix = toFix
+                                .Distinct(StringComparer.OrdinalIgnoreCase)
+                                .ToList();
+
+                            foreach (string dupCfg in toFix)
+                            {
+                                string dupPn = PropertyValidator.GetProperty(
+                                    doc, "PartNo", dupCfg);
+                                doc.ShowConfiguration2(dupCfg);
+                                SwApp.SendMsgToUser2(
+                                    "DUPLICATE PART NUMBER — UNIQUE VALUES NEEDED:\n\n" +
+                                    "Configuration : \"" + dupCfg + "\"\n" +
+                                    "Part No       : " + dupPn +
+                                    "  (same as another configuration)\n\n" +
+                                    "SOLIDWORKS copies all properties when a new " +
+                                    "configuration is created.\n" +
+                                    "Please enter a unique Part No, Drawing No, " +
+                                    "and Description for this configuration.",
+                                    (int)swMessageBoxIcon_e.swMbWarning,
+                                    (int)swMessageBoxBtn_e.swMbOk);
+
+                                using (var form = new PropertyForm(
+                                    doc,
+                                    new List<string>
+                                        { "PartNo", "DrawingNo", "Description" }))
+                                {
+                                    form.ShowDialog();
+                                }
+                            }
+
+                            // Restore original active config
+                            if (toFix.Count > 0 &&
+                                !string.IsNullOrEmpty(activeCfgVS))
+                                doc.ShowConfiguration2(activeCfgVS);
+
+                            // Re-check: block if any duplicates remain
+                            var recheckMap = new Dictionary<string, List<string>>(
+                                StringComparer.OrdinalIgnoreCase);
+                            foreach (string c in allCfgsVS)
+                            {
+                                string pn = PropertyValidator.GetProperty(
+                                    doc, "PartNo", c);
+                                if (!recheckMap.ContainsKey(pn))
+                                    recheckMap[pn] = new List<string>();
+                                recheckMap[pn].Add(c);
+                            }
+                            var stillDups = recheckMap.Values
+                                .Where(g => g.Count > 1)
+                                .SelectMany(g => g)
+                                .Distinct(StringComparer.OrdinalIgnoreCase)
+                                .ToList();
+                            if (stillDups.Count > 0)
+                            {
+                                Block(
+                                    "Save blocked — duplicate Part Numbers across " +
+                                    "configurations:\n\n• " +
+                                    string.Join("\n• ", stillDups) + "\n\n" +
+                                    "Each configuration must have a unique Part No. " +
+                                    "Switch to the affected configuration and change " +
+                                    "its Part No before saving.");
+                                return 1;
+                            }
+                        }
+                    }
+
+                    // Rule 3.6: per-configuration health warning (multi-config
+                    // only, non-blocking). Combines two checks into ONE dialog so
+                    // a freshly-added config never triggers a chain of pop-ups —
+                    // each affected config gets a single line listing ALL its
+                    // issues, then one Yes/No "Save anyway?" override:
+                    //   (a) config name must match its PartNo — the convention
+                    //       config name == PartNo underpins per-config drawings
+                    //       (GetDrawingsForConfig), search and revision tracking.
+                    //       Caught BEFORE the config is referenced by an assembly,
+                    //       where renaming it would break those references.
+                    //   (b) every NON-active config must have its required
+                    //       properties. Rule 3 already hard-blocks the ACTIVE
+                    //       config; the others are otherwise only validated at the
+                    //       release gate, so an incomplete config could go
+                    //       unnoticed until release blocks.
+                    // Single-config files are exempt from both checks. (Rule 3.5's
+                    // duplicate-PartNo block stays separate — it's an interactive
+                    // fix flow that hard-blocks, not a passive warning.)
+                    if (allCfgsVS.Count > 1)
+                    {
+                        string activeCfg36 = (doc.GetActiveConfiguration()
+                            as SolidWorks.Interop.sldworks.Configuration)
+                            ?.Name ?? "";
+                        var cfgGaps = PropertyValidator.ValidateAllConfigs(doc);
+
+                        var issueLines = new List<string>();
+                        foreach (string c in allCfgsVS)
+                        {
+                            var issues = new List<string>();
+
+                            // (a) name == PartNo (skip configs with no PartNo yet)
+                            string cpn = PropertyValidator.GetProperty(
+                                doc, "PartNo", c);
+                            if (!string.IsNullOrWhiteSpace(cpn) &&
+                                !string.Equals(c.Trim(), cpn.Trim(),
+                                    StringComparison.OrdinalIgnoreCase))
+                                issues.Add("name should match Part No " + cpn);
+
+                            // (b) completeness — non-active configs only
+                            // (Rule 3 already covers the active config)
+                            if (!string.Equals(c, activeCfg36,
+                                    StringComparison.OrdinalIgnoreCase)
+                                && cfgGaps.ContainsKey(c))
+                                issues.Add("missing: " +
+                                    string.Join(", ", cfgGaps[c]));
+
+                            if (issues.Count > 0)
+                                issueLines.Add("  \"" + c + "\" — " +
+                                    string.Join("; ", issues));
+                        }
+
+                        if (issueLines.Count > 0)
+                        {
+                            int choice = SwApp.SendMsgToUser2(
+                                "SOME CONFIGURATIONS NEED ATTENTION:\n\n" +
+                                string.Join("\n", issueLines) + "\n\n" +
+                                "Config names should match their Part No (per-config " +
+                                "drawings, search and revision tracking rely on it), " +
+                                "and every config needs all required properties " +
+                                "before the release gate will pass.\n\n" +
+                                "Fix them now — renaming a config after an assembly " +
+                                "references it breaks those references.\n\n" +
+                                "Save anyway?",
+                                (int)swMessageBoxIcon_e.swMbWarning,
+                                (int)swMessageBoxBtn_e.swMbYesNo);
+                            if (choice == (int)swMessageBoxResult_e.swMbHitNo)
+                                return 1;
+                        }
+                    }
+
                     // Rule 4: duplicate part number (another file already uses it)
                     string partNo = PropertyValidator.GetProperty(doc, "PartNo");
                     string conflict = DatabaseManager.FindPartNumberConflict(partNo, filePath);
@@ -400,16 +609,83 @@ namespace PDMLite
                 if (string.IsNullOrEmpty(filePath)) filePath = fileName;
                 string currentStatus = DatabaseManager.GetFileStatus(filePath);
                 _taskPane?.RefreshPanel();
-                DatabaseManager.UpsertFile(new VaultFile
+
+                int docType    = doc.GetType();
+                bool isDrawing = docType == (int)SolidWorks.Interop.swconst
+                                    .swDocumentTypes_e.swDocDRAWING;
+
+                var vf = new VaultFile
                 {
-                    FilePath    = filePath,
-                    FileName    = System.IO.Path.GetFileName(filePath),
-                    PartNumber  = PropertyValidator.GetProperty(doc, "PartNo"),
-                    Description = PropertyValidator.GetProperty(doc, "Description"),
-                    Status      = string.IsNullOrEmpty(currentStatus) ? "WIP" : currentStatus,
-                    ModifiedBy  = CurrentUser,
+                    FilePath     = filePath,
+                    FileName     = System.IO.Path.GetFileName(filePath),
+                    PartNumber   = PropertyValidator.GetProperty(doc, "PartNo"),
+                    Description  = PropertyValidator.GetProperty(doc, "Description"),
+                    Revision     = PropertyValidator.GetProperty(doc, "Revision"),
+                    Status       = string.IsNullOrEmpty(currentStatus) ? "WIP" : currentStatus,
+                    ModifiedBy   = CurrentUser,
                     ModifiedDate = DateTime.Now
-                });
+                };
+
+                if (isDrawing)
+                {
+                    // Drawings: record which model file and which of its
+                    // configurations this drawing documents so the DB can answer
+                    // "which drawings cover config WGT-005?" without relying on
+                    // fragile filename conventions.
+                    vf.ReferencedModel   = VaultManager.GetDrawingReferencedModel(doc);
+                    vf.ReferencedConfigs = VaultManager.GetDrawingReferencedConfigs(doc);
+                }
+                else
+                {
+                    // Parts / Assemblies: capture every configuration's identity
+                    // so the vault can find the file by any of its part numbers
+                    // and detect duplicate-PN conflicts across all configs.
+                    var cfgNames = PropertyValidator.GetConfigNames(doc);
+                    var configs  = new System.Collections.Generic.List<ConfigEntry>();
+                    foreach (string cfgName in cfgNames)
+                    {
+                        configs.Add(new ConfigEntry
+                        {
+                            Name        = cfgName,
+                            PartNo      = PropertyValidator.GetProperty(doc, "PartNo",      cfgName),
+                            Description = PropertyValidator.GetProperty(doc, "Description", cfgName),
+                            DrawingNo   = PropertyValidator.GetProperty(doc, "DrawingNo",   cfgName),
+                            Revision    = PropertyValidator.GetProperty(doc, "Revision",    cfgName)
+                        });
+                    }
+                    vf.Configurations = configs;
+                }
+
+                DatabaseManager.UpsertFile(vf);
+
+                // Warn (do not block) when non-active configs have incomplete
+                // properties so the engineer knows to switch configs and save.
+                if (!isDrawing)
+                {
+                    string activeConfig = "";
+                    try
+                    {
+                        var cfg = doc.GetActiveConfiguration()
+                            as SolidWorks.Interop.sldworks.Configuration;
+                        activeConfig = cfg?.Name ?? "";
+                    }
+                    catch { }
+
+                    var allIssues = PropertyValidator.ValidateAllConfigs(doc);
+                    allIssues.Remove(activeConfig); // already validated / prompted above
+                    if (allIssues.Count > 0)
+                    {
+                        string summary = string.Join("\n", allIssues.Select(kv =>
+                            "  • " + kv.Key + ": " + string.Join(", ", kv.Value)));
+                        SwApp.SendMsgToUser2(
+                            "OTHER CONFIGURATIONS HAVE INCOMPLETE PROPERTIES:\n\n" +
+                            summary + "\n\n" +
+                            "Switch to each configuration and save to complete " +
+                            "their required fields before releasing.",
+                            (int)SolidWorks.Interop.swconst.swMessageBoxIcon_e.swMbWarning,
+                            (int)SolidWorks.Interop.swconst.swMessageBoxBtn_e.swMbOk);
+                    }
+                }
             }
             catch { }
             return 0;
@@ -442,12 +718,14 @@ namespace PDMLite
             private DPartDocEvents_FileSaveAsNotify2EventHandler _partSaveAs;
             private DPartDocEvents_FileSavePostNotifyEventHandler _partPost;
             private DPartDocEvents_DestroyNotifyEventHandler     _partDestroy;
+            private DPartDocEvents_ActiveConfigChangePostNotifyEventHandler _partCfgChange;
 
             // Assembly delegates
             private DAssemblyDocEvents_FileSaveNotifyEventHandler    _asmSave;
             private DAssemblyDocEvents_FileSaveAsNotify2EventHandler _asmSaveAs;
             private DAssemblyDocEvents_FileSavePostNotifyEventHandler _asmPost;
             private DAssemblyDocEvents_DestroyNotifyEventHandler     _asmDestroy;
+            private DAssemblyDocEvents_ActiveConfigChangePostNotifyEventHandler _asmCfgChange;
 
             // Drawing delegates
             private DDrawingDocEvents_FileSaveNotifyEventHandler    _drwSave;
@@ -476,10 +754,12 @@ namespace PDMLite
                     _partSaveAs  = new DPartDocEvents_FileSaveAsNotify2EventHandler(OnSave);
                     _partPost    = new DPartDocEvents_FileSavePostNotifyEventHandler(OnPost);
                     _partDestroy = new DPartDocEvents_DestroyNotifyEventHandler(OnDestroy);
+                    _partCfgChange = new DPartDocEvents_ActiveConfigChangePostNotifyEventHandler(OnConfigChange);
                     d.FileSaveNotify    += _partSave;
                     d.FileSaveAsNotify2 += _partSaveAs;
                     d.FileSavePostNotify += _partPost;
                     d.DestroyNotify     += _partDestroy;
+                    d.ActiveConfigChangePostNotify += _partCfgChange;
                     return true;
                 }
                 if (_type == (int)swDocumentTypes_e.swDocASSEMBLY)
@@ -489,10 +769,12 @@ namespace PDMLite
                     _asmSaveAs  = new DAssemblyDocEvents_FileSaveAsNotify2EventHandler(OnSave);
                     _asmPost    = new DAssemblyDocEvents_FileSavePostNotifyEventHandler(OnPost);
                     _asmDestroy = new DAssemblyDocEvents_DestroyNotifyEventHandler(OnDestroy);
+                    _asmCfgChange = new DAssemblyDocEvents_ActiveConfigChangePostNotifyEventHandler(OnConfigChange);
                     d.FileSaveNotify    += _asmSave;
                     d.FileSaveAsNotify2 += _asmSaveAs;
                     d.FileSavePostNotify += _asmPost;
                     d.DestroyNotify     += _asmDestroy;
+                    d.ActiveConfigChangePostNotify += _asmCfgChange;
                     return true;
                 }
                 if (_type == (int)swDocumentTypes_e.swDocDRAWING)
@@ -522,6 +804,8 @@ namespace PDMLite
                         d.FileSaveAsNotify2 -= _partSaveAs;
                         d.FileSavePostNotify -= _partPost;
                         d.DestroyNotify     -= _partDestroy;
+                        if (_partCfgChange != null)
+                            d.ActiveConfigChangePostNotify -= _partCfgChange;
                     }
                     else if (_type == (int)swDocumentTypes_e.swDocASSEMBLY && _asmSave != null)
                     {
@@ -530,6 +814,8 @@ namespace PDMLite
                         d.FileSaveAsNotify2 -= _asmSaveAs;
                         d.FileSavePostNotify -= _asmPost;
                         d.DestroyNotify     -= _asmDestroy;
+                        if (_asmCfgChange != null)
+                            d.ActiveConfigChangePostNotify -= _asmCfgChange;
                     }
                     else if (_type == (int)swDocumentTypes_e.swDocDRAWING && _drwSave != null)
                     {
@@ -544,10 +830,12 @@ namespace PDMLite
                 _partSave = null; _partSaveAs = null; _partPost = null; _partDestroy = null;
                 _asmSave  = null; _asmSaveAs  = null; _asmPost  = null; _asmDestroy  = null;
                 _drwSave  = null; _drwSaveAs  = null; _drwPost  = null; _drwDestroy  = null;
+                _partCfgChange = null; _asmCfgChange = null;
             }
 
             private int OnSave(string fileName) => _addin.ValidateSave(_doc, fileName);
             private int OnPost(int t, string fn) => _addin.OnSavePost(_doc, fn);
+            private int OnConfigChange() { _addin.OnActiveConfigChanged(); return 0; }
 
             private int OnDestroy()
             {
