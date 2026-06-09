@@ -1962,11 +1962,24 @@ namespace PDMLite
             }
 
             // No drawing found — create one from the model immediately.
-            // Multi-config  → config-specific drawing named {configName}.slddrw
-            //               saved straight to the model's folder so the next
-            //               "Open Drawing" click finds it on disk.
-            // Single-config → shared drawing named {modelBasename}.slddrw
-            //               (existing behaviour).
+            // Single-config → always the shared {modelBasename}.slddrw.
+            // Multi-config  → ask ONCE whether this should be a common drawing
+            //               (shared by every config) or a config-specific one
+            //               ({configName}.slddrw). The name chosen here is the
+            //               only place the decision is made; after that the file
+            //               on disk carries it and the prompt never repeats.
+            bool createPerConfig = false;
+            if (isMultiConfig && !string.IsNullOrEmpty(safeCfgName))
+            {
+                int cfgCount = PropertyValidator.GetConfigNames(doc).Count;
+                using (var scopeDlg = new DrawingScopeDialog(cfgCount, activeConfig))
+                {
+                    if (scopeDlg.ShowDialog() != DialogResult.OK) return; // cancelled
+                    createPerConfig =
+                        scopeDlg.Result == DrawingScopeDialog.Scope.PerConfig;
+                }
+            }
+
             string drwTemplate = PDMLiteAddin.SwApp.GetUserPreferenceStringValue(
                 (int)swUserPreferenceStringValue_e.swDefaultTemplateDrawing);
             ModelDoc2 newDrw = PDMLiteAddin.SwApp
@@ -1986,7 +1999,7 @@ namespace PDMLite
             // immediately findable (and tracked in vault.xml via OnSavePost).
             if (newDrw != null && !string.IsNullOrEmpty(dir))
             {
-                string newDrwName = (isMultiConfig && !string.IsNullOrEmpty(safeCfgName))
+                string newDrwName = createPerConfig
                     ? safeCfgName + ".slddrw"
                     : modelBasename + ".slddrw";
                 string newDrwPath = Path.Combine(dir, newDrwName);
