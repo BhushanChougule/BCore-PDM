@@ -177,7 +177,7 @@ namespace PDMLite
         // section acquires it for the full load→save, so writes never interleave.
         // Reentrant per-thread (a DB method may call another) since a single
         // process cannot re-open its own FileShare.None handle.
-        private const string LockFile = @"N:\PDM-SolidWorks\VAULT\vault.lock";
+        private const string LockFilePath = @"N:\PDM-SolidWorks\VAULT\vault.lock";
 
         [ThreadStatic] private static FileStream _procLockStream;
         [ThreadStatic] private static int _procLockDepth;
@@ -199,7 +199,7 @@ namespace PDMLite
             {
                 try
                 {
-                    _procLockStream = new FileStream(LockFile,
+                    _procLockStream = new FileStream(LockFilePath,
                         FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None);
                     _procLockDepth = 1;
                     return new LockReleaser();
