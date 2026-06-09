@@ -294,7 +294,11 @@ Core vault operations.
 
 \### ExportManager.cs
 
-\- ExportAll(doc, exportRoot, stamp) → routes to correct export by file type
+\- ExportAll(doc, exportRoot, stamp) → routes to correct export by file type (single-config path)
+
+\- ExportStepOnly(doc, exportRoot, stamp) → exports STEP only; active config at call time = exported geometry. Called once per config in the multi-config release loop
+
+\- ExportFlatPatternOnly(doc, exportRoot, stamp) → exports flat-pattern DXF only; called once for the original active config after the multi-config STEP loop
 
 \- ExportDrawingPdf(doc, outPath) → drawing to PDF (all sheets)
 
@@ -556,13 +560,23 @@ auto-weight → duplicate part number → check refs → allow save → post-sav
 
 \### Master Release (Part/Assembly)
 
-validate properties → check broken refs → (assembly) check child parts Released →
+validate ALL configs (ValidateAllConfigs) → offer PropertyForm for active config → check broken refs →
 
-(assembly) drawing-release gate: each component with a drawing must have it Released
+(assembly) check child parts Released → (assembly) drawing-release gate →
 
-(blocks); Manufactured components with no drawing warn (override); Purchased/Toolbox
+confirm dialog: single-config shows PartNo/Rev; multi-config lists all configs with PartNo + Rev →
 
-skipped → archive old exports → export STEP → copy to RELEASED → set read-only → update DB
+auto-fill CheckedBy, CheckedDate, PartWeight on EVERY configuration →
+
+archive old exports + export files:
+
+\- Single-config: ArchiveOldExports(partNoClean) + ExportAll (STEP + DXF)
+
+\- Multi-config: archive per-config → ExportStepOnly per config (switch config before each) → restore active config → ExportFlatPatternOnly once (sheet metal DXF for original active config)
+
+→ copy to RELEASED → set read-only → update DB
+
+Success dialog lists all configs (PN + Rev) for multi-config files.
 
 
 
@@ -596,13 +610,15 @@ blocker dialogs still show.
 
 \### Master New Revision
 
-remove read-only → archive SW file to ARCHIVE\\{type}\\ → bump revision letter →
+\- Single-config: confirm dialog (current REV → new REV) → remove read-only → archive SW file to ARCHIVE\\{type}\\ → bump revision letter → save → reset to WIP in DB → StartDrawingRevisionWith (basename drawing) → warn about parent assemblies
 
-save → reset to WIP in DB → auto-start associated drawing revision (archive drawing as
+\- Multi-config: ConfigRevisionPickerForm (checklist, all configs pre-checked, current→next per config) → Master picks which configs to bump → archive SW file (file-level, at active config's currentRev) → reopen writable → loop: SetProperty(Revision, nextRevForConfig, cfgName) for each selected config → save → reset to WIP → drawing revision: collect unique drawings (FindDrawingPath for shared + GetDrawingsForConfig per selected config) → StartDrawingRevisionWith for each unique drawing → warn parent assemblies
 
-matched pair at old rev, return to WIP — drawing rev letter syncs at drawing release) →
+\- suppressPrompts (bulk approve): skips picker, bumps ALL configs automatically
 
-warn about parent assemblies that reference this file
+\- Archive naming: file-level (one SW archive per revision bump, regardless of config count)
+
+\- StartDrawingRevisionWith(modelPath, currentRev, nextRev, user, explicitDrwPath=null) — optional explicit drawing path lets multi-config path pass a pre-resolved drawing (skips FindDrawingPath)
 
 
 
@@ -739,6 +755,10 @@ GetNextRevision() in VaultManager.cs handles this
 \- Multi-user conflict detection: opening a WIP file already open by another engineer warns "FILE ALREADY OPEN — last save wins" (soft presence in vault.xml <OpenSessions>, distinct from the Master Lock). Presence follows the active doc (assembly/drawing components don't register), warns once per open, cleared on close; per-machine sessions wiped on addin load/unload + 24h staleness backstop so a crash never leaves a false warning
 
 \- Bulk operations (all in PendingRequestsForm, so the task pane stays uncluttered): per-column checkboxes + "Approve Selected" (type-aware via VaultManager.BulkApprove), green "Approve All Pending", and blue "Bulk Release…" → BulkReleaseForm (pick any WIP files, release in one pass). Batch releases ordered parts→assemblies→drawings; one summary dialog reports done/skipped; blocked files stay pending
+
+\- Multi-config Release: ValidateAllConfigs before release; CheckedBy/CheckedDate/PartWeight set on every config; one STEP per config exported (ExportStepOnly per config, config switched before each); flat DXF once for original active config (ExportFlatPatternOnly); confirm + success dialogs list all configs with PN + Rev
+
+\- Multi-config New Revision: ConfigRevisionPickerForm checklist (all configs pre-checked, current→next per config); Master selects which configs to bump; selected configs get their own next Revision via SetProperty(doc, "Revision", nextRev, cfgName); drawings collected via FindDrawingPath (shared) + GetDrawingsForConfig per selected config and all started via StartDrawingRevisionWith; suppressPrompts bumps all configs with no picker; archive naming remains file-level
 
 
 
