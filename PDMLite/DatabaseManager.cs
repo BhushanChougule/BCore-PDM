@@ -141,7 +141,12 @@ namespace PDMLite
         // Always called while the cross-process lock is held (see AcquireProcessLock).
         private static void Save(XDocument doc)
         {
-            string tmp = DataFile + ".tmp";
+            // Per-process temp name (machine + PID). Under the lock only one
+            // writer is ever active, but in degraded mode (lock unavailable on a
+            // network blip) two machines must NOT share one .tmp — interleaved
+            // writes would let File.Replace promote a corrupt temp into place.
+            string tmp = DataFile + "." + Environment.MachineName + "."
+                + System.Diagnostics.Process.GetCurrentProcess().Id + ".tmp";
             doc.Save(tmp);
             try
             {
