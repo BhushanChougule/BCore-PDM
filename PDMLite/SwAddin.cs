@@ -358,6 +358,124 @@ namespace PDMLite
                     PropertyValidator.FixDateFormats(doc);
                     PropertyValidator.AutoFillWeight(doc);
 
+                    // Rule 3.5: every configuration in the file must have a
+                    // unique Part Number. SOLIDWORKS copies all properties when
+                    // a new config is created, so duplicate PartNos are the
+                    // normal result of "right-click → Add Configuration". Detect
+                    // and force the user to enter unique values before saving.
+                    var allCfgsVS = PropertyValidator.GetConfigNames(doc);
+                    if (allCfgsVS.Count > 1)
+                    {
+                        // Map PartNo → [configs that share it]
+                        var pnMap = new Dictionary<string, List<string>>(
+                            StringComparer.OrdinalIgnoreCase);
+                        foreach (string c in allCfgsVS)
+                        {
+                            string pn = PropertyValidator.GetProperty(
+                                doc, "PartNo", c);
+                            if (!pnMap.ContainsKey(pn))
+                                pnMap[pn] = new List<string>();
+                            pnMap[pn].Add(c);
+                        }
+
+                        // Groups of configs that share a PartNo (size > 1 = dup)
+                        var dupGroups = pnMap.Values
+                            .Where(g => g.Count > 1).ToList();
+
+                        if (dupGroups.Count > 0)
+                        {
+                            string activeCfgVS = (doc.GetActiveConfiguration()
+                                as SolidWorks.Interop.sldworks.Configuration)
+                                ?.Name ?? "";
+
+                            // Configs already tracked in vault are "established".
+                            // Configs NOT in vault are newly added (the copy).
+                            var vaultCfgNames = DatabaseManager
+                                .GetConfigsForFile(filePath)
+                                .Select(c => c.Name)
+                                .ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+                            // Collect configs to fix: prefer new (not-in-vault)
+                            // ones; fall back to non-active ones when all are
+                            // established (user manually duplicated a PartNo).
+                            var toFix = new List<string>();
+                            foreach (var grp in dupGroups)
+                            {
+                                var newOnes = grp
+                                    .Where(c => !vaultCfgNames.Contains(c))
+                                    .ToList();
+                                if (newOnes.Count > 0)
+                                    toFix.AddRange(newOnes);
+                                else
+                                    toFix.AddRange(grp.Where(c =>
+                                        !string.Equals(c, activeCfgVS,
+                                            StringComparison.OrdinalIgnoreCase)));
+                            }
+                            toFix = toFix
+                                .Distinct(StringComparer.OrdinalIgnoreCase)
+                                .ToList();
+
+                            foreach (string dupCfg in toFix)
+                            {
+                                string dupPn = PropertyValidator.GetProperty(
+                                    doc, "PartNo", dupCfg);
+                                doc.ShowConfiguration2(dupCfg);
+                                SwApp.SendMsgToUser2(
+                                    "DUPLICATE PART NUMBER — UNIQUE VALUES NEEDED:\n\n" +
+                                    "Configuration : \"" + dupCfg + "\"\n" +
+                                    "Part No       : " + dupPn +
+                                    "  (same as another configuration)\n\n" +
+                                    "SOLIDWORKS copies all properties when a new " +
+                                    "configuration is created.\n" +
+                                    "Please enter a unique Part No, Drawing No, " +
+                                    "and Description for this configuration.",
+                                    (int)swMessageBoxIcon_e.swMbWarning,
+                                    (int)swMessageBoxBtn_e.swMbOk);
+
+                                using (var form = new PropertyForm(
+                                    doc,
+                                    new List<string>
+                                        { "PartNo", "DrawingNo", "Description" }))
+                                {
+                                    form.ShowDialog();
+                                }
+                            }
+
+                            // Restore original active config
+                            if (toFix.Count > 0 &&
+                                !string.IsNullOrEmpty(activeCfgVS))
+                                doc.ShowConfiguration2(activeCfgVS);
+
+                            // Re-check: block if any duplicates remain
+                            var recheckMap = new Dictionary<string, List<string>>(
+                                StringComparer.OrdinalIgnoreCase);
+                            foreach (string c in allCfgsVS)
+                            {
+                                string pn = PropertyValidator.GetProperty(
+                                    doc, "PartNo", c);
+                                if (!recheckMap.ContainsKey(pn))
+                                    recheckMap[pn] = new List<string>();
+                                recheckMap[pn].Add(c);
+                            }
+                            var stillDups = recheckMap.Values
+                                .Where(g => g.Count > 1)
+                                .SelectMany(g => g)
+                                .Distinct(StringComparer.OrdinalIgnoreCase)
+                                .ToList();
+                            if (stillDups.Count > 0)
+                            {
+                                Block(
+                                    "Save blocked — duplicate Part Numbers across " +
+                                    "configurations:\n\n• " +
+                                    string.Join("\n• ", stillDups) + "\n\n" +
+                                    "Each configuration must have a unique Part No. " +
+                                    "Switch to the affected configuration and change " +
+                                    "its Part No before saving.");
+                                return 1;
+                            }
+                        }
+                    }
+
                     // Rule 4: duplicate part number (another file already uses it)
                     string partNo = PropertyValidator.GetProperty(doc, "PartNo");
                     string conflict = DatabaseManager.FindPartNumberConflict(partNo, filePath);
