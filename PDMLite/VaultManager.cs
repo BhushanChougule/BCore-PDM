@@ -820,6 +820,12 @@ namespace PDMLite
                 }
             }
 
+            // ── BOM CSV (assemblies only, top-level) ──────────────────────
+            // Auto-generated on every assembly release alongside the STEP.
+            // Non-fatal — a BOM failure never blocks the release.
+            if (docType == (int)swDocumentTypes_e.swDocASSEMBLY)
+                ExportManager.ExportBom(doc, ExportRoot, stamp);
+
             // ── Copy to RELEASED folder ───────────────────────────────────
             Directory.CreateDirectory(RelFolder);
             string releasedCopy = Path.Combine(RelFolder,
@@ -1526,6 +1532,21 @@ namespace PDMLite
             catch { }
         }
 
+        // Move every file in srcDir matching pattern into destDir, overwriting
+        // a stale same-named archive copy. No-op if srcDir is missing.
+        private static void MoveMatching(string srcDir, string destDir,
+            string pattern)
+        {
+            if (!Directory.Exists(srcDir)) return;
+            Directory.CreateDirectory(destDir);
+            foreach (string file in Directory.GetFiles(srcDir, pattern))
+            {
+                string dest = Path.Combine(destDir, Path.GetFileName(file));
+                if (File.Exists(dest)) File.Delete(dest);
+                File.Move(file, dest);
+            }
+        }
+
         // ── Move old exports to archive before releasing new revision ─
         private static void ArchiveOldExports(string fileIdentifier,
                                                bool isDrawing)
@@ -1534,11 +1555,18 @@ namespace PDMLite
             {
                 string pdfExport = Path.Combine(ExportRoot, "PDF");
                 string stepExport = Path.Combine(ExportRoot, "STEP");
+                string bomExport = Path.Combine(ExportRoot, "BOM");
                 string pdfArchive = Path.Combine(ObsFolder, "PDF");
                 string stepArchive = Path.Combine(ObsFolder, "STEP");
+                string bomArchive = Path.Combine(ObsFolder, "BOM");
 
                 Directory.CreateDirectory(pdfArchive);
                 Directory.CreateDirectory(stepArchive);
+
+                // Move old BOM CSVs matching this identifier (assemblies only;
+                // parts/drawings never produce one, so nothing matches for them)
+                if (!isDrawing)
+                    MoveMatching(bomExport, bomArchive, fileIdentifier + "*_BOM.csv");
 
                 // Move old PDFs matching this identifier
                 if (Directory.Exists(pdfExport))
@@ -2726,6 +2754,10 @@ namespace PDMLite
 
                 Directory.CreateDirectory(pdfArchive);
                 Directory.CreateDirectory(stepArchive);
+
+                // Move the BOM CSV (assemblies) matching this part number
+                MoveMatching(Path.Combine(ExportRoot, "BOM"),
+                    Path.Combine(ObsFolder, "BOM"), partNoClean + "*_BOM.csv");
 
                 // Move all STEP files matching part number
                 if (Directory.Exists(stepExport))

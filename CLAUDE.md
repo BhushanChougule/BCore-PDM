@@ -64,9 +64,13 @@ N:\\PDM-SolidWorks\\
 
 \- ARCHIVE\\STEP\\          → archived STEP exports
 
+\- ARCHIVE\\BOM\\           → archived assembly BOM CSVs
+
 \- EXPORTS\\PDF\\           → current released PDFs
 
 \- EXPORTS\\STEP\\          → current released STEP files
+
+\- EXPORTS\\BOM\\           → current released assembly BOM CSVs (top-level, one per assembly release)
 
 \- SCRAP\\                 → files retired via Remove from Vault (WIP copy, RELEASED snapshot, exports MOVED here, timestamped). Separate from ARCHIVE (old revisions). Recoverable until a Master bulk-purges it. Auto-created by Initialize.
 
@@ -290,9 +294,11 @@ Core vault operations.
 
 \- SetReadOnly(path, bool) → sets/removes OS-level FileAttributes.ReadOnly
 
-\- ArchiveOldExports(archiveId, isDrawing) → moves old STEP/PDF to archive before release
+\- ArchiveOldExports(archiveId, isDrawing) → moves old STEP/PDF (and BOM CSV for non-drawings) to archive before release. Uses the MoveMatching(srcDir, destDir, pattern) helper
 
-\- CleanupExportsOnRollback(partNoClean, drawingNo) → moves all exports to archive on rollback
+\- CleanupExportsOnRollback(partNoClean, drawingNo) → moves all exports (STEP/PDF/BOM) to archive on rollback
+
+\- MoveMatching(srcDir, destDir, pattern) → private helper; moves every file in srcDir matching pattern to destDir (overwriting a stale archive copy); no-op if srcDir missing. Used by both ArchiveOldExports and CleanupExportsOnRollback
 
 
 
@@ -305,6 +311,8 @@ Core vault operations.
 \- ExportFlatPatternOnly(doc, exportRoot, stamp) → exports flat-pattern DXF only; called once for the original active config after the multi-config STEP loop
 
 \- ExportDrawingPdf(doc, outPath) → drawing to PDF (all sheets)
+
+\- ExportBom(asmDoc, exportRoot, stamp) → assemblies ONLY; writes EXPORTS\\BOM\\{stamp}\_BOM.csv (stamp = {partNoClean}-R{rev}, the assembly's active config). TOP-LEVEL BOM: AssemblyDoc.GetComponents(true); each unique component (path + ReferencedConfiguration) is ONE row with a Qty count (repeated instances increment Qty); suppressed components skipped; Purchased/Toolbox hardware IS listed (a BOM needs it). Columns: Item,PartNo,Description,Revision,Material,PartType,Qty — each read config-specifically from the component's referenced config (ReadProp helper, falls back to active config; PartNo falls back to filename if unreadable). RFC-4180 CSV escaping (Csv helper, mirrors AuditLogger). Wrapped in try/catch — a BOM failure NEVER blocks the release. Called from ReleaseFile after the STEP export, gated on docType==swDocASSEMBLY.
 
 \- Part/Assembly → STEP export to EXPORTS\\STEP\\
 
@@ -774,11 +782,11 @@ GetNextRevision() in VaultManager.cs handles this
 
 \- Per-config drawing support in OpenOrCreateDrawing: config-specific drawing ({configName}.slddrw) is searched for first; shared drawing ({modelBasename}.slddrw) is the fallback. When neither exists for a multi-config part, DrawingScopeDialog prompts ONCE — Common drawing (one for all configs, {modelBasename}.slddrw) vs This configuration only ({configName}.slddrw) vs Cancel — so the common-vs-per-config decision is an explicit user choice at creation time, not a guess. After that the file name on disk carries the decision and the prompt never repeats. Both patterns coexist — switching active config and clicking "Open Drawing" opens (or creates) the right drawing for that config. Single-config parts skip the prompt (always shared).
 
+\- BOM Export (CSV) on assembly release: every assembly release auto-generates a TOP-LEVEL BOM at EXPORTS\\BOM\\{partNoClean}-R{rev}\_BOM.csv (ExportManager.ExportBom). One row per unique top-level component (path + referenced config) with a Qty count; Purchased/Toolbox hardware included; columns Item,PartNo,Description,Revision,Material,PartType,Qty read config-specifically. Non-fatal (a BOM failure never blocks release). Old BOMs archived to ARCHIVE\\BOM\\ on re-release and rollback (via the shared MoveMatching helper). CSV chosen over .xlsx to avoid a NuGet/native dependency on the engineer PCs (matches audit.csv); reflects the assembly's active config at release time.
+
 
 
 \## Remaining Features (in priority order)
-
-1\. BOM Export to Excel on assembly release
 
 5\. Watermark on released PDFs
 
