@@ -317,6 +317,9 @@ namespace PDMLite
             // dialog and swaps the success message for a combined one.
             bool chainedRelease = false;
             string chainedModelName = null;
+            // Hoisted to function scope so the close block can reference it.
+            // Set inside the isDrawing gate below.
+            string referencedModel = null;
 
             if (!IsMaster(user)) { NotMaster(); return; }
 
@@ -334,7 +337,7 @@ namespace PDMLite
             // ── Drawing: check referenced part is Released first ──────────
             if (isDrawing)
             {
-                string referencedModel = GetDrawingReferencedModel(doc);
+                referencedModel = GetDrawingReferencedModel(doc);
                 if (!string.IsNullOrEmpty(referencedModel))
                 {
                     string modelStatus = DatabaseManager.GetFileStatus(referencedModel);
@@ -756,7 +759,8 @@ namespace PDMLite
                 if (relCfgsEx.Count <= 1)
                 {
                     // Single-config: existing path
-                    ArchiveOldExports(partNo.Replace(".", ""), isDrawing: false);
+                    ArchiveOldExports(partNo.Replace(".", ""), isDrawing: false,
+                        bomIdentifier: partNo);
                     ExportManager.ExportAll(doc, ExportRoot, stamp);
                 }
                 else
@@ -765,12 +769,16 @@ namespace PDMLite
                     string origCfgEx = (doc.GetActiveConfiguration()
                         as SolidWorks.Interop.sldworks.Configuration)?.Name;
 
-                    // Archive old STEP files for all configs before exporting new ones
+                    // Archive old STEP files for all configs before exporting new ones.
+                    // Pass raw PartNo as bomIdentifier — the BOM file uses the raw
+                    // PartNo; only one BOM exists (active config), so only one of
+                    // these MoveMatching calls will actually find a match.
                     foreach (string c in relCfgsEx)
                     {
                         string cp = PropertyValidator.GetProperty(doc, "PartNo", c);
                         if (!string.IsNullOrEmpty(cp))
-                            ArchiveOldExports(cp.Replace(".", ""), isDrawing: false);
+                            ArchiveOldExports(cp.Replace(".", ""), isDrawing: false,
+                                bomIdentifier: cp);
                     }
 
                     // Export one STEP per config (switch → export → next).
@@ -824,7 +832,7 @@ namespace PDMLite
             // Auto-generated on every assembly release alongside the STEP.
             // Non-fatal — a BOM failure never blocks the release.
             if (docType == (int)swDocumentTypes_e.swDocASSEMBLY)
-                ExportManager.ExportBom(doc, ExportRoot, stamp);
+                ExportManager.ExportBom(doc, ExportRoot, partNo, rev);
 
             // ── Copy to RELEASED folder ───────────────────────────────────
             Directory.CreateDirectory(RelFolder);
@@ -960,6 +968,18 @@ namespace PDMLite
                 }
 
                 PDMLiteAddin.SwApp.CloseDoc(filePath);
+
+                // Chained release: close the referenced model now that the drawing
+                // is closed. The model's own ReleaseFile (called with
+                // suppressPrompts:true) attempted CloseDoc(model) earlier, but the
+                // drawing was still open at that point and SOLIDWORKS refused to
+                // close the model while a document was referencing it. Now that
+                // the drawing is closed the reference is gone, so the close succeeds.
+                if (chainedRelease && !string.IsNullOrEmpty(referencedModel))
+                {
+                    if (PDMLiteAddin.SwApp?.GetOpenDocumentByName(referencedModel) != null)
+                        try { PDMLiteAddin.SwApp.CloseDoc(referencedModel); } catch { }
+                }
 
                 if (reopenWipDrawing && drwPath != null)
                 {
@@ -1548,8 +1568,11 @@ namespace PDMLite
         }
 
         // ── Move old exports to archive before releasing new revision ─
+        // bomIdentifier: raw PartNo for BOM glob (dots preserved). Defaults to
+        // fileIdentifier when null (e.g. drawings, which have no BOM).
         private static void ArchiveOldExports(string fileIdentifier,
-                                               bool isDrawing)
+                                               bool isDrawing,
+                                               string bomIdentifier = null)
         {
             try
             {
@@ -1563,10 +1586,13 @@ namespace PDMLite
                 Directory.CreateDirectory(pdfArchive);
                 Directory.CreateDirectory(stepArchive);
 
-                // Move old BOM CSVs matching this identifier (assemblies only;
-                // parts/drawings never produce one, so nothing matches for them)
+                // Move old BOM CSVs matching this assembly's raw PartNo (assemblies
+                // only; parts/drawings never produce a BOM, so nothing matches them)
                 if (!isDrawing)
-                    MoveMatching(bomExport, bomArchive, fileIdentifier + "*_BOM.csv");
+                {
+                    string bid = bomIdentifier ?? fileIdentifier;
+                    MoveMatching(bomExport, bomArchive, bid + "*_BOM.csv");
+                }
 
                 // Move old PDFs matching this identifier
                 if (Directory.Exists(pdfExport))
@@ -1736,7 +1762,7 @@ namespace PDMLite
                 string partNo = PropertyValidator.GetProperty(doc, "PartNo");
                 string partNoClean = partNo.Replace(".", "");
                 string drawingNo = PropertyValidator.GetProperty(doc, "DrawingNo");
-                CleanupExportsOnRollback(partNoClean, drawingNo);
+                CleanupExportsOnRollback(partNoClean, drawingNo, partNo);
 
                 // ── Step 8: Update database ───────────────────────────────
                 DatabaseManager.LockFile(filePath, user);
@@ -2742,8 +2768,11 @@ namespace PDMLite
             return string.Join(",", configs);
         }
         // ── Move ALL exports for this part to archive on rollback ─────
+        // rawPartNo: original PartNo (dots preserved) for BOM glob. When null
+        // falls back to partNoClean (no-dots version used for STEP/PDF globs).
         private static void CleanupExportsOnRollback(string partNoClean,
-                                                      string drawingNo)
+                                                      string drawingNo,
+                                                      string rawPartNo = null)
         {
             try
             {
@@ -2755,9 +2784,11 @@ namespace PDMLite
                 Directory.CreateDirectory(pdfArchive);
                 Directory.CreateDirectory(stepArchive);
 
-                // Move the BOM CSV (assemblies) matching this part number
+                // Move the BOM CSV (assemblies) — use raw PartNo so the glob
+                // matches the {partNo}-R{rev}_BOM.csv filename correctly.
+                string bomId = rawPartNo ?? partNoClean;
                 MoveMatching(Path.Combine(ExportRoot, "BOM"),
-                    Path.Combine(ObsFolder, "BOM"), partNoClean + "*_BOM.csv");
+                    Path.Combine(ObsFolder, "BOM"), bomId + "*_BOM.csv");
 
                 // Move all STEP files matching part number
                 if (Directory.Exists(stepExport))

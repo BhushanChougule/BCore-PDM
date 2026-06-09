@@ -61,16 +61,17 @@ namespace PDMLite
         }
 
         // ── Top-level BOM (assemblies only) ───────────────────────────────────
-        // Writes EXPORTS\BOM\{stamp}_BOM.csv automatically on assembly release.
-        // Lists each top-level component ONCE with its quantity and the config-
-        // specific identifiers (Part No, Description, Revision, Material, PartType)
-        // read from the configuration the assembly references. Top-level only —
-        // sub-assembly internals are not expanded. Purchased/Toolbox hardware IS
-        // listed (a BOM needs it). Never throws: a BOM failure must not block a
-        // release. The BOM reflects the assembly's ACTIVE configuration at release
-        // time (matches the structure being released).
+        // Writes EXPORTS\BOM\{partNo}-R{rev}_BOM.csv automatically on assembly release.
+        // Uses the raw PartNo (dots/dashes preserved) — no filesystem-safe stripping
+        // needed for a CSV filename, and the original form matches what engineers see
+        // on drawings. Lists each top-level component ONCE with its quantity and the
+        // config-specific identifiers read from the configuration the assembly references.
+        // Top-level only — sub-assembly internals are not expanded. Purchased/Toolbox
+        // hardware IS listed (a BOM needs it). Never throws: a BOM failure must not
+        // block a release. The BOM reflects the assembly's ACTIVE configuration at
+        // release time (matches the structure being released).
         public static void ExportBom(ModelDoc2 asmDoc, string exportRoot,
-            string stamp)
+            string partNo, string rev)
         {
             try
             {
@@ -146,7 +147,8 @@ namespace PDMLite
                 }
 
                 File.WriteAllText(
-                    Path.Combine(bomFolder, stamp + "_BOM.csv"), sb.ToString());
+                    Path.Combine(bomFolder, partNo + "-R" + rev + "_BOM.csv"),
+                    sb.ToString());
             }
             catch { } // a BOM failure must never block a release
         }
