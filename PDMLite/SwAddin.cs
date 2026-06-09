@@ -395,6 +395,15 @@ namespace PDMLite
                                 .Select(c => c.Name)
                                 .ToHashSet(StringComparer.OrdinalIgnoreCase);
 
+                            // On the FIRST save the file isn't in vault yet, so
+                            // every config looks "new" and the user would be
+                            // prompted for the active config they just filled in
+                            // (Rule 3). Treat the active config as established so
+                            // only the genuine duplicates get a form.
+                            if (vaultCfgNames.Count == 0 &&
+                                !string.IsNullOrEmpty(activeCfgVS))
+                                vaultCfgNames.Add(activeCfgVS);
+
                             // Collect configs to fix: prefer new (not-in-vault)
                             // ones; fall back to non-active ones when all are
                             // established (user manually duplicated a PartNo).

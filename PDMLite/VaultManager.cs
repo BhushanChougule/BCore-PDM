@@ -581,8 +581,14 @@ namespace PDMLite
 
                     if (refModel != null)
                     {
-                        string partRev = PropertyValidator.GetProperty(
-                            refModel, "Revision");
+                        // Read the revision from the SPECIFIC config this drawing
+                        // documents — not the model's active config (which may be
+                        // any config after a release/export loop switched it).
+                        // Mirrors GetDrawingPartNo / GetDrawingNo.
+                        string drwCfg = GetDrawingPrimaryConfig(doc);
+                        string partRev = !string.IsNullOrEmpty(drwCfg)
+                            ? PropertyValidator.GetProperty(refModel, "Revision", drwCfg)
+                            : PropertyValidator.GetProperty(refModel, "Revision");
                         if (!string.IsNullOrEmpty(partRev))
                         {
                             rev = partRev;
@@ -683,19 +689,27 @@ namespace PDMLite
                 {
                     // Multi-config: set on every config; mass is config-specific
                     // so switch to each one before reading mass properties.
+                    // try/finally guarantees we restore the original config even
+                    // if a mass-property read throws mid-loop.
                     string origCfgAF = (doc.GetActiveConfiguration()
                         as SolidWorks.Interop.sldworks.Configuration)?.Name;
-                    foreach (string c in relCfgsAF)
+                    try
                     {
-                        PropertyValidator.SetProperty(doc, "CheckedBy",
-                            checkedByVal, c);
-                        PropertyValidator.SetProperty(doc, "CheckedDate",
-                            checkedDateVal, c);
-                        doc.ShowConfiguration2(c);
-                        PropertyValidator.AutoFillWeight(doc);
+                        foreach (string c in relCfgsAF)
+                        {
+                            PropertyValidator.SetProperty(doc, "CheckedBy",
+                                checkedByVal, c);
+                            PropertyValidator.SetProperty(doc, "CheckedDate",
+                                checkedDateVal, c);
+                            doc.ShowConfiguration2(c);
+                            PropertyValidator.AutoFillWeight(doc);
+                        }
                     }
-                    if (!string.IsNullOrEmpty(origCfgAF))
-                        doc.ShowConfiguration2(origCfgAF);
+                    finally
+                    {
+                        if (!string.IsNullOrEmpty(origCfgAF))
+                            doc.ShowConfiguration2(origCfgAF);
+                    }
                 }
                 else
                 {
@@ -744,21 +758,50 @@ namespace PDMLite
                             ArchiveOldExports(cp.Replace(".", ""), isDrawing: false);
                     }
 
-                    // Export one STEP per config (switch → export → next)
-                    foreach (string c in relCfgsEx)
+                    // Export one STEP per config (switch → export → next).
+                    // try/finally restores the original config even if a SaveAs
+                    // throws mid-loop. A HashSet guards against two configs that
+                    // share PartNo+Rev silently overwriting each other's STEP.
+                    var emittedStamps = new HashSet<string>(
+                        StringComparer.OrdinalIgnoreCase);
+                    var collidedStamps = new List<string>();
+                    try
                     {
-                        string cp = PropertyValidator.GetProperty(doc, "PartNo", c);
-                        string cr = PropertyValidator.GetProperty(doc, "Revision", c);
-                        if (string.IsNullOrEmpty(cp)) continue;
-                        string cfgStamp = cp.Replace(".", "") + "-R" + cr;
-                        doc.ShowConfiguration2(c);
-                        ExportManager.ExportStepOnly(doc, ExportRoot, cfgStamp);
+                        foreach (string c in relCfgsEx)
+                        {
+                            string cp = PropertyValidator.GetProperty(doc, "PartNo", c);
+                            string cr = PropertyValidator.GetProperty(doc, "Revision", c);
+                            if (string.IsNullOrEmpty(cp)) continue;
+                            string cfgStamp = cp.Replace(".", "") + "-R" + cr;
+                            if (!emittedStamps.Add(cfgStamp))
+                            {
+                                // Another config already exported this exact name —
+                                // exporting again would overwrite it. Skip + report.
+                                collidedStamps.Add(cfgStamp);
+                                continue;
+                            }
+                            doc.ShowConfiguration2(c);
+                            ExportManager.ExportStepOnly(doc, ExportRoot, cfgStamp);
+                        }
                     }
-
-                    // Restore original config; export flat DXF once (sheet metal)
-                    if (!string.IsNullOrEmpty(origCfgEx))
-                        doc.ShowConfiguration2(origCfgEx);
+                    finally
+                    {
+                        // Restore original config; export flat DXF once (sheet metal)
+                        if (!string.IsNullOrEmpty(origCfgEx))
+                            doc.ShowConfiguration2(origCfgEx);
+                    }
                     ExportManager.ExportFlatPatternOnly(doc, ExportRoot, stamp);
+
+                    if (collidedStamps.Count > 0)
+                        MessageBox.Show(
+                            "Warning: these STEP exports were SKIPPED because two " +
+                            "or more configurations share the same Part No + " +
+                            "Revision (they would overwrite each other):\n\n  • " +
+                            string.Join("\n  • ", collidedStamps.Distinct()) +
+                            "\n\nGive each configuration a unique Part No and " +
+                            "release again to export all of them.",
+                            "BCore PDM — Duplicate Export Skipped",
+                            MessageBoxButtons.OK, MessageBoxIcon.Warning);
                 }
             }
 
@@ -1103,27 +1146,41 @@ namespace PDMLite
             }
             else if (isMultiCfg)
             {
-                // Collect unique drawing paths: shared basename drawing +
-                // any config-specific drawings for the selected configs.
-                var drwSet = new HashSet<string>(
+                // Map each unique drawing path to the (current,next) revision it
+                // should receive. A config-specific drawing gets ITS config's
+                // revision (not the active config's); the shared basename drawing
+                // covers all configs so it gets the file-level active-config rev.
+                // First assignment wins, so the shared drawing keeps the file-
+                // level rev even if GetDrawingsForConfig also returns it (covers-
+                // all). This fixes config-specific drawings being stamped with the
+                // wrong config's revision letter.
+                var drwRevs = new Dictionary<string, string[]>(
                     StringComparer.OrdinalIgnoreCase);
                 string baseDrw = FindDrawingPath(filePath);
-                if (baseDrw != null) drwSet.Add(baseDrw);
+                if (baseDrw != null)
+                    drwRevs[baseDrw] = new[] { currentRev, nextRev };
                 foreach (string cfgN in selectedCfgs)
+                {
+                    string cCur = cfgCurrentRevs.ContainsKey(cfgN)
+                        ? cfgCurrentRevs[cfgN] : currentRev;
+                    string cNext = cfgNextRevs.ContainsKey(cfgN)
+                        ? cfgNextRevs[cfgN] : nextRev;
                     foreach (string d in
                         DatabaseManager.GetDrawingsForConfig(filePath, cfgN))
-                        if (!string.IsNullOrEmpty(d)) drwSet.Add(d);
+                        if (!string.IsNullOrEmpty(d) && !drwRevs.ContainsKey(d))
+                            drwRevs[d] = new[] { cCur, cNext };
+                }
 
-                if (drwSet.Count == 0)
+                if (drwRevs.Count == 0)
                 {
                     drwSummary = "none found";
                 }
                 else
                 {
                     var summaries = new List<string>();
-                    foreach (string drw in drwSet)
+                    foreach (var kv in drwRevs)
                         summaries.Add(StartDrawingRevisionWith(
-                            filePath, currentRev, nextRev, user, drw));
+                            filePath, kv.Value[0], kv.Value[1], user, kv.Key));
                     drwSummary = string.Join("; ", summaries);
                 }
             }
@@ -1543,6 +1600,29 @@ namespace PDMLite
 
             // Get current revision
             string currentRev = PropertyValidator.GetProperty(doc, "Revision");
+
+            // Multi-config warning: archives are file-level snapshots, so a
+            // rollback restores the WHOLE file (every configuration) to the
+            // archived state. Configs that were independently bumped to a higher
+            // revision since that archive will lose those changes. Rollback is
+            // not config-aware — make the Master acknowledge this before proceeding.
+            if (ext != ".slddrw")
+            {
+                var rbCfgs = PropertyValidator.GetConfigNames(doc);
+                if (rbCfgs.Count > 1)
+                {
+                    var ack = MessageBox.Show(
+                        "This file has " + rbCfgs.Count + " configurations.\n\n" +
+                        "Rollback restores the ENTIRE file to the archived " +
+                        "revision — ALL configurations revert together. Any " +
+                        "configuration that was bumped to a newer revision since " +
+                        "that archive will LOSE those changes.\n\n" +
+                        "Rollback is not per-configuration. Continue?",
+                        "BCore PDM — Multi-Config Rollback",
+                        MessageBoxButtons.YesNo, MessageBoxIcon.Warning);
+                    if (ack != DialogResult.Yes) return;
+                }
+            }
 
             // Show rollback dialog
             var dialog = new RollbackDialog(archivedFiles, currentRev);
