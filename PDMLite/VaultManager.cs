@@ -1850,34 +1850,69 @@ namespace PDMLite
                 return;
             }
 
-            string dir = Path.GetDirectoryName(filePath);
-            string name = Path.GetFileNameWithoutExtension(filePath);
+            string dir           = Path.GetDirectoryName(filePath);
+            string modelBasename = Path.GetFileNameWithoutExtension(filePath);
 
-            // Build search list: same folder as the part first (fastest, most
-            // common case), then each WIP division subfolder as a fallback in
-            // case the drawing was saved in a different division than the part.
-            var searchDirs = new System.Collections.Generic.List<string> { dir };
+            // Active configuration — relevant for multi-config parts/assemblies
+            string activeConfig  = "";
+            bool   isMultiConfig = false;
+            int    docType       = doc.GetType();
+            if (docType != (int)swDocumentTypes_e.swDocDRAWING)
+            {
+                try
+                {
+                    var cfg = doc.GetActiveConfiguration()
+                        as SolidWorks.Interop.sldworks.Configuration;
+                    activeConfig  = cfg?.Name ?? "";
+                    isMultiConfig = PropertyValidator.GetConfigNames(doc).Count > 1;
+                }
+                catch { }
+            }
+
+            // Sanitise the config name for use as a filename (config = PartNo by
+            // convention, but guard against any characters Windows disallows).
+            var   invalidChars   = Path.GetInvalidFileNameChars();
+            string safeCfgName   = string.IsNullOrEmpty(activeConfig) ? "" :
+                new string(activeConfig.Select(
+                    c => invalidChars.Contains(c) ? '_' : c).ToArray());
+
+            // Build an ORDERED list of drawing names to search for:
+            //   1. Config-specific: {configName}.slddrw  (multi-config only, first)
+            //   2. Shared:          {modelBasename}.slddrw
+            // The first one found on disk wins, giving config-specific drawings
+            // priority over the shared config-table drawing.
+            var candidateNames = new List<string>();
+            if (isMultiConfig && !string.IsNullOrEmpty(safeCfgName))
+                candidateNames.Add(safeCfgName + ".slddrw");
+            candidateNames.Add(modelBasename + ".slddrw");
+
+            // Folders to search: model's own folder first, then every WIP division
+            var searchDirs = new List<string>();
+            if (!string.IsNullOrEmpty(dir)) searchDirs.Add(dir);
             foreach (string div in DatabaseManager.WipDivisions)
                 searchDirs.Add(Path.Combine(WipFolder, div));
 
-            foreach (string searchDir in searchDirs)
+            foreach (string candidateName in candidateNames)
             {
-                string candidate = Path.Combine(searchDir, name + ".slddrw");
-                if (File.Exists(candidate))
+                foreach (string searchDir in searchDirs)
                 {
-                    // Already open → bring it to the front without reopening.
+                    string fullPath = Path.Combine(searchDir, candidateName);
+                    if (!File.Exists(fullPath)) continue;
+
+                    // Already open → bring to front without reopening
                     ModelDoc2 already = PDMLiteAddin.SwApp
-                        .GetOpenDocumentByName(candidate) as ModelDoc2;
+                        .GetOpenDocumentByName(fullPath) as ModelDoc2;
                     if (already != null)
                     {
                         int ae = 0;
-                        PDMLiteAddin.SwApp.ActivateDoc3(candidate, false,
-                            (int)swRebuildOnActivation_e.swDontRebuildActiveDoc, ref ae);
+                        PDMLiteAddin.SwApp.ActivateDoc3(fullPath, false,
+                            (int)swRebuildOnActivation_e.swDontRebuildActiveDoc,
+                            ref ae);
                     }
                     else
                     {
                         int errs = 0, warnings = 0;
-                        PDMLiteAddin.SwApp.OpenDoc6(candidate,
+                        PDMLiteAddin.SwApp.OpenDoc6(fullPath,
                             (int)swDocumentTypes_e.swDocDRAWING,
                             (int)swOpenDocOptions_e.swOpenDocOptions_Silent,
                             "", ref errs, ref warnings);
@@ -1896,25 +1931,42 @@ namespace PDMLite
                 {
                     ModelDoc2 openDoc = obj as ModelDoc2;
                     if (openDoc == null) continue;
-                    if (openDoc.GetType() != (int)swDocumentTypes_e.swDocDRAWING) continue;
+                    if (openDoc.GetType() !=
+                        (int)swDocumentTypes_e.swDocDRAWING) continue;
                     if (!string.IsNullOrEmpty(openDoc.GetPathName())) continue;
-                    // Unsaved drawing — check if it was created for this model.
+
                     string refModel = GetDrawingReferencedModel(openDoc);
-                    if (string.Equals(refModel, filePath,
-                            StringComparison.OrdinalIgnoreCase))
+                    if (!string.Equals(refModel, filePath,
+                            StringComparison.OrdinalIgnoreCase)) continue;
+
+                    // For multi-config: the unsaved drawing must reference the
+                    // same config — don't reuse a drawing created for a different
+                    // config that happens to reference the same model.
+                    if (isMultiConfig && !string.IsNullOrEmpty(activeConfig))
                     {
-                        int ae = 0;
-                        PDMLiteAddin.SwApp.ActivateDoc3(openDoc.GetTitle(), false,
-                            (int)swRebuildOnActivation_e.swDontRebuildActiveDoc, ref ae);
-                        return;
+                        string refCfgs = GetDrawingReferencedConfigs(openDoc);
+                        if (!string.IsNullOrEmpty(refCfgs))
+                        {
+                            bool matches = refCfgs.Split(',').Any(c =>
+                                string.Equals(c.Trim(), activeConfig,
+                                    StringComparison.OrdinalIgnoreCase));
+                            if (!matches) continue;
+                        }
                     }
+
+                    int ae2 = 0;
+                    PDMLiteAddin.SwApp.ActivateDoc3(openDoc.GetTitle(), false,
+                        (int)swRebuildOnActivation_e.swDontRebuildActiveDoc, ref ae2);
+                    return;
                 }
             }
 
-            // No drawing found — create one from the model immediately (no
-            // prompt), the API equivalent of File > Make Drawing from Part/
-            // Assembly. Open the default drawing template and populate its
-            // predefined views with this model so the new drawing isn't blank.
+            // No drawing found — create one from the model immediately.
+            // Multi-config  → config-specific drawing named {configName}.slddrw
+            //               saved straight to the model's folder so the next
+            //               "Open Drawing" click finds it on disk.
+            // Single-config → shared drawing named {modelBasename}.slddrw
+            //               (existing behaviour).
             string drwTemplate = PDMLiteAddin.SwApp.GetUserPreferenceStringValue(
                 (int)swUserPreferenceStringValue_e.swDefaultTemplateDrawing);
             ModelDoc2 newDrw = PDMLiteAddin.SwApp
@@ -1923,15 +1975,43 @@ namespace PDMLite
             DrawingDoc draw = newDrw as DrawingDoc;
             if (draw != null)
             {
-                // Fill the template's predefined views with the model. Returns
-                // true on success; if it fails (e.g. the template has no
-                // predefined views) fall back to standard 3rd-angle views so
-                // the engineer never gets a blank sheet.
                 bool inserted = draw.InsertModelInPredefinedView(filePath);
                 if (!inserted)
                     draw.Create3rdAngleViews2(filePath);
 
                 newDrw.ViewZoomtofit2();
+            }
+
+            // Auto-save the new drawing to the correct WIP path so it is
+            // immediately findable (and tracked in vault.xml via OnSavePost).
+            if (newDrw != null && !string.IsNullOrEmpty(dir))
+            {
+                string newDrwName = (isMultiConfig && !string.IsNullOrEmpty(safeCfgName))
+                    ? safeCfgName + ".slddrw"
+                    : modelBasename + ".slddrw";
+                string newDrwPath = Path.Combine(dir, newDrwName);
+
+                // Only auto-save if the target path does not already exist —
+                // if it does, something else created it between our search and
+                // now (race condition); the user can deal with it manually.
+                if (!File.Exists(newDrwPath))
+                {
+                    try
+                    {
+                        int sErr = 0, sWarn = 0;
+                        PDMLiteAddin.SuppressSaveValidation = true;
+                        try
+                        {
+                            newDrw.Extension.SaveAs(
+                                newDrwPath,
+                                (int)swSaveAsVersion_e.swSaveAsCurrentVersion,
+                                (int)swSaveAsOptions_e.swSaveAsOptions_Silent,
+                                null, ref sErr, ref sWarn);
+                        }
+                        finally { PDMLiteAddin.SuppressSaveValidation = false; }
+                    }
+                    catch { }
+                }
             }
         }
 

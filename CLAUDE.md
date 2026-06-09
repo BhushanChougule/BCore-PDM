@@ -272,7 +272,7 @@ Core vault operations.
 
 \- ViewMyRequests() → Engineer views their own requests (MessageBox)
 
-\- OpenOrCreateDrawing(doc) → searches for matching .slddrw (model folder + every WIP division); opens it if found, else creates a new drawing FROM the model immediately (no prompt) — opens the default drawing template and calls DrawingDoc.InsertModelInPredefinedView to populate its predefined views (the "Make Drawing from Part/Assembly" equivalent); falls back to Create3rdAngleViews2 if the template has no predefined views, so the sheet is never blank. The part/assembly side of the context-aware Open button
+\- OpenOrCreateDrawing(doc) → searches for matching .slddrw (model folder + every WIP division); opens it if found, else creates a new drawing FROM the model immediately (no prompt) — opens the default drawing template and calls DrawingDoc.InsertModelInPredefinedView to populate its predefined views (the "Make Drawing from Part/Assembly" equivalent); falls back to Create3rdAngleViews2 if the template has no predefined views, so the sheet is never blank. The part/assembly side of the context-aware Open button. Multi-config: searches for config-specific drawing ({configName}.slddrw) FIRST, then falls back to the shared drawing ({modelBasename}.slddrw); creates a config-specific drawing if neither exists, auto-saved to the model's folder via SuppressSaveValidation; config name is sanitised for Windows filename safety before use. Unsaved in-memory drawings are matched to the active config via GetDrawingReferencedConfigs.
 
 \- OpenReferencedModel(doc) → from a drawing, opens (or activates if already open) the part/assembly it references; warns if the referenced model can't be found. The drawing side of the context-aware Open button
 
@@ -624,7 +624,7 @@ blocker dialogs still show.
 
 \### Drawing / Assembly linkage (Option B — automatic)
 
-\- Drawing filename MUST match the part/assembly basename ({name}.slddrw). PDF export name still comes from the DrawingNo property.
+\- Drawing filename conventions: single-config uses {modelBasename}.slddrw (shared); multi-config ALSO supports {configName}.slddrw (config-specific, takes priority over shared). Both patterns can coexist — a shared drawing covers all configs; a config-specific drawing covers only that config. PDF export name still comes from the DrawingNo property.
 
 \- Part rev drives the drawing rev (part is the master). Drawing letter syncs to the model immediately at New Revision time (StartDrawingRevisionWith opens the drawing, sets Revision = nextRev, saves, closes). The sync at drawing-release time is still a no-op confirmation.
 
@@ -759,6 +759,10 @@ GetNextRevision() in VaultManager.cs handles this
 \- Multi-config Release: ValidateAllConfigs before release; CheckedBy/CheckedDate/PartWeight set on every config; one STEP per config exported (ExportStepOnly per config, config switched before each); flat DXF once for original active config (ExportFlatPatternOnly); confirm + success dialogs list all configs with PN + Rev
 
 \- Multi-config New Revision: ConfigRevisionPickerForm checklist (all configs pre-checked, current→next per config); Master selects which configs to bump; selected configs get their own next Revision via SetProperty(doc, "Revision", nextRev, cfgName); drawings collected via FindDrawingPath (shared) + GetDrawingsForConfig per selected config and all started via StartDrawingRevisionWith; suppressPrompts bumps all configs with no picker; archive naming remains file-level
+
+\- Intra-file duplicate PartNo detection on save (Rule 3.5 in ValidateSave): when a file has multiple configs and two or more share the same PartNo (e.g. after creating a new config from an existing one), the "new" configs (not yet tracked in vault.xml) are identified, the UI switches to each in turn, shows a warning + PropertyForm pre-populated with PartNo/DrawingNo/Description, then blocks the save if duplicates remain. Uses DatabaseManager.GetConfigsForFile to distinguish new vs established configs.
+
+\- Per-config drawing support in OpenOrCreateDrawing: config-specific drawing ({configName}.slddrw) is searched for first; shared drawing ({modelBasename}.slddrw) is the fallback. Creating a new drawing from a multi-config part auto-saves it as {configName}.slddrw. Both patterns coexist — switching active config and clicking "Open Drawing" opens (or creates) the right drawing for that config.
 
 
 
