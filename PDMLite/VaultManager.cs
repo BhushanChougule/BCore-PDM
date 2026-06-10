@@ -2773,46 +2773,23 @@ namespace PDMLite
         {
             try
             {
-                string pdfExport = Path.Combine(ExportRoot, "PDF");
-                string stepExport = Path.Combine(ExportRoot, "STEP");
-                string pdfArchive = Path.Combine(ObsFolder, "PDF");
-                string stepArchive = Path.Combine(ObsFolder, "STEP");
+                // Each MoveMatching is independent (its own per-file try/catch),
+                // so a failure in one type can't skip the others.
 
-                Directory.CreateDirectory(pdfArchive);
-                Directory.CreateDirectory(stepArchive);
-
-                // Move the BOM CSV (assemblies) — use raw PartNo so the glob
-                // matches the {partNo}-R{rev}_BOM.csv filename correctly.
+                // BOM CSV (assemblies) — raw PartNo so the glob matches the
+                // {partNo}-R{rev}_BOM.csv filename correctly.
                 string bomId = rawPartNo ?? partNoClean;
                 MoveMatching(Path.Combine(ExportRoot, "BOM"),
                     Path.Combine(ObsFolder, "BOM"), bomId + "*_BOM.csv");
 
-                // Move all STEP files matching part number
-                if (Directory.Exists(stepExport))
-                {
-                    foreach (string file in Directory.GetFiles(
-                        stepExport, partNoClean + "*.step"))
-                    {
-                        string dest = Path.Combine(stepArchive,
-                            Path.GetFileName(file));
-                        if (File.Exists(dest)) File.Delete(dest);
-                        File.Move(file, dest);
-                    }
-                }
+                // STEP files matching part number.
+                MoveMatching(Path.Combine(ExportRoot, "STEP"),
+                    Path.Combine(ObsFolder, "STEP"), partNoClean + "*.step");
 
-                // Move all PDFs matching drawing number
-                if (!string.IsNullOrEmpty(drawingNo) &&
-                    Directory.Exists(pdfExport))
-                {
-                    foreach (string file in Directory.GetFiles(
-                        pdfExport, drawingNo + "*.pdf"))
-                    {
-                        string dest = Path.Combine(pdfArchive,
-                            Path.GetFileName(file));
-                        if (File.Exists(dest)) File.Delete(dest);
-                        File.Move(file, dest);
-                    }
-                }
+                // PDFs matching drawing number.
+                if (!string.IsNullOrEmpty(drawingNo))
+                    MoveMatching(Path.Combine(ExportRoot, "PDF"),
+                        Path.Combine(ObsFolder, "PDF"), drawingNo + "*.pdf");
             }
             catch { }
         }

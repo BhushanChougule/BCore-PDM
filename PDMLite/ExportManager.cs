@@ -84,26 +84,17 @@ namespace PDMLite
                 string bomFolder = Path.Combine(exportRoot, "BOM");
                 Directory.CreateDirectory(bomFolder);
 
-                // Diagnostic trace written next to the BOM so we can see exactly
-                // what the SOLIDWORKS API returns (component count, names, states).
-                var diag = new StringBuilder();
-                diag.AppendLine("BOM diagnostic for " + partNo + " REV " + rev);
-                diag.AppendLine("Assembly: " + (asmDoc.GetPathName() ?? ""));
-
-                // Enumerate top-level components. GetRootComponent3(true) RESOLVES
-                // lightweight components (otherwise their models aren't loaded and
-                // properties read back empty); GetChildren() returns the direct
-                // (top-level) children only — sub-assembly internals not expanded.
+                // Enumerate top-level components. GetRootComponent3(true) resolves
+                // the root; GetChildren() returns the direct (top-level) children
+                // only — sub-assembly internals are not expanded. Falls back to
+                // GetComponents(true) if the root walk yields nothing.
                 var comps = new List<Component2>();
                 try
                 {
                     Configuration activeCfg =
                         asmDoc.GetActiveConfiguration() as Configuration;
-                    diag.AppendLine("ActiveConfig: " + (activeCfg?.Name ?? "<null>"));
                     Component2 root = activeCfg?.GetRootComponent3(true);
                     object[] kids = root?.GetChildren() as object[];
-                    diag.AppendLine("GetChildren count: " +
-                        (kids != null ? kids.Length.ToString() : "<null>"));
                     if (kids != null)
                         foreach (object o in kids)
                         {
@@ -111,26 +102,22 @@ namespace PDMLite
                             if (c != null) comps.Add(c);
                         }
                 }
-                catch (System.Exception ex)
-                { diag.AppendLine("GetChildren ERROR: " + ex.Message); }
+                catch { }
 
-                // Cross-check / fallback via GetComponents(true).
-                try
+                if (comps.Count == 0)
                 {
-                    object[] gc = asm.GetComponents(true) as object[];
-                    diag.AppendLine("GetComponents(true) count: " +
-                        (gc != null ? gc.Length.ToString() : "<null>"));
-                    if (comps.Count == 0 && gc != null)
-                        foreach (object o in gc)
-                        {
-                            Component2 c = o as Component2;
-                            if (c != null) comps.Add(c);
-                        }
+                    try
+                    {
+                        object[] gc = asm.GetComponents(true) as object[];
+                        if (gc != null)
+                            foreach (object o in gc)
+                            {
+                                Component2 c = o as Component2;
+                                if (c != null) comps.Add(c);
+                            }
+                    }
+                    catch { }
                 }
-                catch (System.Exception ex)
-                { diag.AppendLine("GetComponents ERROR: " + ex.Message); }
-
-                diag.AppendLine("--- components ---");
 
                 // Group identical components (same path + referenced config) so
                 // each BOM line carries a quantity instead of repeating instances.
@@ -148,22 +135,16 @@ namespace PDMLite
                     // lightweight / resolved / fully-resolved are all PRESENT.
                     int supState = -1;
                     try { supState = comp.GetSuppression2(); } catch { }
-                    bool suppressed = supState ==
-                        (int)swComponentSuppressionState_e.swComponentSuppressed;
+                    if (supState == (int)
+                        swComponentSuppressionState_e.swComponentSuppressed)
+                        continue;
 
                     string path = "";
                     try { path = comp.GetPathName(); } catch { }
+                    if (string.IsNullOrEmpty(path)) continue;
+
                     string refCfg = "";
                     try { refCfg = comp.ReferencedConfiguration ?? ""; } catch { }
-
-                    diag.AppendLine("name=" + SafeName(comp) +
-                        " | supState=" + supState +
-                        " | suppressed=" + suppressed +
-                        " | refCfg=" + refCfg +
-                        " | path=" + path);
-
-                    if (suppressed) continue;
-                    if (string.IsNullOrEmpty(path)) continue;
 
                     string key = path.ToLowerInvariant() + "|" +
                         refCfg.ToLowerInvariant();
@@ -180,9 +161,6 @@ namespace PDMLite
                     // handle or a read-only open so its properties can be read.
                     bool openedHere;
                     ModelDoc2 cm = GetReadableModel(comp, path, out openedHere);
-                    diag.AppendLine("   model=" + (cm != null) +
-                        " openedHere=" + openedHere +
-                        " | Material1=" + ReadProp(cm, "Material1", refCfg));
 
                     var row = new BomRow
                     {
@@ -220,25 +198,8 @@ namespace PDMLite
                 File.WriteAllText(
                     Path.Combine(bomFolder, partNo + "-R" + rev + "_BOM.csv"),
                     sb.ToString());
-
-                // Write the diagnostic sidecar (temporary, to pin down the BOM
-                // enumeration issue). Never fatal.
-                try
-                {
-                    File.WriteAllText(
-                        Path.Combine(bomFolder,
-                            partNo + "-R" + rev + "_BOM_debug.txt"),
-                        diag.ToString());
-                }
-                catch { }
             }
             catch { } // a BOM failure must never block a release
-        }
-
-        // Component name for the diagnostic trace; never throws.
-        private static string SafeName(Component2 comp)
-        {
-            try { return comp.Name2 ?? ""; } catch { return ""; }
         }
 
         // Returns a ModelDoc2 whose custom properties can be read, even for a
