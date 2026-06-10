@@ -32,10 +32,11 @@ namespace PDMLite
         // Populated by GetAllFiles for the Vault Dashboard (empty when not locked).
         // Other queries leave this null — read lock state via GetLockInfo instead.
         public string LockedBy    { get; set; }
-        // Populated by GetAllFiles: the most recent "Released" history timestamp
-        // (DateTime.MinValue if the file was never released). Distinct from
-        // ModifiedDate (last save).
+        // Populated by GetAllFiles: the most recent "Released" history entry's
+        // timestamp + user (DateTime.MinValue / "" if never released). Distinct
+        // from ModifiedDate/ModifiedBy (last save).
         public DateTime ReleasedDate { get; set; }
+        public string ReleasedBy { get; set; }
         public bool HasBrokenRefs { get; set; }
         // Per-configuration metadata (parts/assemblies). Empty for drawings and for
         // old records that haven't been re-saved since this feature shipped.
@@ -994,8 +995,10 @@ namespace PDMLite
             {
                 var doc = LoadOrCreate();
 
-                // Latest "Released" timestamp per file path, from the history log.
-                var releasedByPath = new Dictionary<string, DateTime>(
+                // Latest "Released" timestamp + user per file path, from history.
+                var relDateByPath = new Dictionary<string, DateTime>(
+                    StringComparer.OrdinalIgnoreCase);
+                var relUserByPath = new Dictionary<string, string>(
                     StringComparer.OrdinalIgnoreCase);
                 var hist = doc.Root.Element("RevisionHistory");
                 if (hist != null)
@@ -1013,8 +1016,11 @@ namespace PDMLite
                                 out d))
                             continue;
                         DateTime cur;
-                        if (!releasedByPath.TryGetValue(fp, out cur) || d > cur)
-                            releasedByPath[fp] = d;
+                        if (!relDateByPath.TryGetValue(fp, out cur) || d > cur)
+                        {
+                            relDateByPath[fp] = d;
+                            relUserByPath[fp] = (string)en.Element("ChangedBy") ?? "";
+                        }
                     }
                 }
 
@@ -1034,8 +1040,11 @@ namespace PDMLite
 
                     string filePath = (string)el.Element("FilePath") ?? "";
                     DateTime relDate;
-                    if (!releasedByPath.TryGetValue(filePath, out relDate))
+                    if (!relDateByPath.TryGetValue(filePath, out relDate))
                         relDate = DateTime.MinValue;
+                    string relBy;
+                    if (!relUserByPath.TryGetValue(filePath, out relBy))
+                        relBy = "";
 
                     results.Add(new VaultFile
                     {
@@ -1048,6 +1057,7 @@ namespace PDMLite
                         ModifiedBy  = (string)el.Element("ModifiedBy")  ?? "",
                         ModifiedDate = modDate,
                         ReleasedDate = relDate,
+                        ReleasedBy  = relBy,
                         LockedBy    = (string)el.Element("LockedBy")    ?? "",
                         ReferencedModel = (string)el.Element("ReferencedModel") ?? "",
                         HasBrokenRefs = string.Equals(

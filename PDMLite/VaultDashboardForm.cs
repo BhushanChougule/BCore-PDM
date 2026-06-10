@@ -87,7 +87,7 @@ namespace PDMLite
 
             Font fTitle  = new Font("Segoe UI", 7f * _scale, FontStyle.Bold);
             Font fCtrl   = new Font("Segoe UI", 4f * _scale);
-            Font fSummary = new Font("Segoe UI", 3.3f * _scale, FontStyle.Bold);
+            Font fSummary = new Font("Segoe UI", 4f * _scale, FontStyle.Bold);
             Font fGrid   = new Font("Segoe UI", 3.3f * _scale);
             Font fHeader = new Font("Segoe UI", 3.3f * _scale, FontStyle.Bold);
             Font fBtn    = new Font("Segoe UI", 4f * _scale, FontStyle.Bold);
@@ -97,13 +97,13 @@ namespace PDMLite
             Panel top = new Panel
             {
                 Dock = DockStyle.Top,
-                Height = S(120),
+                Height = S(120),     // tightened below once the summary is placed
                 BackColor = cBg
             };
 
             Label title = new Label
             {
-                Text = "Vault Dashboard",
+                Text = "VAULT DASHBOARD",
                 Font = fTitle,
                 ForeColor = cBrandDark,
                 AutoSize = true,
@@ -154,14 +154,19 @@ namespace PDMLite
             btnExport.Click += (s, e) => ExportCsv();
             top.Controls.Add(btnExport);
 
+            int summaryY = rowY + ctrlH + S(10);
             _summary = new Label
             {
                 Font = fSummary,
                 ForeColor = cTextGray,
                 AutoSize = true,
-                Location = new Point(S(14), rowY + ctrlH + S(12))
+                Location = new Point(S(14), summaryY)
             };
             top.Controls.Add(_summary);
+
+            // Tighten the panel to the summary so the grid sits right below it
+            // (removes the dead space under the counts).
+            top.Height = summaryY + _summary.PreferredHeight + S(6);
 
             // ── Bottom panel: Close ───────────────────────────────────────
             Panel bottom = new Panel
@@ -226,8 +231,8 @@ namespace PDMLite
             // Typed DateTime + format so the date columns sort CHRONOLOGICALLY
             // (a string "MM/dd/yyyy" would sort alphabetically — wrong order).
             AddColumn("Modified Date", 14, typeof(DateTime), "MM/dd/yyyy HH:mm");
+            AddColumn("Released By", 11);
             AddColumn("Released Date", 14, typeof(DateTime), "MM/dd/yyyy HH:mm");
-            AddColumn("Locked By", 11);
 
             // Add Fill control FIRST, then the docked edge panels, so the grid
             // occupies the leftover space between them.
@@ -336,7 +341,7 @@ namespace PDMLite
 
                 int idx = _grid.Rows.Add(
                     f.FileName, f.PartNumber, f.Description, f.Status,
-                    f.Revision, f.ModifiedBy, modVal, relVal, f.LockedBy);
+                    f.Revision, f.ModifiedBy, modVal, f.ReleasedBy, relVal);
 
                 var row = _grid.Rows[idx];
                 row.Tag = f.FilePath;
@@ -357,7 +362,7 @@ namespace PDMLite
             UpdateSummary(view.Count);
         }
 
-        // Size each column to its widest value + ~10% so columns always look
+        // Size each column to its widest value + ~20% so columns always look
         // uniform and tidy (like a content-fit Status column) instead of evenly
         // stretched. GetPreferredWidth(AllCells) measures header + every cell;
         // clamped to a sane min/max so a long description can't blow out.
@@ -367,7 +372,7 @@ namespace PDMLite
             {
                 int pref = col.GetPreferredWidth(
                     DataGridViewAutoSizeColumnMode.AllCells, true);
-                int w = (int)(pref * 1.10);
+                int w = (int)(pref * 1.20);
                 if (w < S(48))  w = S(48);
                 if (w > S(520)) w = S(520);
                 col.Width = w;
