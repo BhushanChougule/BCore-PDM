@@ -446,7 +446,9 @@ DPI-aware Form (S(v)=v\*\_scale, fonts = pt\*\_scale), Master-only. Opened from 
 
 \- The "Modified Date" and "Released Date" columns are TYPED DateTime columns (ValueType=DateTime, DefaultCellStyle.Format="MM/dd/yyyy HH:mm") so they sort CHRONOLOGICALLY (a string date would sort alphabetically); a missing date is DBNull (empty cell, sorts earliest). CSV export uses cell.FormattedValue so dates export as displayed.
 
-\- Control row (search box, status filter, Refresh, Export CSV) is height-matched: all set to the ComboBox's font-derived PreferredHeight so the row lines up; the summary strip sits below with enough panel height that its counts never clip.
+\- Control row (search box, status filter, Refresh, Export CSV) is height-matched: all set to the ComboBox's font-derived PreferredHeight so the row lines up; the summary strip sits below with the panel tightened to it (no dead space). The title, control row and summary are CENTER-aligned horizontally via LayoutTopControls (called on load + every top-panel resize).
+
+\- Form is SIZED TO FIT THE COLUMNS (FitFormSize, called once per LoadData): client width = sum of content-fit column widths + chrome (reserves the vertical-scrollbar width ONLY when >20 rows, so ≤20 rows leave no blank space after the last column), capped at 80% of the screen working area (MaxScreenFraction); min S(800) so the top row stays visible. Height is CONSTANT = ColumnHeadersHeight + 20×RowTemplate.Height + panels (VisibleRows=20) — fewer rows just leave blank space below; also capped at 80% of screen height. Column widths + form size are computed ONCE per load (from the full dataset, unfiltered) so the form does NOT resize while the user types in the search box.
 
 \- Data from DatabaseManager.GetAllFiles() (read-only snapshot, all statuses, no orphan purge). Fetched once into \_all; a search box (300ms debounce timer, matches PartNo/Description/FileName) + a status filter ComboBox (All/WIP/Released/Locked) filter \_all IN MEMORY via ApplyFilter (no re-query). Summary strip shows Total/WIP/Released/Locked/Broken-refs counts (whole vault) + "(showing N)".
 

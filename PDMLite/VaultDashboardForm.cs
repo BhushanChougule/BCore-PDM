@@ -41,8 +41,16 @@ namespace PDMLite
         private TextBox _search;
         private ComboBox _statusFilter;
         private Label _summary;
+        private Label _title;
+        private Button _btnRefresh;
+        private Button _btnExport;
+        private Panel _topPanel;
+        private Panel _bottomPanel;
         private System.Windows.Forms.Timer _searchTimer;
         private Font _cellBold; // one shared bold font for the Status cell
+
+        private const int VisibleRows = 20;     // fixed grid height = 20 rows
+        private const double MaxScreenFraction = 0.80; // popup ≤ 80% of screen
 
         private List<VaultFile> _all = new List<VaultFile>();
 
@@ -94,14 +102,16 @@ namespace PDMLite
             _cellBold    = new Font("Segoe UI", 3.3f * _scale, FontStyle.Bold);
 
             // ── Top panel: title, search, status filter, refresh, export ──
-            Panel top = new Panel
+            // All these are CENTERED horizontally by LayoutTopControls (called on
+            // load and whenever the panel is resized).
+            _topPanel = new Panel
             {
                 Dock = DockStyle.Top,
                 Height = S(120),     // tightened below once the summary is placed
                 BackColor = cBg
             };
 
-            Label title = new Label
+            _title = new Label
             {
                 Text = "VAULT DASHBOARD",
                 Font = fTitle,
@@ -109,7 +119,7 @@ namespace PDMLite
                 AutoSize = true,
                 Location = new Point(S(14), S(10))
             };
-            top.Controls.Add(title);
+            _topPanel.Controls.Add(_title);
 
             int rowY = S(54);
 
@@ -122,7 +132,7 @@ namespace PDMLite
             };
             _search.TextChanged += (s, e) => DebouncedFilter();
             SetCueBanner(_search, "Search part no, description or filename…");
-            top.Controls.Add(_search);
+            _topPanel.Controls.Add(_search);
 
             _statusFilter = new ComboBox
             {
@@ -135,24 +145,24 @@ namespace PDMLite
                 { "All statuses", "WIP", "Released", "Locked" });
             _statusFilter.SelectedIndex = 0;
             _statusFilter.SelectedIndexChanged += (s, e) => ApplyFilter();
-            top.Controls.Add(_statusFilter);
+            _topPanel.Controls.Add(_statusFilter);
 
             // Uniform control height: match search + buttons to the combo's
             // natural (font-derived) height so the whole row lines up cleanly.
             int ctrlH = _statusFilter.PreferredHeight;
             _search.Height = ctrlH;
 
-            Button btnRefresh = MakeButton("Refresh", cBrand, fBtn,
-                new Point(S(514), rowY), S(100));
-            btnRefresh.Height = ctrlH;
-            btnRefresh.Click += (s, e) => LoadData();
-            top.Controls.Add(btnRefresh);
+            _btnRefresh = MakeButton("Refresh", cBrand, fBtn,
+                new Point(S(514), rowY), S(110));
+            _btnRefresh.Height = ctrlH;
+            _btnRefresh.Click += (s, e) => LoadData();
+            _topPanel.Controls.Add(_btnRefresh);
 
-            Button btnExport = MakeButton("Export CSV", cBrandDark, fBtn,
-                new Point(S(620), rowY), S(110));
-            btnExport.Height = ctrlH;
-            btnExport.Click += (s, e) => ExportCsv();
-            top.Controls.Add(btnExport);
+            _btnExport = MakeButton("Export CSV", cBrandDark, fBtn,
+                new Point(S(634), rowY), S(130));
+            _btnExport.Height = ctrlH;
+            _btnExport.Click += (s, e) => ExportCsv();
+            _topPanel.Controls.Add(_btnExport);
 
             int summaryY = rowY + ctrlH + S(10);
             _summary = new Label
@@ -162,14 +172,15 @@ namespace PDMLite
                 AutoSize = true,
                 Location = new Point(S(14), summaryY)
             };
-            top.Controls.Add(_summary);
+            _topPanel.Controls.Add(_summary);
 
             // Tighten the panel to the summary so the grid sits right below it
             // (removes the dead space under the counts).
-            top.Height = summaryY + _summary.PreferredHeight + S(6);
+            _topPanel.Height = summaryY + _summary.PreferredHeight + S(6);
+            _topPanel.Resize += (s, e) => LayoutTopControls();
 
             // ── Bottom panel: Close ───────────────────────────────────────
-            Panel bottom = new Panel
+            _bottomPanel = new Panel
             {
                 Dock = DockStyle.Bottom,
                 Height = S(46),
@@ -182,7 +193,7 @@ namespace PDMLite
             // the (already set) client width for the initial right-aligned X.
             btnClose.Location = new Point(this.ClientSize.Width - S(124), S(8));
             btnClose.Click += (s, e) => { this.DialogResult = DialogResult.Cancel; Close(); };
-            bottom.Controls.Add(btnClose);
+            _bottomPanel.Controls.Add(btnClose);
 
             // ── Grid ──────────────────────────────────────────────────────
             _grid = new DataGridView
@@ -199,7 +210,7 @@ namespace PDMLite
                 RowHeadersVisible = false,
                 MultiSelect = false,
                 SelectionMode = DataGridViewSelectionMode.FullRowSelect,
-                // Widths are set per-column to fit content (+10%) in AutoSizeColumns.
+                // Widths are set per-column to fit content (+20%) in AutoSizeColumns.
                 AutoSizeColumnsMode = DataGridViewAutoSizeColumnsMode.None,
                 ColumnHeadersHeightSizeMode =
                     DataGridViewColumnHeadersHeightSizeMode.DisableResizing,
@@ -237,8 +248,8 @@ namespace PDMLite
             // Add Fill control FIRST, then the docked edge panels, so the grid
             // occupies the leftover space between them.
             this.Controls.Add(_grid);
-            this.Controls.Add(bottom);
-            this.Controls.Add(top);
+            this.Controls.Add(_bottomPanel);
+            this.Controls.Add(_topPanel);
 
             _searchTimer = new System.Windows.Forms.Timer { Interval = 300 };
             _searchTimer.Tick += (s, e) => { _searchTimer.Stop(); ApplyFilter(); };
@@ -300,7 +311,13 @@ namespace PDMLite
                     MessageBoxButtons.OK, MessageBoxIcon.Warning);
                 _all = new List<VaultFile>();
             }
+            // Populate the (unfiltered) grid, then size columns to the full data
+            // ONCE and fit the form to them — so columns/width stay stable while
+            // the user types in the search box (no per-keystroke resizing).
             ApplyFilter();
+            AutoSizeColumns();
+            FitFormSize();
+            LayoutTopControls();
         }
 
         private void DebouncedFilter()
@@ -358,8 +375,8 @@ namespace PDMLite
             }
             _grid.ResumeLayout();
 
-            AutoSizeColumns();
             UpdateSummary(view.Count);
+            LayoutTopControls(); // re-centre: the summary width changed
         }
 
         // Size each column to its widest value + ~20% so columns always look
@@ -377,6 +394,62 @@ namespace PDMLite
                 if (w > S(520)) w = S(520);
                 col.Width = w;
             }
+        }
+
+        // Size the popup to fit the columns exactly (so there's no blank space
+        // after the last column), capped at 80% of the screen; height is a
+        // CONSTANT 20 grid rows (fewer rows just leave blank space below).
+        private void FitFormSize()
+        {
+            int totalCols = 0;
+            foreach (DataGridViewColumn c in _grid.Columns) totalCols += c.Width;
+
+            // Reserve the vertical scrollbar's width ONLY when it will actually
+            // show (>20 rows). Otherwise the grid fits the columns exactly.
+            int chrome = S(4);
+            if (_all.Count > VisibleRows)
+                chrome += SystemInformation.VerticalScrollBarWidth;
+            int clientW = totalCols + chrome;
+
+            var area = Screen.FromControl(this).WorkingArea;
+            int borderW = this.Width - this.ClientSize.Width;   // 0 before shown
+            int maxClientW = (int)(area.Width * MaxScreenFraction) - borderW;
+            if (clientW > maxClientW) clientW = maxClientW;
+            int minClientW = S(800);                            // keep top row visible
+            if (clientW < minClientW) clientW = minClientW;
+
+            int gridH = _grid.ColumnHeadersHeight
+                      + _grid.RowTemplate.Height * VisibleRows + S(2);
+            int clientH = _topPanel.Height + gridH + _bottomPanel.Height;
+            int borderH = this.Height - this.ClientSize.Height;
+            int maxClientH = (int)(area.Height * MaxScreenFraction) - borderH;
+            if (clientH > maxClientH) clientH = maxClientH;
+
+            this.ClientSize = new Size(clientW, clientH);
+        }
+
+        // Centre the title, the control row (search / status / Refresh / Export)
+        // and the summary horizontally in the top panel. Called on load and on
+        // every top-panel resize so it stays centred.
+        private void LayoutTopControls()
+        {
+            if (_topPanel == null || _search == null) return;
+            int panelW = _topPanel.ClientSize.Width;
+            int gap = S(10);
+
+            if (_title != null)
+                _title.Left = Math.Max(S(14), (panelW - _title.Width) / 2);
+
+            int rowW = _search.Width + gap + _statusFilter.Width + gap
+                     + _btnRefresh.Width + gap + _btnExport.Width;
+            int startX = Math.Max(S(14), (panelW - rowW) / 2);
+            _search.Left       = startX;
+            _statusFilter.Left = _search.Right + gap;
+            _btnRefresh.Left   = _statusFilter.Right + gap;
+            _btnExport.Left    = _btnRefresh.Right + gap;
+
+            if (_summary != null)
+                _summary.Left = Math.Max(S(14), (panelW - _summary.Width) / 2);
         }
 
         private void UpdateSummary(int showing)
