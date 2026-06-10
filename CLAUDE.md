@@ -242,7 +242,7 @@ Core vault operations.
 
 \- UnlockFile(path) → Master only, sets status=WIP, removes read-only
 
-\- ReleaseFile(doc, suppressPrompts=false) → validates → (assembly) parts Released + drawing-release gate → exports → copies to RELEASED → sets read-only. Releasing a Drawing whose model is still WIP offers ONE prompt to release both; on Yes the model is released via ReleaseFile(model, suppressPrompts:true) so the pair needs only a single confirm + single combined success. suppressPrompts skips the confirm + success dialogs only (blocker/validation dialogs still show)
+\- ReleaseFile(doc, suppressPrompts=false) → validates → (assembly) parts Released + drawing-release gate → exports → copies to RELEASED → sets read-only. Releasing a Drawing whose model is still WIP offers ONE prompt to release both; on Yes the model is released via ReleaseFile(model, suppressPrompts:true) so the pair needs only a single confirm + single combined success. suppressPrompts skips the confirm + success dialogs only (blocker/validation dialogs still show). The release-success popup uses ShowAutoCloseInfo (same look as MessageBox) which AUTO-DISMISSES after 4s if the user doesn't click OK — so an unattended release doesn't leave a dialog blocking the file close. A WinForms Timer is used (its WM_TIMER is pumped by the modal MessageBox loop); on tick it FindWindow(s) the dialog by caption and PostMessage(WM_CLOSE) — for an OK-only box that resolves exactly like clicking OK
 
 \- StartNewRevision(doc, suppressPrompts=false) → removes read-only → archives → bumps rev → saves → sets WIP → auto-starts associated drawing revision → warns about parent assemblies. suppressPrompts (bulk approve) skips the confirm + final summary dialogs only; blocker/failure dialogs still show
 
