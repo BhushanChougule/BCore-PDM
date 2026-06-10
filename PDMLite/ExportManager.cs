@@ -355,7 +355,7 @@ namespace PDMLite
                 // hiding the drawing beneath. PdfSharp emits the alpha as a PDF
                 // ExtGState, so true transparency works (the earlier "invisible"
                 // problem was the file-lock write failure, since fixed).
-                XBrush brush = new XSolidBrush(XColor.FromArgb(22, 120, 120, 120));
+                XBrush brush = new XSolidBrush(XColor.FromArgb(13, 120, 120, 120));
 
                 foreach (PdfPage page in pdf.Pages)
                 {
