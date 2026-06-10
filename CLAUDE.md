@@ -218,6 +218,8 @@ Methods:
 
 \- GetReleasableFiles(filter, out truncated) → returns WIP (releasable) files for the Bulk Release picker, optionally filtered by PartNumber/Description/FileName; excludes Released/Locked; deduped by filename; capped at MaxSearchResults; file must exist on disk (orphans skipped, NOT purged — read-only picker)
 
+\- GetAllFiles() → returns EVERY tracked file (all statuses) for the Vault Dashboard, deduped by filename (drops legacy double-records + RELEASED-folder copies). READ-ONLY snapshot: unlike SearchFiles it does NOT auto-purge orphans and does NOT hit the disk per file (so opening the dashboard never mutates the DB and stays fast at scale). NOT capped (the dashboard shows the whole vault). Populates FilePath, FileName, PartNumber, Description, Revision, Status, ModifiedBy, ModifiedDate (parsed round-trip), LockedBy, HasBrokenRefs. VaultFile.LockedBy is populated ONLY by this method (other queries leave it null — read lock state via GetLockInfo)
+
 \- AddRevisionRequest, AddUnlockRequest, AddReleaseRequest → all call private AddRequest(type,...)
 
 \- GetPendingRequests, GetRequestsByUser(user), ResolveRequest
@@ -362,6 +364,8 @@ Open Drawing button label when a drawing is active: VaultManager.GetDrawingOpenL
 
 7\. Pending Requests button (Masters only) — custom-painted (TextRenderer): "Pending Requests" CENTERED + count badge "(N)" right-aligned, drawn only when N>0 (no number when zero). \_pendingCount stored in Refresh(), button Invalidate()d to repaint. Opens PendingRequestsForm popup
 
+7b. Vault Dashboard button (Masters only, cBrand) — OpenDashboard() opens VaultDashboardForm (modal). On close, if the Master double-clicked a row, VaultManager.OpenByPath(form.FileToOpen) opens that file (deferred until after the dialog closes, mirroring OpenRequestsPopup)
+
 8\. Send Test Email button (all users) — calls EmailManager.SendTestEmail, shows success/error in MessageBox
 
 9\. Remove from Vault button (Masters only, cSwRed — muted SOLIDWORKS red) — DoAction("remove") → VaultManager.RemoveFromVault on the active file (moves to SCRAP + deletes record; blocked if Released)
@@ -429,6 +433,22 @@ DPI-aware Form (ClientSize 560×600 scaled — sizes the CLIENT area so bottom b
 \- "Release Selected" → confirms, then VaultManager.BulkRelease(checked paths) → one summary dialog → reloads (released files drop out, no longer WIP)
 
 \- Distinct from request-based approve: these files need not have any pending request
+
+
+
+\### VaultDashboardForm.cs
+
+DPI-aware Form (S(v)=v\*\_scale, fonts = pt\*\_scale), Master-only. Opened from the "Vault Dashboard" task-pane button. Full-screen whole-vault status view. RESIZABLE (FormBorderStyle.Sizable, MaximizeBox) — ClientSize S(1120)×S(680), MinimumSize S(720)×S(460).
+
+\- The ONE place in the app that uses a real DataGridView (every other list is hand-drawn Panels) — chosen for free column sorting, full-row select, and scaling to thousands of rows. Columns: File, Part No, Description, Status, Rev, Modified By, Modified, Locked By. Read-only, AutoSizeColumnsMode=Fill with per-column FillWeight, dark header, alternating row colour, Status cell coloured by StatusColor (Released=green, Locked=maroon, WIP=orange) in a shared bold font; broken-ref rows show the File cell in red with a tooltip.
+
+\- The "Modified" column is a TYPED DateTime column (ValueType=DateTime, DefaultCellStyle.Format="MM/dd/yyyy HH:mm") so it sorts CHRONOLOGICALLY (a string date would sort alphabetically); a missing date is DBNull (empty cell, sorts earliest). CSV export uses cell.FormattedValue so dates export as displayed.
+
+\- Data from DatabaseManager.GetAllFiles() (read-only snapshot, all statuses, no orphan purge). Fetched once into \_all; a search box (300ms debounce timer, matches PartNo/Description/FileName) + a status filter ComboBox (All/WIP/Released/Locked) filter \_all IN MEMORY via ApplyFilter (no re-query). Summary strip shows Total/WIP/Released/Locked/Broken-refs counts (whole vault) + "(showing N)".
+
+\- Double-click a row → sets FileToOpen = that row's FilePath + DialogResult.OK + closes; the caller (TaskPaneControl.OpenDashboard) then VaultManager.OpenByPath(FileToOpen) AFTER the modal closes (opens the canonical WIP copy, read-only when Released). Deferred-open mirrors OpenRequestsPopup.
+
+\- "Export CSV" → SaveFileDialog → dumps the CURRENT (filtered) grid to CSV (RFC-4180 Csv helper, headers + FormattedValue rows). "Refresh" → re-runs GetAllFiles. "Close" → closes. Search debounce Timer + the shared bold Font are disposed on FormClosed. Placeholder via Win32 EM_SETCUEBANNER (no PlaceholderText on .NET 4.8).
 
 
 
@@ -796,11 +816,11 @@ GetNextRevision() in VaultManager.cs handles this
 
 \- Release-success popup auto-dismiss: the "File Released Successfully" dialog (single + chained model+drawing) uses VaultManager.ShowAutoCloseInfo — same MessageBox look but auto-closes after 4s if the user doesn't click OK (so an unattended release doesn't leave a dialog blocking the file close). A WinForms Timer (pumped by the modal message loop) FindWindow(s) the dialog by caption and PostMessage(WM_CLOSE); for an OK-only box that resolves like clicking OK. Failure/blocker dialogs stay modal as before.
 
+\- Vault Dashboard (Masters only): full-screen, resizable VaultDashboardForm — a sortable/filterable DataGridView of EVERY tracked file (DatabaseManager.GetAllFiles, all statuses, read-only snapshot, no orphan purge). Columns File/PartNo/Description/Status/Rev/Modified By/Modified/Locked By; Status colour-coded, broken-ref rows flagged red. Search box + status filter (All/WIP/Released/Locked) filter in memory; summary strip with whole-vault counts; "Modified" sorts chronologically (typed DateTime column). Double-click opens the file (canonical WIP copy via OpenByPath). Export CSV dumps the filtered view. Opened from a Master-only task-pane button.
+
 
 
 \## Remaining Features (in priority order)
-
-6\. Vault Dashboard (full screen file status view)
 
 8\. Audit Report (export history to Excel)
 

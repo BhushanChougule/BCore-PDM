@@ -29,6 +29,9 @@ namespace PDMLite
         public string Status      { get; set; }
         public string ModifiedBy  { get; set; }
         public DateTime ModifiedDate { get; set; }
+        // Populated by GetAllFiles for the Vault Dashboard (empty when not locked).
+        // Other queries leave this null — read lock state via GetLockInfo instead.
+        public string LockedBy    { get; set; }
         public bool HasBrokenRefs { get; set; }
         // Per-configuration metadata (parts/assemblies). Empty for drawings and for
         // old records that haven't been re-saved since this feature shipped.
@@ -967,6 +970,54 @@ namespace PDMLite
                 AuditLogger.Log("AutoPurgeOrphan", "system", p.FileName,
                     p.PartNumber, p.Revision, "file missing on disk");
 
+            return results;
+        }
+
+        // Returns EVERY tracked file (all statuses) for the Vault Dashboard,
+        // deduped by filename (drops legacy double-records and RELEASED-folder
+        // copies). Unlike SearchFiles this is a READ-ONLY snapshot: it does NOT
+        // auto-purge orphans and does NOT hit the disk per file, so opening the
+        // dashboard never mutates the DB and stays fast even at full scale.
+        // Populates ModifiedBy/ModifiedDate/LockedBy/HasBrokenRefs for the grid.
+        public static List<VaultFile> GetAllFiles()
+        {
+            var results = new List<VaultFile>();
+            var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+            lock (_lock) using (AcquireProcessLock())
+            {
+                var doc = LoadOrCreate();
+                foreach (var el in doc.Root.Element("Files").Elements("File"))
+                {
+                    string status = (string)el.Element("Status") ?? "";
+                    if (string.IsNullOrEmpty(status)) continue;
+
+                    string fileName = (string)el.Element("FileName") ?? "";
+                    if (string.IsNullOrEmpty(fileName)) continue;
+                    if (!seen.Add(fileName)) continue;
+
+                    DateTime modDate = DateTime.MinValue;
+                    DateTime.TryParse((string)el.Element("ModifiedDate") ?? "",
+                        null, System.Globalization.DateTimeStyles.RoundtripKind,
+                        out modDate);
+
+                    results.Add(new VaultFile
+                    {
+                        FilePath    = (string)el.Element("FilePath")    ?? "",
+                        FileName    = fileName,
+                        PartNumber  = (string)el.Element("PartNumber")  ?? "",
+                        Description = (string)el.Element("Description") ?? "",
+                        Revision    = (string)el.Element("Revision")    ?? "",
+                        Status      = status,
+                        ModifiedBy  = (string)el.Element("ModifiedBy")  ?? "",
+                        ModifiedDate = modDate,
+                        LockedBy    = (string)el.Element("LockedBy")    ?? "",
+                        HasBrokenRefs = string.Equals(
+                            (string)el.Element("HasBrokenRefs"), "true",
+                            StringComparison.OrdinalIgnoreCase)
+                    });
+                }
+            }
             return results;
         }
 

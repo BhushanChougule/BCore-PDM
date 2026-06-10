@@ -370,6 +370,25 @@ namespace PDMLite
             this.Controls.Add(_btnRequests);
             if (isMaster) y += S(30);
 
+            // ── Vault Dashboard (Master only) ─────────────────────────
+            Button btnDashboard = new Button
+            {
+                Text = "Vault Dashboard",
+                Font = fBtn,
+                Width = w,
+                Height = S(24),
+                Location = new Point(x, y),
+                BackColor = cBrand,
+                ForeColor = Color.White,
+                FlatStyle = FlatStyle.Flat,
+                Cursor = Cursors.Hand,
+                Visible = isMaster
+            };
+            btnDashboard.FlatAppearance.BorderSize = 0;
+            btnDashboard.Click += (s, e) => OpenDashboard();
+            this.Controls.Add(btnDashboard);
+            if (isMaster) y += S(28);
+
             // ── Send Test Email (all users) ───────────────────────────
             Button btnTestEmail = new Button
             {
@@ -438,6 +457,22 @@ namespace PDMLite
             var form = new PendingRequestsForm(_scale);
             form.ShowDialog(this);
             RefreshRequests();
+        }
+
+        // Open the full-screen Vault Dashboard (Master only). If the Master
+        // double-clicked a row, open that file AFTER the modal dialog closes
+        // (OpenByPath returns the already-open doc if SOLIDWORKS has it; opens
+        // the canonical WIP copy, read-only when Released).
+        private void OpenDashboard()
+        {
+            var form = new VaultDashboardForm(_scale);
+            var result = form.ShowDialog(this);
+            if (result == DialogResult.OK &&
+                !string.IsNullOrEmpty(form.FileToOpen))
+            {
+                try { VaultManager.OpenByPath(form.FileToOpen); }
+                catch { }
+            }
         }
 
         // ── Send a diagnostic test email and show the result ──────────
