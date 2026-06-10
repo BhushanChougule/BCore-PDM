@@ -29,6 +29,14 @@ namespace PDMLite
         public string Status      { get; set; }
         public string ModifiedBy  { get; set; }
         public DateTime ModifiedDate { get; set; }
+        // Populated by GetAllFiles for the Vault Dashboard (empty when not locked).
+        // Other queries leave this null — read lock state via GetLockInfo instead.
+        public string LockedBy    { get; set; }
+        // Populated by GetAllFiles: the most recent "Released" history entry's
+        // timestamp + user (DateTime.MinValue / "" if never released). Distinct
+        // from ModifiedDate/ModifiedBy (last save).
+        public DateTime ReleasedDate { get; set; }
+        public string ReleasedBy { get; set; }
         public bool HasBrokenRefs { get; set; }
         // Per-configuration metadata (parts/assemblies). Empty for drawings and for
         // old records that haven't been re-saved since this feature shipped.
@@ -966,6 +974,137 @@ namespace PDMLite
             foreach (var p in purged)
                 AuditLogger.Log("AutoPurgeOrphan", "system", p.FileName,
                     p.PartNumber, p.Revision, "file missing on disk");
+
+            return results;
+        }
+
+        // Returns EVERY tracked file (all statuses) for the Vault Dashboard,
+        // deduped by filename (drops legacy double-records and RELEASED-folder
+        // copies). Unlike SearchFiles this is a READ-ONLY snapshot: it does NOT
+        // auto-purge orphans and does NOT hit the disk per file, so opening the
+        // dashboard never mutates the DB and stays fast even at full scale.
+        // Populates ModifiedBy/ModifiedDate/LockedBy/HasBrokenRefs, the most
+        // recent Released date (from RevisionHistory), and — for drawings, whose
+        // properties live on the model — the model's PartNumber/Description.
+        public static List<VaultFile> GetAllFiles()
+        {
+            var results = new List<VaultFile>();
+            var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+            lock (_lock) using (AcquireProcessLock())
+            {
+                var doc = LoadOrCreate();
+
+                // Latest "Released" timestamp + user per file path, from history.
+                var relDateByPath = new Dictionary<string, DateTime>(
+                    StringComparer.OrdinalIgnoreCase);
+                var relUserByPath = new Dictionary<string, string>(
+                    StringComparer.OrdinalIgnoreCase);
+                var hist = doc.Root.Element("RevisionHistory");
+                if (hist != null)
+                {
+                    foreach (var en in hist.Elements("Entry"))
+                    {
+                        if (!string.Equals((string)en.Element("Status"),
+                                "Released", StringComparison.OrdinalIgnoreCase))
+                            continue;
+                        string fp = (string)en.Element("FilePath") ?? "";
+                        if (string.IsNullOrEmpty(fp)) continue;
+                        DateTime d;
+                        if (!DateTime.TryParse((string)en.Element("ChangedDate") ?? "",
+                                null, System.Globalization.DateTimeStyles.RoundtripKind,
+                                out d))
+                            continue;
+                        DateTime cur;
+                        if (!relDateByPath.TryGetValue(fp, out cur) || d > cur)
+                        {
+                            relDateByPath[fp] = d;
+                            relUserByPath[fp] = (string)en.Element("ChangedBy") ?? "";
+                        }
+                    }
+                }
+
+                foreach (var el in doc.Root.Element("Files").Elements("File"))
+                {
+                    string status = (string)el.Element("Status") ?? "";
+                    if (string.IsNullOrEmpty(status)) continue;
+
+                    string fileName = (string)el.Element("FileName") ?? "";
+                    if (string.IsNullOrEmpty(fileName)) continue;
+                    if (!seen.Add(fileName)) continue;
+
+                    DateTime modDate = DateTime.MinValue;
+                    DateTime.TryParse((string)el.Element("ModifiedDate") ?? "",
+                        null, System.Globalization.DateTimeStyles.RoundtripKind,
+                        out modDate);
+
+                    string filePath = (string)el.Element("FilePath") ?? "";
+                    DateTime relDate;
+                    if (!relDateByPath.TryGetValue(filePath, out relDate))
+                        relDate = DateTime.MinValue;
+                    string relBy;
+                    if (!relUserByPath.TryGetValue(filePath, out relBy))
+                        relBy = "";
+
+                    results.Add(new VaultFile
+                    {
+                        FilePath    = filePath,
+                        FileName    = fileName,
+                        PartNumber  = (string)el.Element("PartNumber")  ?? "",
+                        Description = (string)el.Element("Description") ?? "",
+                        Revision    = (string)el.Element("Revision")    ?? "",
+                        Status      = status,
+                        ModifiedBy  = (string)el.Element("ModifiedBy")  ?? "",
+                        ModifiedDate = modDate,
+                        ReleasedDate = relDate,
+                        ReleasedBy  = relBy,
+                        LockedBy    = (string)el.Element("LockedBy")    ?? "",
+                        ReferencedModel = (string)el.Element("ReferencedModel") ?? "",
+                        HasBrokenRefs = string.Equals(
+                            (string)el.Element("HasBrokenRefs"), "true",
+                            StringComparison.OrdinalIgnoreCase)
+                    });
+                }
+            }
+
+            // Drawings carry no PartNumber/Description of their own (those props
+            // live on the model). Fill them from the model in-memory: prefer the
+            // explicit ReferencedModel link, else match by base filename
+            // (Widget.slddrw → Widget.sldprt/.sldasm). Mirrors GetModelForDrawing
+            // but without an extra DB round-trip.
+            var modelByPath = new Dictionary<string, VaultFile>(
+                StringComparer.OrdinalIgnoreCase);
+            var modelByBase = new Dictionary<string, VaultFile>(
+                StringComparer.OrdinalIgnoreCase);
+            foreach (var r in results)
+            {
+                string ext = Path.GetExtension(r.FileName ?? "").ToLowerInvariant();
+                if (ext != ".sldprt" && ext != ".sldasm") continue;
+                if (!string.IsNullOrEmpty(r.FilePath))
+                    modelByPath[r.FilePath] = r;
+                string baseName = Path.GetFileNameWithoutExtension(r.FileName);
+                if (!string.IsNullOrEmpty(baseName))
+                    modelByBase[baseName] = r;
+            }
+            foreach (var r in results)
+            {
+                if (!(r.FileName ?? "").EndsWith(".slddrw",
+                        StringComparison.OrdinalIgnoreCase))
+                    continue;
+                if (!string.IsNullOrEmpty(r.PartNumber)) continue;
+
+                VaultFile model = null;
+                if (!string.IsNullOrEmpty(r.ReferencedModel))
+                    modelByPath.TryGetValue(r.ReferencedModel, out model);
+                if (model == null)
+                    modelByBase.TryGetValue(
+                        Path.GetFileNameWithoutExtension(r.FileName), out model);
+                if (model != null)
+                {
+                    r.PartNumber  = model.PartNumber;
+                    r.Description = model.Description;
+                }
+            }
 
             return results;
         }

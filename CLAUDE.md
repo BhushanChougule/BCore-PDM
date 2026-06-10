@@ -218,6 +218,8 @@ Methods:
 
 \- GetReleasableFiles(filter, out truncated) → returns WIP (releasable) files for the Bulk Release picker, optionally filtered by PartNumber/Description/FileName; excludes Released/Locked; deduped by filename; capped at MaxSearchResults; file must exist on disk (orphans skipped, NOT purged — read-only picker)
 
+\- GetAllFiles() → returns EVERY tracked file (all statuses) for the Vault Dashboard, deduped by filename (drops legacy double-records + RELEASED-folder copies). READ-ONLY snapshot: unlike SearchFiles it does NOT auto-purge orphans and does NOT hit the disk per file (so opening the dashboard never mutates the DB and stays fast at scale). NOT capped (the dashboard shows the whole vault). Populates FilePath, FileName, PartNumber, Description, Revision, Status, ModifiedBy, ModifiedDate (parsed round-trip), LockedBy, HasBrokenRefs, and ReleasedDate + ReleasedBy (timestamp + ChangedBy of the most recent "Released" RevisionHistory entry; DateTime.MinValue / "" if never released — distinct from ModifiedDate/ModifiedBy). DRAWINGS carry no PartNumber/Description of their own (those props live on the model), so GetAllFiles fills them in-memory from the model — preferring the explicit ReferencedModel link, else a base-filename match (Widget.slddrw → Widget.sldprt/.sldasm) — with no extra DB round-trip. VaultFile.LockedBy and VaultFile.ReleasedDate are populated ONLY by this method (other queries leave them default — read lock state via GetLockInfo)
+
 \- AddRevisionRequest, AddUnlockRequest, AddReleaseRequest → all call private AddRequest(type,...)
 
 \- GetPendingRequests, GetRequestsByUser(user), ResolveRequest
@@ -362,6 +364,8 @@ Open Drawing button label when a drawing is active: VaultManager.GetDrawingOpenL
 
 7\. Pending Requests button (Masters only) — custom-painted (TextRenderer): "Pending Requests" CENTERED + count badge "(N)" right-aligned, drawn only when N>0 (no number when zero). \_pendingCount stored in Refresh(), button Invalidate()d to repaint. Opens PendingRequestsForm popup
 
+7b. Vault Dashboard button (Masters only, cBrand) — OpenDashboard() opens VaultDashboardForm (modal). On close, if the Master double-clicked a row, VaultManager.OpenByPath(form.FileToOpen) opens that file (deferred until after the dialog closes, mirroring OpenRequestsPopup)
+
 8\. Send Test Email button (all users) — calls EmailManager.SendTestEmail, shows success/error in MessageBox
 
 9\. Remove from Vault button (Masters only, cSwRed — muted SOLIDWORKS red) — DoAction("remove") → VaultManager.RemoveFromVault on the active file (moves to SCRAP + deletes record; blocked if Released)
@@ -429,6 +433,40 @@ DPI-aware Form (ClientSize 560×600 scaled — sizes the CLIENT area so bottom b
 \- "Release Selected" → confirms, then VaultManager.BulkRelease(checked paths) → one summary dialog → reloads (released files drop out, no longer WIP)
 
 \- Distinct from request-based approve: these files need not have any pending request
+
+
+
+\### VaultDashboardForm.cs
+
+DPI-aware Form (S(v)=v\*\_scale, fonts = pt\*\_scale), Master-only. Opened from the "Vault Dashboard" task-pane button. Full-screen whole-vault status view. RESIZABLE (FormBorderStyle.Sizable, MaximizeBox) — ClientSize S(1120)×S(680), MinimumSize S(720)×S(460).
+
+\- The ONE place in the app that uses a real DataGridView (every other list is hand-drawn Panels). Columns (in order): File Name, Part No, Description, Status, Rev, Modified By, Modified Date, Released By, Released Date. Read-only, dark header, alternating row colour, Status cell coloured by StatusColor (Released=green, Locked=maroon, WIP=orange) in a shared bold font; broken-ref rows show the File cell in red with a tooltip. Drawings show their model's PartNumber/Description (filled by GetAllFiles). Released By = ChangedBy of the latest "Released" history entry (the releaser, not the locker).
+
+\- VIRTUALMODE for scale (built for a 50–100k-file vault). The grid holds NO DataGridViewRow objects; it renders straight from the \_view list (filtered+sorted) and pulls data for ONLY the visible cells via three providers: CellValueNeeded (the cell value — real DateTime for date cols so the column Format applies, DBNull for blanks), CellFormatting (Status colour+bold, broken-ref File-name red — applied per visible cell, NOT baked into row objects), CellToolTipTextNeeded (broken-ref tooltip; returns early for headers so their HeaderCell.ToolTipText survives). ApplyFilter just rebuilds \_view, clears CurrentCell (so a shrinking RowCount can't reference an invalid cell) and sets \_grid.RowCount — O(visible), instant even on every keystroke at 100k rows. Double-click + CSV export read straight from \_view (grid index == \_view index); CSV uses CellText per column (no materialised rows to read).
+
+\- Column widths are CONTENT-FIT but measured from a BOUNDED SAMPLE: AutoSizeColumnsMode=None, then AutoSizeColumns() measures each column's header (\_cellBold) + up to WidthSampleRows (400) data rows via TextRenderer.MeasureText, ×1.20 + GlyphZone + padding, clamped S(56)..S(540). O(sample) not O(rows) — GetPreferredWidth(AllCells) would measure 100k×9 cells (and doesn't work in VirtualMode). Columns are user-resizable, so the rare extra-wide value past the sample can be widened by hand.
+
+\- The "Modified Date" and "Released Date" columns are TYPED DateTime columns (ValueType=DateTime, DefaultCellStyle.Format="MM/dd/yyyy HH:mm") so they sort CHRONOLOGICALLY (a string date would sort alphabetically); a missing date is DBNull (empty cell, sorts earliest). CSV export uses cell.FormattedValue so dates export as displayed.
+
+\- EXCEL-STYLE per-column filtering. Every column SortMode=Programmatic; the header is CUSTOM-PAINTED in CellPainting (solid cBrandDark fill, white header text with EndEllipsis, a filter arrow at the far right, a faint right divider, and — on the sort column — a small ▲/▼ glyph left of the arrow). The arrow is tinted cFunnel (gold) when that column has an active filter, so active filters are visible at a glance. ColumnHeaderMouseClick (left button) splits the header click: a click in the right GlyphZone (S(20)) opens that column's filter popup, a click anywhere else toggles the sort (ToggleSort: same column flips Asc↔Desc, else new column Asc). Sorting is done IN DATA (KeySelector — date columns sort by the real DateTime, all others by lower-cased display text) and re-applied by ApplyFilter so it survives a re-filter; \_grid.Invalidate() repaints the glyphs. DEFAULT sort = Modified Date DESCENDING (DefaultSortColumn=6) so the freshest work is on top; "Clear Filters" resets to this default (not to no-sort).
+
+\- The filter list NARROWS like Excel: ShowColumnFilter shows only the values present in rows that pass every OTHER active column filter + the global search (KeysPassingOtherFilters), ordered by OrderFilterValues (date columns chronologically, others alphabetically). Values this column currently allows but that are hidden by another filter (hiddenAllowed) are PRESERVED — folded back into the committed set so removing the other filter later never silently drops them. "No filter" = the committed allowed set covers ALL of the column's distinct keys (allKeys); otherwise \_colFilters[col] = that set.
+
+\- DATE columns are GROUPED to DAY granularity for filtering (FilterKey): the popup lists distinct days ("MM/dd/yyyy", InvariantCulture, chronological; blank → "(Blanks)") instead of every minute, and ticking a day keeps every time on that day. All OTHER columns filter on their display text. FilterKey (not CellText) is what \_colFilters stores and what ApplyFilter matches; CellText stays the grid's display/sort/global-search source. Date display in the grid is still minute-precision ("MM/dd/yyyy HH:mm").
+
+\- The filter popup is ColumnFilterDialog (nested class) — a searchable CheckedListBox of the (already narrowed) values it's given (blank → "(Blanks)"), with its own search box, Select All / Clear (apply to currently VISIBLE/filtered items), and OK / Cancel. The RENDERED list is CAPPED at DisplayCap (2000) items so a high-cardinality column (e.g. 100k file names) never builds a 100k-item control; a count label shows "N of M shown — type to narrow" when capped. \_state (value→checked, OrdinalIgnoreCase) covers EVERY value (not just rendered ones) and persists across the in-popup search, so Commit and check state stay correct beyond the cap; ItemCheck is detached during RebuildList to avoid feedback. Commit() returns SelectedValues = the checked subset (never null); the caller (ShowColumnFilter) folds in hiddenAllowed and decides "no filter". Anchored under the clicked header arrow, clamped to the screen working area. Reuses VaultDashboardForm.SetCueBanner.
+
+\- Active filters live in \_colFilters (column index → allowed FilterKey HashSet, OrdinalIgnoreCase); a column absent = unfiltered. ApplyFilter keeps a row only if it passes EVERY \_colFilters entry (FilterKey(f,col) ∈ set) AND the global search term.
+
+\- Control row (search box, Refresh, Export CSV, "Clear Filters") is height-matched to the textbox's font-derived PreferredHeight so the row lines up. "Clear Filters" resets \_colFilters + sort + the search box. The summary strip sits below with the panel tightened to it (no dead space). The header label reads "BCore VAULT DASHBOARD". The title, control row and summary are CENTER-aligned horizontally via LayoutTopControls (called on load + every top-panel resize).
+
+\- Form is SIZED TO FIT THE COLUMNS (FitFormSize, called once per LoadData): client width = sum of content-fit column widths + chrome (reserves the vertical-scrollbar width ONLY when >20 rows, so ≤20 rows leave no blank space after the last column), capped at 80% of the screen working area (MaxScreenFraction); min S(800) so the top row stays visible. Height is CONSTANT = ColumnHeadersHeight + 20×RowTemplate.Height + panels (VisibleRows=20) — fewer rows just leave blank space below; also capped at 80% of screen height. Column widths + form size are computed ONCE per load (from the full dataset, unfiltered) so the form does NOT resize while the user types in the search box.
+
+\- Data from DatabaseManager.GetAllFiles() (read-only snapshot, all statuses, no orphan purge). Fetched once into \_all; the global search box (300ms debounce timer, matches PartNo/Description/FileName) + the per-column Excel-style filters all filter \_all IN MEMORY via ApplyFilter (no re-query). Summary strip shows Total/WIP/Released/Locked/Broken-refs counts (whole vault) + "(Showing N)".
+
+\- Double-click a row → sets FileToOpen = that row's FilePath + DialogResult.OK + closes; the caller (TaskPaneControl.OpenDashboard) then VaultManager.OpenByPath(FileToOpen) AFTER the modal closes (opens the canonical WIP copy, read-only when Released). Deferred-open mirrors OpenRequestsPopup.
+
+\- "Export CSV" → SaveFileDialog → dumps the CURRENT (filtered) grid to CSV (RFC-4180 Csv helper, headers + FormattedValue rows). "Refresh" → re-runs GetAllFiles. "Close" → closes. Search debounce Timer + the shared bold Font are disposed on FormClosed. Placeholder via Win32 EM_SETCUEBANNER (no PlaceholderText on .NET 4.8).
 
 
 
@@ -796,11 +834,11 @@ GetNextRevision() in VaultManager.cs handles this
 
 \- Release-success popup auto-dismiss: the "File Released Successfully" dialog (single + chained model+drawing) uses VaultManager.ShowAutoCloseInfo — same MessageBox look but auto-closes after 4s if the user doesn't click OK (so an unattended release doesn't leave a dialog blocking the file close). A WinForms Timer (pumped by the modal message loop) FindWindow(s) the dialog by caption and PostMessage(WM_CLOSE); for an OK-only box that resolves like clicking OK. Failure/blocker dialogs stay modal as before.
 
+\- Vault Dashboard (Masters only): full-screen, resizable VaultDashboardForm — a sortable/filterable DataGridView of EVERY tracked file (DatabaseManager.GetAllFiles, all statuses, read-only snapshot, no orphan purge). Columns File Name/PartNo/Description/Status/Rev/Modified By/Modified Date/Released By/Released Date; Status colour-coded, broken-ref rows flagged red; drawings show their model's PartNo/Description. Content-fit column widths (widest value + 20%); date columns sort chronologically (typed DateTime). EXCEL-STYLE per-column filtering: every column header has a dropdown arrow (gold/funnel-tinted when active) that opens a searchable checkbox list (Select All / Clear, OK / Cancel) — so a Master can isolate any value (e.g. one engineer in Modified By or Released By); clicking the header text sorts. The list NARROWS to the values present given the other active filters (like Excel, preserving allowed values hidden by another filter), and DATE columns group to DAY granularity (distinct days, chronological) instead of every minute. A global search box (PartNo/Description/Name) + a "Clear Filters" button complement it; all filtering is in memory. Summary strip with whole-vault counts. Double-click opens the file (canonical WIP copy via OpenByPath). Export CSV dumps the filtered view. Opened from a Master-only task-pane button.
+
 
 
 \## Remaining Features (in priority order)
-
-6\. Vault Dashboard (full screen file status view)
 
 8\. Audit Report (export history to Excel)
 

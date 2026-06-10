@@ -90,6 +90,9 @@
       <SubType>UserControl</SubType>
     </Compile>
     <Compile Include="TaskPaneHost.cs" />
+    <Compile Include="VaultDashboardForm.cs">
+      <SubType>Form</SubType>
+    </Compile>
     <Compile Include="VaultManager.cs" />
   </ItemGroup>
   <ItemGroup>
