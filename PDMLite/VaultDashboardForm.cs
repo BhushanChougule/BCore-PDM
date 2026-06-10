@@ -142,7 +142,7 @@ namespace PDMLite
                 Width = S(150)
             };
             _statusFilter.Items.AddRange(new object[]
-                { "All statuses", "WIP", "Released", "Locked" });
+                { "All", "WIP", "Released", "Locked" });
             _statusFilter.SelectedIndex = 0;
             _statusFilter.SelectedIndexChanged += (s, e) => ApplyFilter();
             _topPanel.Controls.Add(_statusFilter);
@@ -233,7 +233,7 @@ namespace PDMLite
             _grid.AlternatingRowsDefaultCellStyle.BackColor = cRowAlt;
             _grid.CellDoubleClick += Grid_CellDoubleClick;
 
-            AddColumn("File", 22);
+            AddColumn("File Name", 22);
             AddColumn("Part No", 14);
             AddColumn("Description", 24);
             AddColumn("Status", 9);
@@ -461,8 +461,8 @@ namespace PDMLite
 
             _summary.Text =
                 $"Total: {_all.Count}      WIP: {wip}      Released: {rel}" +
-                $"      Locked: {lck}      Broken refs: {brk}" +
-                $"          (showing {showing})";
+                $"      Locked: {lck}      Broken Refs: {brk}" +
+                $"          (Showing {showing})";
         }
 
         private static bool Eq(string a, string b) =>
