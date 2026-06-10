@@ -292,43 +292,17 @@ namespace PDMLite
             return field;
         }
 
-        // Append-only diagnostic log so we can SEE why a watermark didn't appear
-        // (the work is otherwise silently swallowed). TEMPORARY — remove once the
-        // watermark is confirmed working in production.
-        private static void WatermarkLog(string msg)
-        {
-            try
-            {
-                File.AppendAllText(
-                    @"N:\PDM-SolidWorks\VAULT\watermark_debug.log",
-                    System.DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss") +
-                    "  " + msg + System.Environment.NewLine);
-            }
-            catch { }
-        }
-
-        // Thin wrapper that references NO PdfSharp types, so if PdfSharp.dll fails
-        // to load at runtime the resulting FileNotFoundException/TypeLoadException
-        // is caught HERE (when the JIT enters StampWatermarkCore) and logged,
-        // instead of vanishing. This is how we tell "DLL not deployed" apart from
-        // "PdfSharp couldn't process the PDF".
+        // Thin wrapper that references NO PdfSharp types directly. If PdfSharp.dll
+        // fails to load at runtime, the FileNotFoundException/TypeLoadException is
+        // thrown when the JIT enters StampWatermarkCore and is caught HERE —
+        // leaving the PDF un-stamped and the release unaffected, instead of
+        // propagating up and breaking the release. (A single method referencing
+        // PdfSharp types could NOT catch its own assembly-load failure.)
         private static void StampWatermark(string pdfPath)
         {
-            if (!File.Exists(pdfPath))
-            {
-                WatermarkLog("SKIP: pdf does not exist: " + pdfPath);
-                return;
-            }
-            try
-            {
-                WatermarkLog("START: " + pdfPath);
-                StampWatermarkCore(pdfPath);
-                WatermarkLog("DONE: " + pdfPath);
-            }
-            catch (System.Exception ex)
-            {
-                WatermarkLog("FAIL (" + ex.GetType().Name + "): " + ex.Message);
-            }
+            if (!File.Exists(pdfPath)) return;
+            try { StampWatermarkCore(pdfPath); }
+            catch { } // missing PdfSharp.dll, or any PdfSharp error → skip stamp
         }
 
         // Stamp a diagonal, very transparent "RELEASED" watermark on every page
@@ -349,13 +323,10 @@ namespace PDMLite
             using (PdfDocument pdf = PdfReader.Open(inMs,
                 PdfDocumentOpenMode.Modify))
             {
-                WatermarkLog("OPENED, pages=" + pdf.PageCount);
-
-                // Very transparent gray — reads as a subtle watermark without
-                // hiding the drawing beneath. PdfSharp emits the alpha as a PDF
-                // ExtGState, so true transparency works (the earlier "invisible"
-                // problem was the file-lock write failure, since fixed).
-                XBrush brush = new XSolidBrush(XColor.FromArgb(13, 120, 120, 120));
+                // Very transparent gray (alpha 11/255 ≈ 4.5%) — reads as a subtle
+                // watermark without hiding the drawing beneath. PdfSharp emits the
+                // alpha as a PDF ExtGState, so true transparency works.
+                XBrush brush = new XSolidBrush(XColor.FromArgb(11, 120, 120, 120));
 
                 foreach (PdfPage page in pdf.Pages)
                 {
@@ -402,7 +373,7 @@ namespace PDMLite
 
             // Write the stamped PDF back, retrying while SOLIDWORKS still holds
             // the export open. The final attempt is outside the loop so a genuine
-            // persistent lock surfaces to the wrapper's logger.
+            // persistent lock surfaces to the wrapper's catch (PDF left un-stamped).
             for (int attempt = 0; attempt < 5; attempt++)
             {
                 try
