@@ -26,7 +26,7 @@ namespace PDMLite
 
             if (docType == (int)swDocumentTypes_e.swDocDRAWING)
             {
-                // Drawing → PDF only (all sheets in one file), then watermark
+                // Drawing → PDF (all sheets), then stamp RELEASED watermark
                 string pdfPath = Path.Combine(pdfFolder, stamp + ".pdf");
                 ExportDrawingPdf(doc, pdfPath);
                 StampWatermark(pdfPath);
@@ -293,9 +293,10 @@ namespace PDMLite
         }
 
         // Stamp a diagonal "RELEASED" watermark on every page of the given PDF.
-        // Semi-transparent muted green so the drawing content remains readable.
-        // Non-fatal: if PdfSharp can't open or write the file the PDF is left
-        // as-is (un-watermarked) and the release continues.
+        // Uses a fully opaque light gray — PdfSharp 1.50.x (net20) does not
+        // reliably apply alpha to the PDF content stream, so a solid light color
+        // is used instead. Non-fatal: if PdfSharp can't open or write the file
+        // the PDF is left as-is and the release continues.
         private static void StampWatermark(string pdfPath)
         {
             if (!File.Exists(pdfPath)) return;
@@ -304,10 +305,11 @@ namespace PDMLite
                 using (PdfDocument pdf = PdfReader.Open(pdfPath,
                     PdfDocumentOpenMode.Modify))
                 {
-                    XFont   font  = new XFont("Arial", 72, XFontStyle.Bold);
-                    // alpha=50/255 ≈ 20% opacity — visible but doesn't obscure drawing
-                    XBrush  brush = new XSolidBrush(
-                        XColor.FromArgb(50, 0, 120, 60));
+                    XFont  font  = new XFont("Arial", 72, XFontStyle.Bold);
+                    // Light gray (170/255): visible as a watermark stamp without
+                    // obscuring drawing lines, which are typically near-black.
+                    XBrush brush = new XSolidBrush(
+                        XColor.FromArgb(255, 170, 170, 170));
 
                     foreach (PdfPage page in pdf.Pages)
                     {
