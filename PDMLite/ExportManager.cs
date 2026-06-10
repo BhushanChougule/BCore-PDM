@@ -335,40 +335,71 @@ namespace PDMLite
         // Uses a fully opaque light gray — PdfSharp 1.50.x (net20) does not
         // reliably apply alpha to the PDF content stream, so a solid light color
         // is used instead.
+        //
+        // The PDF is read into memory and stamped there so PdfSharp never holds a
+        // file handle on the path we then overwrite. SOLIDWORKS keeps the
+        // freshly-exported PDF open for a short moment (especially on the network
+        // share), which blocks an exclusive write-back even though a shared read
+        // succeeds — so the write retries a few times to let that lock clear.
         private static void StampWatermarkCore(string pdfPath)
         {
-            {
-                using (PdfDocument pdf = PdfReader.Open(pdfPath,
-                    PdfDocumentOpenMode.Modify))
-                {
-                    WatermarkLog("OPENED, pages=" + pdf.PageCount);
-                    XFont  font  = new XFont("Arial", 72, XFontStyle.Bold);
-                    // Light gray (170/255): visible as a watermark stamp without
-                    // obscuring drawing lines, which are typically near-black.
-                    XBrush brush = new XSolidBrush(
-                        XColor.FromArgb(255, 170, 170, 170));
+            // Read the source bytes and release the handle immediately.
+            byte[] srcBytes = File.ReadAllBytes(pdfPath);
 
-                    foreach (PdfPage page in pdf.Pages)
+            byte[] outBytes;
+            using (var inMs = new MemoryStream(srcBytes))
+            using (PdfDocument pdf = PdfReader.Open(inMs,
+                PdfDocumentOpenMode.Modify))
+            {
+                WatermarkLog("OPENED, pages=" + pdf.PageCount);
+                XFont  font  = new XFont("Arial", 72, XFontStyle.Bold);
+                // Light gray (170/255): visible as a watermark stamp without
+                // obscuring drawing lines, which are typically near-black.
+                XBrush brush = new XSolidBrush(
+                    XColor.FromArgb(255, 170, 170, 170));
+
+                foreach (PdfPage page in pdf.Pages)
+                {
+                    using (XGraphics gfx = XGraphics.FromPdfPage(
+                        page, XGraphicsPdfPageOptions.Append))
                     {
-                        using (XGraphics gfx = XGraphics.FromPdfPage(
-                            page, XGraphicsPdfPageOptions.Append))
-                        {
-                            // Translate to page centre, rotate -45°, then draw
-                            // the text centred on the origin.
-                            XGraphicsState state = gfx.Save();
-                            gfx.TranslateTransform(
-                                page.Width.Point  / 2.0,
-                                page.Height.Point / 2.0);
-                            gfx.RotateTransform(-45);
-                            XSize sz = gfx.MeasureString("RELEASED", font);
-                            gfx.DrawString("RELEASED", font, brush,
-                                new XPoint(-sz.Width / 2, sz.Height / 4));
-                            gfx.Restore(state);
-                        }
+                        // Translate to page centre, rotate -45°, then draw
+                        // the text centred on the origin.
+                        XGraphicsState state = gfx.Save();
+                        gfx.TranslateTransform(
+                            page.Width.Point  / 2.0,
+                            page.Height.Point / 2.0);
+                        gfx.RotateTransform(-45);
+                        XSize sz = gfx.MeasureString("RELEASED", font);
+                        gfx.DrawString("RELEASED", font, brush,
+                            new XPoint(-sz.Width / 2, sz.Height / 4));
+                        gfx.Restore(state);
                     }
-                    pdf.Save(pdfPath);
+                }
+
+                using (var outMs = new MemoryStream())
+                {
+                    pdf.Save(outMs, false); // false = leave the stream open
+                    outBytes = outMs.ToArray();
                 }
             }
+
+            // Write the stamped PDF back, retrying while SOLIDWORKS still holds
+            // the export open. The final attempt is outside the loop so a genuine
+            // persistent lock surfaces to the wrapper's logger.
+            for (int attempt = 0; attempt < 5; attempt++)
+            {
+                try
+                {
+                    File.WriteAllBytes(pdfPath, outBytes);
+                    return;
+                }
+                catch (IOException)
+                {
+                    System.Threading.Thread.Sleep(300);
+                }
+            }
+            File.WriteAllBytes(pdfPath, outBytes);
         }
 
         // Universal export — SOLIDWORKS picks format from file extension
