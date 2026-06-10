@@ -1,4 +1,7 @@
-﻿using SolidWorks.Interop.sldworks;
+﻿using PdfSharp.Drawing;
+using PdfSharp.Pdf;
+using PdfSharp.Pdf.IO;
+using SolidWorks.Interop.sldworks;
 using SolidWorks.Interop.swconst;
 using System.Collections.Generic;
 using System.IO;
@@ -23,8 +26,10 @@ namespace PDMLite
 
             if (docType == (int)swDocumentTypes_e.swDocDRAWING)
             {
-                // Drawing → PDF only (all sheets in one file)
-                ExportDrawingPdf(doc, Path.Combine(pdfFolder, stamp + ".pdf"));
+                // Drawing → PDF only (all sheets in one file), then watermark
+                string pdfPath = Path.Combine(pdfFolder, stamp + ".pdf");
+                ExportDrawingPdf(doc, pdfPath);
+                StampWatermark(pdfPath);
             }
             else if (docType == (int)swDocumentTypes_e.swDocPART)
             {
@@ -285,6 +290,47 @@ namespace PDMLite
                 field.IndexOf('\n') >= 0 || field.IndexOf('\r') >= 0)
                 return "\"" + field.Replace("\"", "\"\"") + "\"";
             return field;
+        }
+
+        // Stamp a diagonal "RELEASED" watermark on every page of the given PDF.
+        // Semi-transparent muted green so the drawing content remains readable.
+        // Non-fatal: if PdfSharp can't open or write the file the PDF is left
+        // as-is (un-watermarked) and the release continues.
+        private static void StampWatermark(string pdfPath)
+        {
+            if (!File.Exists(pdfPath)) return;
+            try
+            {
+                using (PdfDocument pdf = PdfReader.Open(pdfPath,
+                    PdfDocumentOpenMode.Modify))
+                {
+                    XFont   font  = new XFont("Arial", 72, XFontStyle.Bold);
+                    // alpha=50/255 ≈ 20% opacity — visible but doesn't obscure drawing
+                    XBrush  brush = new XSolidBrush(
+                        XColor.FromArgb(50, 0, 120, 60));
+
+                    foreach (PdfPage page in pdf.Pages)
+                    {
+                        using (XGraphics gfx = XGraphics.FromPdfPage(
+                            page, XGraphicsPdfPageOptions.Append))
+                        {
+                            // Translate to page centre, rotate -45°, then draw
+                            // the text centred on the origin.
+                            XGraphicsState state = gfx.Save();
+                            gfx.TranslateTransform(
+                                page.Width.Point  / 2.0,
+                                page.Height.Point / 2.0);
+                            gfx.RotateTransform(-45);
+                            XSize sz = gfx.MeasureString("RELEASED", font);
+                            gfx.DrawString("RELEASED", font, brush,
+                                new XPoint(-sz.Width / 2, sz.Height / 4));
+                            gfx.Restore(state);
+                        }
+                    }
+                    pdf.Save(pdfPath);
+                }
+            }
+            catch { }
         }
 
         // Universal export — SOLIDWORKS picks format from file extension

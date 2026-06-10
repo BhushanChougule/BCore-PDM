@@ -312,7 +312,9 @@ Core vault operations.
 
 \- ExportFlatPatternOnly(doc, exportRoot, stamp) → exports flat-pattern DXF only; called once for the original active config after the multi-config STEP loop
 
-\- ExportDrawingPdf(doc, outPath) → drawing to PDF (all sheets)
+\- ExportDrawingPdf(doc, outPath) → drawing to PDF (all sheets); called by ExportAll which immediately follows with StampWatermark
+
+\- StampWatermark(pdfPath) → post-processes the exported PDF with PdfSharp: opens in Modify mode, draws diagonal "RELEASED" text centred on every page at -45°, semi-transparent muted green (alpha=50/255 ≈ 20% so drawing content stays readable), 72pt Arial Bold. Non-fatal (catch swallows any PdfSharp error so the release is never blocked). Requires PdfSharp 1.50.5147 NuGet (packages\\PdfSharp.1.50.5147\\lib\\net40\\PdfSharp.dll) — pure managed .NET, no native DLL conflicts. Deploy PdfSharp.dll alongside PDMLite.dll in N:\\PDM-SolidWorks\\ADDIN\\.
 
 \- ExportBom(asmDoc, exportRoot, partNo, rev) → assemblies ONLY; writes EXPORTS\\BOM\\{partNo}-R{rev}\_BOM.csv using the RAW PartNo (dots/dashes preserved, no dot-stripping). TOP-LEVEL BOM: components enumerated via activeConfig.GetRootComponent3(true).GetChildren() — GetRootComponent3(true) RESOLVES lightweight components (so their models load and properties read back non-empty) and GetChildren() gives top-level children only; AssemblyDoc.GetComponents(true) is a FALLBACK (it returned only the first component when others were lightweight). Each unique component (path + ReferencedConfiguration) is ONE row with a Qty count (repeated instances increment Qty); Purchased/Toolbox hardware IS listed (a BOM needs it). Suppression is tested with comp.GetSuppression2() == swComponentSuppressed, NOT comp.IsSuppressed() — IsSuppressed() wrongly reports LIGHTWEIGHT components as suppressed, which was dropping lightweight-loaded components from the BOM; lightweight/resolved/fully-resolved all count as PRESENT. A lightweight component's properties are read via GetReadableModel (GetModelDoc2 → already-open doc → read-only OpenDoc6 fallback, closed only if opened here). Columns: Item,PartNo,Description,Revision,Material,PartType,Qty — read via ReadProp which tries the referenced config → document level (configName "") → active config, so a Material1 stored in any scope is found (PartNo falls back to filename if unreadable). RFC-4180 CSV escaping (Csv helper, mirrors AuditLogger). Wrapped in try/catch — a BOM failure NEVER blocks the release. Called from ReleaseFile after the STEP export, gated on docType==swDocASSEMBLY.
 
@@ -786,11 +788,11 @@ GetNextRevision() in VaultManager.cs handles this
 
 \- BOM Export (CSV) on assembly release: every assembly release auto-generates a TOP-LEVEL BOM at EXPORTS\\BOM\\{partNoClean}-R{rev}\_BOM.csv (ExportManager.ExportBom). One row per unique top-level component (path + referenced config) with a Qty count; Purchased/Toolbox hardware included; columns Item,PartNo,Description,Revision,Material,PartType,Qty read config-specifically. Non-fatal (a BOM failure never blocks release). Old BOMs archived to ARCHIVE\\BOM\\ on re-release and rollback (via the shared MoveMatching helper). CSV chosen over .xlsx to avoid a NuGet/native dependency on the engineer PCs (matches audit.csv); reflects the assembly's active config at release time.
 
+\- Watermark on released PDFs: ExportManager.StampWatermark post-processes every exported drawing PDF after SOLIDWORKS writes it. Diagonal "RELEASED" text, 72pt Arial Bold, semi-transparent muted green (alpha≈20%), centered on each page at -45°. Implemented with PdfSharp 1.50.5147 (MIT, pure managed .NET 4.0+, no native DLL). Non-fatal. PdfSharp.dll must be deployed to N:\\PDM-SolidWorks\\ADDIN\\ alongside PDMLite.dll.
+
 
 
 \## Remaining Features (in priority order)
-
-5\. Watermark on released PDFs
 
 6\. Vault Dashboard (full screen file status view)
 
