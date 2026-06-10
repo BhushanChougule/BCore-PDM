@@ -10,9 +10,15 @@ using System.Windows.Forms;
 
 namespace PDMLite
 {
-    // Full-screen Vault Dashboard (Masters only). A sortable, filterable table of
-    // EVERY tracked file with its status, revision, owner and dates — gives a
-    // Master whole-vault visibility instead of searching file-by-file.
+    // Full-screen Vault Dashboard (all users). A sortable, filterable table of
+    // EVERY tracked file with its status, revision, owner and dates — gives
+    // whole-vault visibility instead of searching file-by-file. Read-only for
+    // everyone; engineers open it too (double-click only opens a file).
+    //
+    // Rows are PAGINATED 20 at a time (PageSize): the grid renders one page and
+    // a pager at the bottom (First · ‹ · numbered pages with ellipsis · › · Last)
+    // moves between them. The 20-row page size matches the fixed grid height, so
+    // a page never needs a vertical scrollbar.
     //
     // DPI-aware (S(v) = v * _scale, fonts = pt * _scale), matching the other
     // BCore PDM forms. Uses a DataGridView (the one tabular surface in the app):
@@ -59,8 +65,17 @@ namespace PDMLite
         private Font _cellBold; // shared bold font: Status cell + header text
 
         private const int VisibleRows = 20;     // fixed grid height = 20 rows
+        private const int PageSize = VisibleRows; // 20 rows per page (the "20 row rule")
         private const double MaxScreenFraction = 0.80; // popup ≤ 80% of screen
         private int GlyphZone => S(20);         // right-edge hit area for the arrow
+
+        // Current page (0-based) into _view, and the pager controls rebuilt for it.
+        private int _page = 0;
+        private readonly List<Control> _pagerControls = new List<Control>();
+        private Font _pagerFont;
+        private Button _btnClose;
+        private int PageCount => Math.Max(1, (_view.Count + PageSize - 1) / PageSize);
+        private int PageStart => _page * PageSize;
 
         private List<VaultFile> _all = new List<VaultFile>();
         // The current filtered + sorted rows. In VirtualMode the grid renders
@@ -125,6 +140,7 @@ namespace PDMLite
             Font fGrid   = new Font("Segoe UI", 3.3f * _scale);
             Font fBtn    = new Font("Segoe UI", 4f * _scale, FontStyle.Bold);
             _cellBold    = new Font("Segoe UI", 3.3f * _scale, FontStyle.Bold);
+            _pagerFont   = new Font("Segoe UI", 4f * _scale);
 
             // ── Top panel: title, search, Refresh, Export, Clear ──────────
             // CENTERED horizontally by LayoutTopControls (on load + resize).
@@ -203,12 +219,14 @@ namespace PDMLite
                 Height = S(46),
                 BackColor = cBg
             };
-            Button btnClose = MakeButton("Close", cTextGray, fBtn,
+            _btnClose = MakeButton("Close", cTextGray, fBtn,
                 new Point(0, S(8)), S(110));
-            btnClose.Anchor = AnchorStyles.Top | AnchorStyles.Right;
-            btnClose.Location = new Point(this.ClientSize.Width - S(124), S(8));
-            btnClose.Click += (s, e) => { this.DialogResult = DialogResult.Cancel; Close(); };
-            _bottomPanel.Controls.Add(btnClose);
+            _btnClose.Anchor = AnchorStyles.Top | AnchorStyles.Right;
+            _btnClose.Location = new Point(this.ClientSize.Width - S(124), S(8));
+            _btnClose.Click += (s, e) => { this.DialogResult = DialogResult.Cancel; Close(); };
+            _bottomPanel.Controls.Add(_btnClose);
+            // Re-centre the pager when the form (and so the bottom panel) resizes.
+            _bottomPanel.Resize += (s, e) => BuildPager();
 
             // ── Grid ──────────────────────────────────────────────────────
             _grid = new DataGridView
@@ -284,6 +302,7 @@ namespace PDMLite
                 _searchTimer.Stop();
                 _searchTimer.Dispose();
                 _cellBold?.Dispose();
+                _pagerFont?.Dispose();
             };
         }
 
@@ -463,26 +482,191 @@ namespace PDMLite
                     : view.OrderByDescending(key)).ToList();
             }
 
-            // VirtualMode: just swap the backing list and set RowCount — the grid
-            // pulls values for visible rows via CellValueNeeded. No per-row objects
-            // are created, so this stays instant at 50–100k rows and on every
-            // keystroke. CurrentCell is cleared first so a shrinking RowCount can't
-            // reference a now-invalid cell.
+            // VirtualMode + pagination: swap the backing list, jump back to page 1
+            // (a new filter/sort/search starts at the top), and render that page.
+            // No per-row objects are created, so this stays instant at 50–100k rows.
             _view = view;
-            _grid.CurrentCell = null;
-            _grid.RowCount = _view.Count;
-            _grid.Invalidate();
+            _page = 0;
+            ShowGridPage();
 
             UpdateSummary(_view.Count);
             LayoutTopControls(); // re-centre: the summary width changed
+        }
+
+        // Render the current page: clamp _page, set the grid's RowCount to just
+        // this page's rows (≤ PageSize, so no vertical scrollbar), repaint, and
+        // rebuild the pager. CurrentCell is cleared first so a shrinking RowCount
+        // can't reference a now-invalid cell.
+        private void ShowGridPage()
+        {
+            if (_page < 0) _page = 0;
+            if (_page >= PageCount) _page = PageCount - 1;
+            _grid.CurrentCell = null;
+            _grid.RowCount = Math.Max(0, Math.Min(PageSize, _view.Count - PageStart));
+            _grid.Invalidate();
+            BuildPager();
+        }
+
+        private void GoToPage(int page)
+        {
+            _page = page;
+            ShowGridPage();
+            UpdateSummary(_view.Count); // refresh "Page X of Y" in the summary
+            LayoutTopControls();
+        }
+
+        // ── Pager: First · ‹ · numbered pages (with ellipsis) · › · Last ────
+        // Rebuilt on every page move / filter / resize. The current page is a
+        // boxed button; First/Last/arrows grey out at the ends.
+        private void BuildPager()
+        {
+            if (_bottomPanel == null || _pagerFont == null) return;
+            foreach (var c in _pagerControls)
+            {
+                _bottomPanel.Controls.Remove(c);
+                c.Dispose();
+            }
+            _pagerControls.Clear();
+
+            int total = PageCount;
+            int current = _page + 1; // 1-based for display
+
+            var items = new List<Control>();
+            items.Add(PagerLink("First", _page > 0, 0));
+            items.Add(PagerLink("‹", _page > 0, _page - 1));
+            foreach (int t in PageTokens(current, total))
+                items.Add(t < 0 ? (Control)PagerEllipsis()
+                                : PagerNumber(t, t - 1 == _page));
+            items.Add(PagerLink("›", _page < total - 1, _page + 1));
+            items.Add(PagerLink("Last", _page < total - 1, total - 1));
+
+            int gap = S(3);
+            int totalW = -gap;
+            foreach (var c in items) totalW += c.Width + gap;
+
+            int closeZone = S(140); // keep the pager clear of the Close button
+            int avail = Math.Max(totalW, _bottomPanel.ClientSize.Width - closeZone);
+            int x = Math.Max(S(8), (avail - totalW) / 2);
+            int y = Math.Max(S(4), (_bottomPanel.ClientSize.Height - S(26)) / 2);
+            foreach (var c in items)
+            {
+                c.Left = x;
+                c.Top = y;
+                x += c.Width + gap;
+                _bottomPanel.Controls.Add(c);
+                _pagerControls.Add(c);
+            }
+        }
+
+        // The page numbers to show (1-based; -1 = ellipsis). ≤7 pages: all of
+        // them. Otherwise: 1 … window-around-current … last (classic pattern).
+        private static List<int> PageTokens(int current, int total)
+        {
+            var t = new List<int>();
+            if (total <= 7)
+            {
+                for (int i = 1; i <= total; i++) t.Add(i);
+                return t;
+            }
+            int start = Math.Max(2, current - 1);
+            int end = Math.Min(total - 1, current + 1);
+            if (current <= 3) { start = 2; end = 4; }
+            if (current >= total - 2) { start = total - 3; end = total - 1; }
+            t.Add(1);
+            if (start > 2) t.Add(-1);
+            for (int i = start; i <= end; i++) t.Add(i);
+            if (end < total - 1) t.Add(-1);
+            t.Add(total);
+            return t;
+        }
+
+        // First / Last / ‹ / › link button (greyed + inert when not applicable).
+        private Button PagerLink(string text, bool enabled, int targetPage)
+        {
+            int w = TextRenderer.MeasureText(text, _pagerFont).Width + S(12);
+            if (w < S(26)) w = S(26);
+            var b = new Button
+            {
+                Text = text,
+                Font = _pagerFont,
+                Width = w,
+                Height = S(26),
+                FlatStyle = FlatStyle.Flat,
+                BackColor = cBg,
+                ForeColor = enabled ? cBrand : Color.FromArgb(180, 186, 196),
+                Enabled = enabled,
+                Cursor = Cursors.Hand,
+                TabStop = false
+            };
+            b.FlatAppearance.BorderSize = 0;
+            b.FlatAppearance.MouseOverBackColor = cRowAlt;
+            if (enabled)
+            {
+                int tp = targetPage;
+                b.Click += (s, e) => GoToPage(tp);
+            }
+            return b;
+        }
+
+        // One numbered page button. The current page is boxed (white + border);
+        // the others are plain blue links.
+        private Button PagerNumber(int pageNum, bool current)
+        {
+            string text = pageNum.ToString(CultureInfo.InvariantCulture);
+            int w = TextRenderer.MeasureText(text, _pagerFont).Width + S(14);
+            if (w < S(28)) w = S(28);
+            var b = new Button
+            {
+                Text = text,
+                Font = _pagerFont,
+                Width = w,
+                Height = S(26),
+                FlatStyle = FlatStyle.Flat,
+                TabStop = false
+            };
+            if (current)
+            {
+                b.BackColor = Color.White;
+                b.ForeColor = cTextDark;
+                b.FlatAppearance.BorderSize = 1;
+                b.FlatAppearance.BorderColor = cBorder;
+                b.Cursor = Cursors.Default;
+            }
+            else
+            {
+                b.BackColor = cBg;
+                b.ForeColor = cBrand;
+                b.FlatAppearance.BorderSize = 0;
+                b.FlatAppearance.MouseOverBackColor = cRowAlt;
+                b.Cursor = Cursors.Hand;
+                int target = pageNum - 1;
+                b.Click += (s, e) => GoToPage(target);
+            }
+            return b;
+        }
+
+        private Label PagerEllipsis()
+        {
+            return new Label
+            {
+                Text = "…",
+                Font = _pagerFont,
+                AutoSize = false,
+                Width = S(18),
+                Height = S(26),
+                TextAlign = ContentAlignment.MiddleCenter,
+                ForeColor = Color.FromArgb(150, 156, 166),
+                BackColor = cBg
+            };
         }
 
         // ── VirtualMode providers (called for VISIBLE cells only) ───────────
         private void Grid_CellValueNeeded(object sender,
             DataGridViewCellValueEventArgs e)
         {
-            if (e.RowIndex < 0 || e.RowIndex >= _view.Count) return;
-            var f = _view[e.RowIndex];
+            int idx = PageStart + e.RowIndex;
+            if (e.RowIndex < 0 || idx >= _view.Count) return;
+            var f = _view[idx];
             switch (e.ColumnIndex)
             {
                 case 0: e.Value = f.FileName; break;
@@ -504,8 +688,9 @@ namespace PDMLite
         private void Grid_CellFormatting(object sender,
             DataGridViewCellFormattingEventArgs e)
         {
-            if (e.RowIndex < 0 || e.RowIndex >= _view.Count) return;
-            var f = _view[e.RowIndex];
+            int idx = PageStart + e.RowIndex;
+            if (e.RowIndex < 0 || idx >= _view.Count) return;
+            var f = _view[idx];
             if (e.ColumnIndex == 3) // Status — coloured + bold
             {
                 e.CellStyle.ForeColor = StatusColor(f.Status);
@@ -520,8 +705,9 @@ namespace PDMLite
         private void Grid_CellToolTipTextNeeded(object sender,
             DataGridViewCellToolTipTextNeededEventArgs e)
         {
-            if (e.RowIndex < 0 || e.RowIndex >= _view.Count) return; // keep header tooltips
-            if (e.ColumnIndex == 0 && _view[e.RowIndex].HasBrokenRefs)
+            int idx = PageStart + e.RowIndex;
+            if (e.RowIndex < 0 || idx >= _view.Count) return; // keep header tooltips
+            if (e.ColumnIndex == 0 && _view[idx].HasBrokenRefs)
                 e.ToolTipText = "Has broken references";
         }
 
@@ -709,9 +895,9 @@ namespace PDMLite
             int totalCols = 0;
             foreach (DataGridViewColumn c in _grid.Columns) totalCols += c.Width;
 
+            // Pages cap at PageSize (== VisibleRows) rows, so a page never needs a
+            // vertical scrollbar — no width reserved for one.
             int chrome = S(4);
-            if (_all.Count > VisibleRows)
-                chrome += SystemInformation.VerticalScrollBarWidth;
             int clientW = totalCols + chrome;
 
             var area = Screen.FromControl(this).WorkingArea;
@@ -762,10 +948,13 @@ namespace PDMLite
             int lck = _all.Count(f => Eq(f.Status, "Locked"));
             int brk = _all.Count(f => f.HasBrokenRefs);
 
+            int from = showing == 0 ? 0 : PageStart + 1;
+            int to = Math.Min(showing, PageStart + PageSize);
             _summary.Text =
                 $"Total: {_all.Count}      WIP: {wip}      Released: {rel}" +
                 $"      Locked: {lck}      Broken Refs: {brk}" +
-                $"          (Showing {showing})";
+                $"          (Showing {from}–{to} of {showing}" +
+                $" · Page {_page + 1} of {PageCount})";
         }
 
         private static bool Eq(string a, string b) =>
@@ -782,8 +971,9 @@ namespace PDMLite
         // ── Row open (deferred to caller) ───────────────────────────────────
         private void Grid_CellDoubleClick(object sender, DataGridViewCellEventArgs e)
         {
-            if (e.RowIndex < 0 || e.RowIndex >= _view.Count) return;
-            string path = _view[e.RowIndex].FilePath;
+            int idx = PageStart + e.RowIndex;
+            if (e.RowIndex < 0 || idx >= _view.Count) return;
+            string path = _view[idx].FilePath;
             if (string.IsNullOrEmpty(path)) return;
             FileToOpen = path;
             this.DialogResult = DialogResult.OK;
