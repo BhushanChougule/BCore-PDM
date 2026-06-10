@@ -64,9 +64,13 @@ N:\\PDM-SolidWorks\\
 
 \- ARCHIVE\\STEP\\          → archived STEP exports
 
+\- ARCHIVE\\BOM\\           → archived assembly BOM CSVs
+
 \- EXPORTS\\PDF\\           → current released PDFs
 
 \- EXPORTS\\STEP\\          → current released STEP files
+
+\- EXPORTS\\BOM\\           → current released assembly BOM CSVs (top-level, one per assembly release)
 
 \- SCRAP\\                 → files retired via Remove from Vault (WIP copy, RELEASED snapshot, exports MOVED here, timestamped). Separate from ARCHIVE (old revisions). Recoverable until a Master bulk-purges it. Auto-created by Initialize.
 
@@ -164,7 +168,9 @@ WinForms dialog for missing properties. Fixed sizes (not DPI-scaled, form is sho
 
 \- CharacterCasing=Upper on TextBoxes
 
-\- Material1 and FinishType use ComboBox dropdowns
+\- Material1 and FinishType use ComboBox dropdowns. The property NAME is Material1 (linked to the drawing template) but the display label is "Material". Material1 dropdown includes "BOM" (material called out in the BOM/table, not on the part). All dropdown VALUES are ALL CAPS (everything on the drawing is uppercase). FinishType options: NONE, PAINTED, ZINC PLATE, BLACK ZINC, HOT DIPPED GALV., FNC, SEE TABLE, BLACK OXIDE, PASSIVATE. The "-- Select --" sentinel keeps its mixed case (it's a UI placeholder, not a value, and ComboValue compares it exactly)
+
+\- DrawnBy (TextBox, editable) auto-defaults to the current user's initials via UserInitials() — first two letters of the Windows username, uppercased (bchougule → BC, rkramarz → RK), same rule as CheckedBy. Only pre-filled when empty; the engineer can overwrite it
 
 \- Revision uses ComboBox (full revision sequence A through Z, skipping I,O,Q,S,X)
 
@@ -290,9 +296,11 @@ Core vault operations.
 
 \- SetReadOnly(path, bool) → sets/removes OS-level FileAttributes.ReadOnly
 
-\- ArchiveOldExports(archiveId, isDrawing) → moves old STEP/PDF to archive before release
+\- ArchiveOldExports(archiveId, isDrawing, bomIdentifier=null) → moves old STEP (non-drawings), PDF (all), and BOM CSV (non-drawings, by raw PartNo) to archive before release. All three go through MoveMatching as INDEPENDENT operations — a failure archiving one type can never skip the others
 
-\- CleanupExportsOnRollback(partNoClean, drawingNo) → moves all exports to archive on rollback
+\- CleanupExportsOnRollback(partNoClean, drawingNo, rawPartNo=null) → moves all exports (STEP/PDF/BOM) to archive on rollback
+
+\- MoveMatching(srcDir, destDir, pattern) → private helper; moves every file in srcDir matching pattern to destDir. Each file moved in its OWN try/catch (clears read-only on a stale archive copy + on the source first), so one locked/failed file never blocks the rest; GetFiles wrapped in try; no-op if srcDir missing/empty. Used by ArchiveOldExports and CleanupExportsOnRollback
 
 
 
@@ -305,6 +313,8 @@ Core vault operations.
 \- ExportFlatPatternOnly(doc, exportRoot, stamp) → exports flat-pattern DXF only; called once for the original active config after the multi-config STEP loop
 
 \- ExportDrawingPdf(doc, outPath) → drawing to PDF (all sheets)
+
+\- ExportBom(asmDoc, exportRoot, partNo, rev) → assemblies ONLY; writes EXPORTS\\BOM\\{partNo}-R{rev}\_BOM.csv using the RAW PartNo (dots/dashes preserved, no dot-stripping). TOP-LEVEL BOM: components enumerated via activeConfig.GetRootComponent3(true).GetChildren() — GetRootComponent3(true) RESOLVES lightweight components (so their models load and properties read back non-empty) and GetChildren() gives top-level children only; AssemblyDoc.GetComponents(true) is a FALLBACK (it returned only the first component when others were lightweight). Each unique component (path + ReferencedConfiguration) is ONE row with a Qty count (repeated instances increment Qty); Purchased/Toolbox hardware IS listed (a BOM needs it). Suppression is tested with comp.GetSuppression2() == swComponentSuppressed, NOT comp.IsSuppressed() — IsSuppressed() wrongly reports LIGHTWEIGHT components as suppressed, which was dropping lightweight-loaded components from the BOM; lightweight/resolved/fully-resolved all count as PRESENT. A lightweight component's properties are read via GetReadableModel (GetModelDoc2 → already-open doc → read-only OpenDoc6 fallback, closed only if opened here). Columns: Item,PartNo,Description,Revision,Material,PartType,Qty — read via ReadProp which tries the referenced config → document level (configName "") → active config, so a Material1 stored in any scope is found (PartNo falls back to filename if unreadable). RFC-4180 CSV escaping (Csv helper, mirrors AuditLogger). Wrapped in try/catch — a BOM failure NEVER blocks the release. Called from ReleaseFile after the STEP export, gated on docType==swDocASSEMBLY.
 
 \- Part/Assembly → STEP export to EXPORTS\\STEP\\
 
@@ -514,7 +524,7 @@ DPI-aware Form. S(v)=v\*\_scale.
 
 \- Release copies the SW file to RELEASED via delete-then-copy (overwriting a read-only file on the network share fails and left stale copies); copy failures are surfaced, not swallowed
 
-\- Release CLOSES the released file afterwards (does NOT reopen it read-only) — a released file is pure output, so reopening it only wastes load time/memory and makes the user wait. It opens read-only on demand next time it's actually needed. Applies to single AND bulk release. If a part/assembly's drawing is open it holds a reference and blocks CloseDoc(model), so Release closes the drawing first; for an interactive single release it then reopens that drawing ONLY if it is still WIP (the user's working file) — a Released drawing is never reopened, and in bulk/chained releases (suppressPrompts) nothing is reopened. New Revision still closes+reopens (the file must stay open and writable to keep editing)
+\- Release CLOSES the released file afterwards (does NOT reopen it read-only) — a released file is pure output, so reopening it only wastes load time/memory and makes the user wait. It opens read-only on demand next time it's actually needed. Applies to single AND bulk release. If a part/assembly's drawing is open it holds a reference and blocks CloseDoc(model), so Release closes the drawing first; for an interactive single release it then reopens that drawing ONLY if it is still WIP (the user's working file) — a Released drawing is never reopened, and in bulk/chained releases (suppressPrompts) nothing is reopened. CHAINED RELEASE (drawing triggers model release): the model's own ReleaseFile attempts CloseDoc(model) but SOLIDWORKS refuses while the drawing holds a reference; after the drawing release closes the drawing, the drawing's close block explicitly CloseDoc(referencedModel) so both files close. referencedModel is hoisted to function scope (set inside the isDrawing gate, accessible in the close block). New Revision still closes+reopens (the file must stay open and writable to keep editing)
 
 \- No COM auto-registration (no admin rights) — manual IT registration
 
@@ -774,11 +784,11 @@ GetNextRevision() in VaultManager.cs handles this
 
 \- Per-config drawing support in OpenOrCreateDrawing: config-specific drawing ({configName}.slddrw) is searched for first; shared drawing ({modelBasename}.slddrw) is the fallback. When neither exists for a multi-config part, DrawingScopeDialog prompts ONCE — Common drawing (one for all configs, {modelBasename}.slddrw) vs This configuration only ({configName}.slddrw) vs Cancel — so the common-vs-per-config decision is an explicit user choice at creation time, not a guess. After that the file name on disk carries the decision and the prompt never repeats. Both patterns coexist — switching active config and clicking "Open Drawing" opens (or creates) the right drawing for that config. Single-config parts skip the prompt (always shared).
 
+\- BOM Export (CSV) on assembly release: every assembly release auto-generates a TOP-LEVEL BOM at EXPORTS\\BOM\\{partNoClean}-R{rev}\_BOM.csv (ExportManager.ExportBom). One row per unique top-level component (path + referenced config) with a Qty count; Purchased/Toolbox hardware included; columns Item,PartNo,Description,Revision,Material,PartType,Qty read config-specifically. Non-fatal (a BOM failure never blocks release). Old BOMs archived to ARCHIVE\\BOM\\ on re-release and rollback (via the shared MoveMatching helper). CSV chosen over .xlsx to avoid a NuGet/native dependency on the engineer PCs (matches audit.csv); reflects the assembly's active config at release time.
+
 
 
 \## Remaining Features (in priority order)
-
-1\. BOM Export to Excel on assembly release
 
 5\. Watermark on released PDFs
 

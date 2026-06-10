@@ -1,6 +1,8 @@
 ﻿using SolidWorks.Interop.sldworks;
 using SolidWorks.Interop.swconst;
+using System.Collections.Generic;
 using System.IO;
+using System.Text;
 
 namespace PDMLite
 {
@@ -56,6 +58,233 @@ namespace PDMLite
             string dxfFolder = Path.Combine(exportRoot, "DXF");
             Directory.CreateDirectory(dxfFolder);
             ExportFlatPattern(doc, Path.Combine(dxfFolder, stamp + "_FLAT.dxf"));
+        }
+
+        // ── Top-level BOM (assemblies only) ───────────────────────────────────
+        // Writes EXPORTS\BOM\{partNo}-R{rev}_BOM.csv automatically on assembly release.
+        // Uses the raw PartNo (dots/dashes preserved) — no filesystem-safe stripping
+        // needed for a CSV filename, and the original form matches what engineers see
+        // on drawings. Lists each top-level component ONCE with its quantity and the
+        // config-specific identifiers read from the configuration the assembly references.
+        // Top-level only — sub-assembly internals are not expanded. Purchased/Toolbox
+        // hardware IS listed (a BOM needs it). Never throws: a BOM failure must not
+        // block a release. The BOM reflects the assembly's ACTIVE configuration at
+        // release time (matches the structure being released).
+        public static void ExportBom(ModelDoc2 asmDoc, string exportRoot,
+            string partNo, string rev)
+        {
+            try
+            {
+                if (asmDoc == null) return;
+                if (asmDoc.GetType() != (int)swDocumentTypes_e.swDocASSEMBLY) return;
+
+                AssemblyDoc asm = asmDoc as AssemblyDoc;
+                if (asm == null) return;
+
+                string bomFolder = Path.Combine(exportRoot, "BOM");
+                Directory.CreateDirectory(bomFolder);
+
+                // Enumerate top-level components. GetRootComponent3(true) resolves
+                // the root; GetChildren() returns the direct (top-level) children
+                // only — sub-assembly internals are not expanded. Falls back to
+                // GetComponents(true) if the root walk yields nothing.
+                var comps = new List<Component2>();
+                try
+                {
+                    Configuration activeCfg =
+                        asmDoc.GetActiveConfiguration() as Configuration;
+                    Component2 root = activeCfg?.GetRootComponent3(true);
+                    object[] kids = root?.GetChildren() as object[];
+                    if (kids != null)
+                        foreach (object o in kids)
+                        {
+                            Component2 c = o as Component2;
+                            if (c != null) comps.Add(c);
+                        }
+                }
+                catch { }
+
+                if (comps.Count == 0)
+                {
+                    try
+                    {
+                        object[] gc = asm.GetComponents(true) as object[];
+                        if (gc != null)
+                            foreach (object o in gc)
+                            {
+                                Component2 c = o as Component2;
+                                if (c != null) comps.Add(c);
+                            }
+                    }
+                    catch { }
+                }
+
+                // Group identical components (same path + referenced config) so
+                // each BOM line carries a quantity instead of repeating instances.
+                var rows = new List<BomRow>();
+                var index = new Dictionary<string, BomRow>(
+                    System.StringComparer.OrdinalIgnoreCase);
+
+                foreach (Component2 comp in comps)
+                {
+                    if (comp == null) continue;
+
+                    // Use GetSuppression2(), NOT IsSuppressed(): IsSuppressed()
+                    // wrongly reports LIGHTWEIGHT components as suppressed. Only a
+                    // state of swComponentSuppressed means genuinely suppressed;
+                    // lightweight / resolved / fully-resolved are all PRESENT.
+                    int supState = -1;
+                    try { supState = comp.GetSuppression2(); } catch { }
+                    if (supState == (int)
+                        swComponentSuppressionState_e.swComponentSuppressed)
+                        continue;
+
+                    string path = "";
+                    try { path = comp.GetPathName(); } catch { }
+                    if (string.IsNullOrEmpty(path)) continue;
+
+                    string refCfg = "";
+                    try { refCfg = comp.ReferencedConfiguration ?? ""; } catch { }
+
+                    string key = path.ToLowerInvariant() + "|" +
+                        refCfg.ToLowerInvariant();
+
+                    BomRow existing;
+                    if (index.TryGetValue(key, out existing))
+                    {
+                        existing.Qty++;
+                        continue;
+                    }
+
+                    // A lightweight component may not return a model from
+                    // GetModelDoc2(); GetReadableModel falls back to an open
+                    // handle or a read-only open so its properties can be read.
+                    bool openedHere;
+                    ModelDoc2 cm = GetReadableModel(comp, path, out openedHere);
+
+                    var row = new BomRow
+                    {
+                        PartNo      = ReadProp(cm, "PartNo", refCfg),
+                        Description = ReadProp(cm, "Description", refCfg),
+                        Revision    = ReadProp(cm, "Revision", refCfg),
+                        Material    = ReadProp(cm, "Material1", refCfg),
+                        PartType    = ReadProp(cm, "PartType", refCfg),
+                        Qty         = 1
+                    };
+                    // Fall back to the filename when PartNo is unreadable.
+                    if (string.IsNullOrEmpty(row.PartNo))
+                        row.PartNo = Path.GetFileNameWithoutExtension(path);
+
+                    index[key] = row;
+                    rows.Add(row);
+
+                    // Close only a doc we opened ourselves (never one the user or
+                    // the assembly already had open).
+                    if (openedHere)
+                        try { PDMLiteAddin.SwApp.CloseDoc(path); } catch { }
+                }
+
+                var sb = new StringBuilder();
+                sb.AppendLine("Item,PartNo,Description,Revision,Material,PartType,Qty");
+                int item = 1;
+                foreach (BomRow r in rows)
+                {
+                    sb.AppendLine(string.Join(",",
+                        (item++).ToString(),
+                        Csv(r.PartNo), Csv(r.Description), Csv(r.Revision),
+                        Csv(r.Material), Csv(r.PartType), r.Qty.ToString()));
+                }
+
+                File.WriteAllText(
+                    Path.Combine(bomFolder, partNo + "-R" + rev + "_BOM.csv"),
+                    sb.ToString());
+            }
+            catch { } // a BOM failure must never block a release
+        }
+
+        // Returns a ModelDoc2 whose custom properties can be read, even for a
+        // lightweight component. Priority: the component's own model → an
+        // already-open document → a fresh read-only open (openedHere=true, so
+        // the caller closes it). Never throws.
+        private static ModelDoc2 GetReadableModel(Component2 comp, string path,
+            out bool openedHere)
+        {
+            openedHere = false;
+            ModelDoc2 cm = null;
+            try { cm = comp.GetModelDoc2() as ModelDoc2; } catch { }
+            if (cm != null) return cm;
+
+            try
+            {
+                ISldWorks swApp = PDMLiteAddin.SwApp;
+                if (swApp == null || string.IsNullOrEmpty(path) ||
+                    !File.Exists(path))
+                    return null;
+
+                // Already open somewhere (incl. as a resolved component)? Reuse it
+                // and DON'T mark openedHere, so we never close the user's doc.
+                cm = swApp.GetOpenDocumentByName(path) as ModelDoc2;
+                if (cm != null) return cm;
+
+                int dt = path.EndsWith(".sldasm",
+                        System.StringComparison.OrdinalIgnoreCase)
+                    ? (int)swDocumentTypes_e.swDocASSEMBLY
+                    : (int)swDocumentTypes_e.swDocPART;
+                int e = 0, w = 0;
+                cm = swApp.OpenDoc6(path, dt,
+                    (int)swOpenDocOptions_e.swOpenDocOptions_ReadOnly |
+                    (int)swOpenDocOptions_e.swOpenDocOptions_Silent,
+                    "", ref e, ref w) as ModelDoc2;
+                openedHere = cm != null;
+                return cm;
+            }
+            catch { return null; }
+        }
+
+        private sealed class BomRow
+        {
+            public string PartNo;
+            public string Description;
+            public string Revision;
+            public string Material;
+            public string PartType;
+            public int Qty;
+        }
+
+        // Read a property wherever it lives, in priority order:
+        //   1. the referenced configuration (config-specific "Configuration
+        //      Specific" tab — where our PropertyForm writes it),
+        //   2. document level (configName "" — the "Custom" tab, used when a
+        //      property was entered there instead of per-config),
+        //   3. the model's active configuration (last-resort fallback).
+        // This is why a filled Material1 could come back empty: it was stored in
+        // a different scope than the component's referenced config. Swallows
+        // failures so an unreadable component never breaks the BOM.
+        private static string ReadProp(ModelDoc2 model, string prop, string cfg)
+        {
+            if (model == null) return "";
+            try
+            {
+                string v = !string.IsNullOrEmpty(cfg)
+                    ? PropertyValidator.GetProperty(model, prop, cfg) : "";
+                if (string.IsNullOrWhiteSpace(v))
+                    v = PropertyValidator.GetProperty(model, prop, ""); // document level
+                if (string.IsNullOrWhiteSpace(v))
+                    v = PropertyValidator.GetProperty(model, prop);     // active config
+                return v ?? "";
+            }
+            catch { return ""; }
+        }
+
+        // Minimal RFC-4180 CSV escaping (mirrors AuditLogger.Csv): quote fields
+        // containing a comma, quote, or newline; double any embedded quotes.
+        private static string Csv(string field)
+        {
+            if (string.IsNullOrEmpty(field)) return "";
+            if (field.IndexOf(',') >= 0 || field.IndexOf('"') >= 0 ||
+                field.IndexOf('\n') >= 0 || field.IndexOf('\r') >= 0)
+                return "\"" + field.Replace("\"", "\"\"") + "\"";
+            return field;
         }
 
         // Universal export — SOLIDWORKS picks format from file extension

@@ -317,6 +317,9 @@ namespace PDMLite
             // dialog and swaps the success message for a combined one.
             bool chainedRelease = false;
             string chainedModelName = null;
+            // Hoisted to function scope so the close block can reference it.
+            // Set inside the isDrawing gate below.
+            string referencedModel = null;
 
             if (!IsMaster(user)) { NotMaster(); return; }
 
@@ -334,7 +337,7 @@ namespace PDMLite
             // ── Drawing: check referenced part is Released first ──────────
             if (isDrawing)
             {
-                string referencedModel = GetDrawingReferencedModel(doc);
+                referencedModel = GetDrawingReferencedModel(doc);
                 if (!string.IsNullOrEmpty(referencedModel))
                 {
                     string modelStatus = DatabaseManager.GetFileStatus(referencedModel);
@@ -756,7 +759,8 @@ namespace PDMLite
                 if (relCfgsEx.Count <= 1)
                 {
                     // Single-config: existing path
-                    ArchiveOldExports(partNo.Replace(".", ""), isDrawing: false);
+                    ArchiveOldExports(partNo.Replace(".", ""), isDrawing: false,
+                        bomIdentifier: partNo);
                     ExportManager.ExportAll(doc, ExportRoot, stamp);
                 }
                 else
@@ -765,12 +769,16 @@ namespace PDMLite
                     string origCfgEx = (doc.GetActiveConfiguration()
                         as SolidWorks.Interop.sldworks.Configuration)?.Name;
 
-                    // Archive old STEP files for all configs before exporting new ones
+                    // Archive old STEP files for all configs before exporting new ones.
+                    // Pass raw PartNo as bomIdentifier — the BOM file uses the raw
+                    // PartNo; only one BOM exists (active config), so only one of
+                    // these MoveMatching calls will actually find a match.
                     foreach (string c in relCfgsEx)
                     {
                         string cp = PropertyValidator.GetProperty(doc, "PartNo", c);
                         if (!string.IsNullOrEmpty(cp))
-                            ArchiveOldExports(cp.Replace(".", ""), isDrawing: false);
+                            ArchiveOldExports(cp.Replace(".", ""), isDrawing: false,
+                                bomIdentifier: cp);
                     }
 
                     // Export one STEP per config (switch → export → next).
@@ -819,6 +827,12 @@ namespace PDMLite
                             MessageBoxButtons.OK, MessageBoxIcon.Warning);
                 }
             }
+
+            // ── BOM CSV (assemblies only, top-level) ──────────────────────
+            // Auto-generated on every assembly release alongside the STEP.
+            // Non-fatal — a BOM failure never blocks the release.
+            if (docType == (int)swDocumentTypes_e.swDocASSEMBLY)
+                ExportManager.ExportBom(doc, ExportRoot, partNo, rev);
 
             // ── Copy to RELEASED folder ───────────────────────────────────
             Directory.CreateDirectory(RelFolder);
@@ -954,6 +968,18 @@ namespace PDMLite
                 }
 
                 PDMLiteAddin.SwApp.CloseDoc(filePath);
+
+                // Chained release: close the referenced model now that the drawing
+                // is closed. The model's own ReleaseFile (called with
+                // suppressPrompts:true) attempted CloseDoc(model) earlier, but the
+                // drawing was still open at that point and SOLIDWORKS refused to
+                // close the model while a document was referencing it. Now that
+                // the drawing is closed the reference is gone, so the close succeeds.
+                if (chainedRelease && !string.IsNullOrEmpty(referencedModel))
+                {
+                    if (PDMLiteAddin.SwApp?.GetOpenDocumentByName(referencedModel) != null)
+                        try { PDMLiteAddin.SwApp.CloseDoc(referencedModel); } catch { }
+                }
 
                 if (reopenWipDrawing && drwPath != null)
                 {
@@ -1526,46 +1552,71 @@ namespace PDMLite
             catch { }
         }
 
+        // Move every file in srcDir matching pattern into destDir, overwriting
+        // a stale same-named archive copy. No-op if srcDir is missing.
+        // Each file is moved independently: a single failure (e.g. one file open
+        // in a viewer, or a read-only stale archive copy) is logged-and-skipped so
+        // it can NEVER block the other files — moving the old BOM must not stop the
+        // old STEP/PDF from archiving, and vice-versa.
+        private static void MoveMatching(string srcDir, string destDir,
+            string pattern)
+        {
+            if (!Directory.Exists(srcDir)) return;
+            string[] files;
+            try { files = Directory.GetFiles(srcDir, pattern); }
+            catch { return; }
+            if (files.Length == 0) return;
+
+            Directory.CreateDirectory(destDir);
+            foreach (string file in files)
+            {
+                try
+                {
+                    string dest = Path.Combine(destDir, Path.GetFileName(file));
+                    if (File.Exists(dest))
+                    {
+                        SetReadOnly(dest, false);   // a prior archive copy may be read-only
+                        File.Delete(dest);
+                    }
+                    SetReadOnly(file, false);       // export shouldn't be, but be safe
+                    File.Move(file, dest);
+                }
+                catch { /* one file failing must not block the rest */ }
+            }
+        }
+
         // ── Move old exports to archive before releasing new revision ─
+        // bomIdentifier: raw PartNo for BOM glob (dots preserved). Defaults to
+        // fileIdentifier when null (e.g. drawings, which have no BOM).
         private static void ArchiveOldExports(string fileIdentifier,
-                                               bool isDrawing)
+                                               bool isDrawing,
+                                               string bomIdentifier = null)
         {
             try
             {
-                string pdfExport = Path.Combine(ExportRoot, "PDF");
-                string stepExport = Path.Combine(ExportRoot, "STEP");
-                string pdfArchive = Path.Combine(ObsFolder, "PDF");
-                string stepArchive = Path.Combine(ObsFolder, "STEP");
+                // Each MoveMatching is independent (its own per-file try/catch),
+                // so a failure in one type can't skip the others.
 
-                Directory.CreateDirectory(pdfArchive);
-                Directory.CreateDirectory(stepArchive);
+                // STEP (parts/assemblies). fileIdentifier is the dot-stripped PartNo.
+                if (!isDrawing)
+                    MoveMatching(Path.Combine(ExportRoot, "STEP"),
+                        Path.Combine(ObsFolder, "STEP"),
+                        fileIdentifier + "*.step");
 
-                // Move old PDFs matching this identifier
-                if (Directory.Exists(pdfExport))
+                // PDF (drawings, and any part/assembly PDF). fileIdentifier is the
+                // DrawingNo for drawings, dot-stripped PartNo otherwise.
+                MoveMatching(Path.Combine(ExportRoot, "PDF"),
+                    Path.Combine(ObsFolder, "PDF"),
+                    fileIdentifier + "*.pdf");
+
+                // BOM CSV (assemblies only). Uses the RAW PartNo (dots preserved)
+                // because the BOM file is named {partNo}-R{rev}_BOM.csv.
+                if (!isDrawing)
                 {
-                    foreach (string file in Directory.GetFiles(
-                        pdfExport, fileIdentifier + "*.pdf"))
-                    {
-                        string dest = Path.Combine(pdfArchive,
-                            Path.GetFileName(file));
-                        if (File.Exists(dest))
-                            File.Delete(dest);
-                        File.Move(file, dest);
-                    }
-                }
-
-                // Move old STEP files matching this identifier
-                if (!isDrawing && Directory.Exists(stepExport))
-                {
-                    foreach (string file in Directory.GetFiles(
-                        stepExport, fileIdentifier + "*.step"))
-                    {
-                        string dest = Path.Combine(stepArchive,
-                            Path.GetFileName(file));
-                        if (File.Exists(dest))
-                            File.Delete(dest);
-                        File.Move(file, dest);
-                    }
+                    string bid = bomIdentifier ?? fileIdentifier;
+                    MoveMatching(Path.Combine(ExportRoot, "BOM"),
+                        Path.Combine(ObsFolder, "BOM"),
+                        bid + "*_BOM.csv");
                 }
             }
             catch { }
@@ -1708,7 +1759,7 @@ namespace PDMLite
                 string partNo = PropertyValidator.GetProperty(doc, "PartNo");
                 string partNoClean = partNo.Replace(".", "");
                 string drawingNo = PropertyValidator.GetProperty(doc, "DrawingNo");
-                CleanupExportsOnRollback(partNoClean, drawingNo);
+                CleanupExportsOnRollback(partNoClean, drawingNo, partNo);
 
                 // ── Step 8: Update database ───────────────────────────────
                 DatabaseManager.LockFile(filePath, user);
@@ -2714,45 +2765,31 @@ namespace PDMLite
             return string.Join(",", configs);
         }
         // ── Move ALL exports for this part to archive on rollback ─────
+        // rawPartNo: original PartNo (dots preserved) for BOM glob. When null
+        // falls back to partNoClean (no-dots version used for STEP/PDF globs).
         private static void CleanupExportsOnRollback(string partNoClean,
-                                                      string drawingNo)
+                                                      string drawingNo,
+                                                      string rawPartNo = null)
         {
             try
             {
-                string pdfExport = Path.Combine(ExportRoot, "PDF");
-                string stepExport = Path.Combine(ExportRoot, "STEP");
-                string pdfArchive = Path.Combine(ObsFolder, "PDF");
-                string stepArchive = Path.Combine(ObsFolder, "STEP");
+                // Each MoveMatching is independent (its own per-file try/catch),
+                // so a failure in one type can't skip the others.
 
-                Directory.CreateDirectory(pdfArchive);
-                Directory.CreateDirectory(stepArchive);
+                // BOM CSV (assemblies) — raw PartNo so the glob matches the
+                // {partNo}-R{rev}_BOM.csv filename correctly.
+                string bomId = rawPartNo ?? partNoClean;
+                MoveMatching(Path.Combine(ExportRoot, "BOM"),
+                    Path.Combine(ObsFolder, "BOM"), bomId + "*_BOM.csv");
 
-                // Move all STEP files matching part number
-                if (Directory.Exists(stepExport))
-                {
-                    foreach (string file in Directory.GetFiles(
-                        stepExport, partNoClean + "*.step"))
-                    {
-                        string dest = Path.Combine(stepArchive,
-                            Path.GetFileName(file));
-                        if (File.Exists(dest)) File.Delete(dest);
-                        File.Move(file, dest);
-                    }
-                }
+                // STEP files matching part number.
+                MoveMatching(Path.Combine(ExportRoot, "STEP"),
+                    Path.Combine(ObsFolder, "STEP"), partNoClean + "*.step");
 
-                // Move all PDFs matching drawing number
-                if (!string.IsNullOrEmpty(drawingNo) &&
-                    Directory.Exists(pdfExport))
-                {
-                    foreach (string file in Directory.GetFiles(
-                        pdfExport, drawingNo + "*.pdf"))
-                    {
-                        string dest = Path.Combine(pdfArchive,
-                            Path.GetFileName(file));
-                        if (File.Exists(dest)) File.Delete(dest);
-                        File.Move(file, dest);
-                    }
-                }
+                // PDFs matching drawing number.
+                if (!string.IsNullOrEmpty(drawingNo))
+                    MoveMatching(Path.Combine(ExportRoot, "PDF"),
+                        Path.Combine(ObsFolder, "PDF"), drawingNo + "*.pdf");
             }
             catch { }
         }

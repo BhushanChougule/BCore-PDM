@@ -26,7 +26,7 @@ namespace PDMLite
             "Description",
             "DrawnBy",
             "DrawnDate",
-            "Material",
+            "Material1",
             "FinishType",
             "Revision",
             "PartType"
