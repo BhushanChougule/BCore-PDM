@@ -84,22 +84,53 @@ namespace PDMLite
                 string bomFolder = Path.Combine(exportRoot, "BOM");
                 Directory.CreateDirectory(bomFolder);
 
-                // Enumerate top-level components via the active config's root
-                // component. GetRootComponent3(true) RESOLVES lightweight
-                // components (otherwise their models aren't loaded and properties
-                // read back empty) and GetChildren() returns the direct (top-level)
-                // children only — sub-assembly internals are not expanded.
-                // AssemblyDoc.GetComponents(true) proved unreliable here (it
-                // returned only the first component when others were lightweight),
-                // so it is only a fallback.
-                object[] comps = null;
-                Configuration activeCfg =
-                    asmDoc.GetActiveConfiguration() as Configuration;
-                Component2 root = activeCfg?.GetRootComponent3(true);
-                if (root != null)
-                    comps = root.GetChildren() as object[];
-                if (comps == null)
-                    comps = asm.GetComponents(true) as object[];
+                // Diagnostic trace written next to the BOM so we can see exactly
+                // what the SOLIDWORKS API returns (component count, names, states).
+                var diag = new StringBuilder();
+                diag.AppendLine("BOM diagnostic for " + partNo + " REV " + rev);
+                diag.AppendLine("Assembly: " + (asmDoc.GetPathName() ?? ""));
+
+                // Enumerate top-level components. GetRootComponent3(true) RESOLVES
+                // lightweight components (otherwise their models aren't loaded and
+                // properties read back empty); GetChildren() returns the direct
+                // (top-level) children only — sub-assembly internals not expanded.
+                var comps = new List<Component2>();
+                try
+                {
+                    Configuration activeCfg =
+                        asmDoc.GetActiveConfiguration() as Configuration;
+                    diag.AppendLine("ActiveConfig: " + (activeCfg?.Name ?? "<null>"));
+                    Component2 root = activeCfg?.GetRootComponent3(true);
+                    object[] kids = root?.GetChildren() as object[];
+                    diag.AppendLine("GetChildren count: " +
+                        (kids != null ? kids.Length.ToString() : "<null>"));
+                    if (kids != null)
+                        foreach (object o in kids)
+                        {
+                            Component2 c = o as Component2;
+                            if (c != null) comps.Add(c);
+                        }
+                }
+                catch (System.Exception ex)
+                { diag.AppendLine("GetChildren ERROR: " + ex.Message); }
+
+                // Cross-check / fallback via GetComponents(true).
+                try
+                {
+                    object[] gc = asm.GetComponents(true) as object[];
+                    diag.AppendLine("GetComponents(true) count: " +
+                        (gc != null ? gc.Length.ToString() : "<null>"));
+                    if (comps.Count == 0 && gc != null)
+                        foreach (object o in gc)
+                        {
+                            Component2 c = o as Component2;
+                            if (c != null) comps.Add(c);
+                        }
+                }
+                catch (System.Exception ex)
+                { diag.AppendLine("GetComponents ERROR: " + ex.Message); }
+
+                diag.AppendLine("--- components ---");
 
                 // Group identical components (same path + referenced config) so
                 // each BOM line carries a quantity instead of repeating instances.
@@ -107,46 +138,54 @@ namespace PDMLite
                 var index = new Dictionary<string, BomRow>(
                     System.StringComparer.OrdinalIgnoreCase);
 
-                if (comps != null)
+                foreach (Component2 comp in comps)
                 {
-                    foreach (object o in comps)
+                    if (comp == null) continue;
+                    bool supp = false;
+                    try { supp = comp.IsSuppressed(); } catch { }
+                    string path = "";
+                    try { path = comp.GetPathName(); } catch { }
+                    string refCfg = "";
+                    try { refCfg = comp.ReferencedConfiguration ?? ""; } catch { }
+
+                    diag.AppendLine("name=" + SafeName(comp) +
+                        " | suppressed=" + supp +
+                        " | refCfg=" + refCfg +
+                        " | path=" + path);
+
+                    if (supp) continue;
+                    if (string.IsNullOrEmpty(path)) continue;
+
+                    string key = path.ToLowerInvariant() + "|" +
+                        refCfg.ToLowerInvariant();
+
+                    BomRow existing;
+                    if (index.TryGetValue(key, out existing))
                     {
-                        Component2 comp = o as Component2;
-                        if (comp == null) continue;
-                        if (comp.IsSuppressed()) continue;
-
-                        string path = comp.GetPathName();
-                        if (string.IsNullOrEmpty(path)) continue;
-
-                        string refCfg = comp.ReferencedConfiguration ?? "";
-                        string key = path.ToLowerInvariant() + "|" +
-                            refCfg.ToLowerInvariant();
-
-                        BomRow existing;
-                        if (index.TryGetValue(key, out existing))
-                        {
-                            existing.Qty++;
-                            continue;
-                        }
-
-                        ModelDoc2 cm = comp.GetModelDoc2() as ModelDoc2;
-                        var row = new BomRow
-                        {
-                            PartNo      = ReadProp(cm, "PartNo", refCfg),
-                            Description = ReadProp(cm, "Description", refCfg),
-                            Revision    = ReadProp(cm, "Revision", refCfg),
-                            Material    = ReadProp(cm, "Material1", refCfg),
-                            PartType    = ReadProp(cm, "PartType", refCfg),
-                            Qty         = 1
-                        };
-                        // Fall back to the filename when PartNo is unreadable
-                        // (lightweight/suppressed) so a line is never blank.
-                        if (string.IsNullOrEmpty(row.PartNo))
-                            row.PartNo = Path.GetFileNameWithoutExtension(path);
-
-                        index[key] = row;
-                        rows.Add(row);
+                        existing.Qty++;
+                        continue;
                     }
+
+                    ModelDoc2 cm = comp.GetModelDoc2() as ModelDoc2;
+                    diag.AppendLine("   model loaded=" + (cm != null) +
+                        " | Material1=" + ReadProp(cm, "Material1", refCfg));
+
+                    var row = new BomRow
+                    {
+                        PartNo      = ReadProp(cm, "PartNo", refCfg),
+                        Description = ReadProp(cm, "Description", refCfg),
+                        Revision    = ReadProp(cm, "Revision", refCfg),
+                        Material    = ReadProp(cm, "Material1", refCfg),
+                        PartType    = ReadProp(cm, "PartType", refCfg),
+                        Qty         = 1
+                    };
+                    // Fall back to the filename when PartNo is unreadable
+                    // (lightweight/suppressed) so a line is never blank.
+                    if (string.IsNullOrEmpty(row.PartNo))
+                        row.PartNo = Path.GetFileNameWithoutExtension(path);
+
+                    index[key] = row;
+                    rows.Add(row);
                 }
 
                 var sb = new StringBuilder();
@@ -163,8 +202,25 @@ namespace PDMLite
                 File.WriteAllText(
                     Path.Combine(bomFolder, partNo + "-R" + rev + "_BOM.csv"),
                     sb.ToString());
+
+                // Write the diagnostic sidecar (temporary, to pin down the BOM
+                // enumeration issue). Never fatal.
+                try
+                {
+                    File.WriteAllText(
+                        Path.Combine(bomFolder,
+                            partNo + "-R" + rev + "_BOM_debug.txt"),
+                        diag.ToString());
+                }
+                catch { }
             }
             catch { } // a BOM failure must never block a release
+        }
+
+        // Component name for the diagnostic trace; never throws.
+        private static string SafeName(Component2 comp)
+        {
+            try { return comp.Name2 ?? ""; } catch { return ""; }
         }
 
         private sealed class BomRow
