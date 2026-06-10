@@ -5,6 +5,7 @@ using System.Collections.Generic;
 using System.Drawing;
 using System.IO;
 using System.Linq;
+using System.Runtime.InteropServices;
 using System.Text;
 using System.Windows.Forms;
 
@@ -45,6 +46,48 @@ namespace PDMLite
         private const string ObsFolder = @"N:\PDM-SolidWorks\ARCHIVE";
         private const string ExportRoot = @"N:\PDM-SolidWorks\EXPORTS";
         private const string ScrapFolder = @"N:\PDM-SolidWorks\SCRAP";
+
+        // ── Auto-closing message box ──────────────────────────────────────
+        // Shows a normal MessageBox (identical look) that the user can dismiss
+        // by clicking OK, but which auto-closes itself after timeoutMs if left
+        // untouched. Used for the release-success popup so an unattended release
+        // doesn't leave a dialog sitting open. A WinForms timer is used because
+        // its WM_TIMER is pumped by the modal MessageBox message loop, so the
+        // tick still fires while the box is showing. On tick we find our own
+        // dialog by its caption and post WM_CLOSE — for an OK-only box that
+        // resolves exactly like clicking OK.
+        [DllImport("user32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        private static extern IntPtr FindWindow(string lpClassName,
+            string lpWindowName);
+
+        [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+        private static extern bool PostMessage(IntPtr hWnd, uint msg,
+            IntPtr wParam, IntPtr lParam);
+
+        private const uint WM_CLOSE = 0x0010;
+
+        private static void ShowAutoCloseInfo(string text, string caption,
+            int timeoutMs = 4000)
+        {
+            using (var timer = new Timer())
+            {
+                timer.Interval = timeoutMs;
+                timer.Tick += (s, e) =>
+                {
+                    timer.Stop();
+                    try
+                    {
+                        IntPtr h = FindWindow(null, caption);
+                        if (h != IntPtr.Zero)
+                            PostMessage(h, WM_CLOSE, IntPtr.Zero, IntPtr.Zero);
+                    }
+                    catch { }
+                };
+                timer.Start();
+                MessageBox.Show(text, caption, MessageBoxButtons.OK,
+                    MessageBoxIcon.Information);
+            }
+        }
 
         // ── LOCK ─────────────────────────────────────────────────────────
         public static void LockFile(string filePath)
@@ -752,6 +795,14 @@ namespace PDMLite
             {
                 ArchiveOldExports(partNo, isDrawing: true);
                 ExportManager.ExportAll(doc, ExportRoot, stamp);
+
+                // SOLIDWORKS' own PDF auto-open was suppressed (it would have
+                // shown the un-watermarked file). The watermark is now stamped on
+                // disk, so open the finished PDF ourselves for an interactive
+                // release. Skipped for chained/bulk releases (suppressPrompts).
+                if (!suppressPrompts)
+                    ExportManager.OpenPdfExternally(
+                        Path.Combine(ExportRoot, "PDF", stamp + ".pdf"));
             }
             else
             {
@@ -895,15 +946,13 @@ namespace PDMLite
             if (chainedRelease)
             {
                 // One combined dialog for the model + drawing released together.
-                MessageBox.Show(
+                ShowAutoCloseInfo(
                     "Both files Released Successfully!\n\n" +
                     "  • " + chainedModelName + "\n" +
                     "  • " + Path.GetFileName(filePath) + "  (Drawing)\n\n" +
                     "Revision : REV " + rev + "\n" +
                     "Exports saved to:\n" + ExportRoot,
-                    "BCore PDM — Released",
-                    MessageBoxButtons.OK,
-                    MessageBoxIcon.Information);
+                    "BCore PDM — Released");
             }
             else if (!suppressPrompts)
             {
@@ -931,12 +980,10 @@ namespace PDMLite
                 {
                     successDetail = fileTypeLabel + " : " + partNo + "  REV " + rev;
                 }
-                MessageBox.Show(
+                ShowAutoCloseInfo(
                     "File Released Successfully!\n\n" + successDetail + "\n" +
                     "Exports saved to:\n" + ExportRoot,
-                    "BCore PDM — Released",
-                    MessageBoxButtons.OK,
-                    MessageBoxIcon.Information);
+                    "BCore PDM — Released");
             }
 
             // A Released file is pure output — there is no point reopening it

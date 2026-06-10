@@ -1,4 +1,7 @@
-﻿using SolidWorks.Interop.sldworks;
+﻿using PdfSharp.Drawing;
+using PdfSharp.Pdf;
+using PdfSharp.Pdf.IO;
+using SolidWorks.Interop.sldworks;
 using SolidWorks.Interop.swconst;
 using System.Collections.Generic;
 using System.IO;
@@ -23,8 +26,10 @@ namespace PDMLite
 
             if (docType == (int)swDocumentTypes_e.swDocDRAWING)
             {
-                // Drawing → PDF only (all sheets in one file)
-                ExportDrawingPdf(doc, Path.Combine(pdfFolder, stamp + ".pdf"));
+                // Drawing → PDF (all sheets), then stamp RELEASED watermark
+                string pdfPath = Path.Combine(pdfFolder, stamp + ".pdf");
+                ExportDrawingPdf(doc, pdfPath);
+                StampWatermark(pdfPath);
             }
             else if (docType == (int)swDocumentTypes_e.swDocPART)
             {
@@ -287,6 +292,103 @@ namespace PDMLite
             return field;
         }
 
+        // Thin wrapper that references NO PdfSharp types directly. If PdfSharp.dll
+        // fails to load at runtime, the FileNotFoundException/TypeLoadException is
+        // thrown when the JIT enters StampWatermarkCore and is caught HERE —
+        // leaving the PDF un-stamped and the release unaffected, instead of
+        // propagating up and breaking the release. (A single method referencing
+        // PdfSharp types could NOT catch its own assembly-load failure.)
+        private static void StampWatermark(string pdfPath)
+        {
+            if (!File.Exists(pdfPath)) return;
+            try { StampWatermarkCore(pdfPath); }
+            catch { } // missing PdfSharp.dll, or any PdfSharp error → skip stamp
+        }
+
+        // Stamp a diagonal, very transparent "RELEASED" watermark on every page
+        // of the given PDF, aligned with the sheet's corner-to-corner diagonal.
+        //
+        // The PDF is read into memory and stamped there so PdfSharp never holds a
+        // file handle on the path we then overwrite. SOLIDWORKS keeps the
+        // freshly-exported PDF open for a short moment (especially on the network
+        // share), which blocks an exclusive write-back even though a shared read
+        // succeeds — so the write retries a few times to let that lock clear.
+        private static void StampWatermarkCore(string pdfPath)
+        {
+            // Read the source bytes and release the handle immediately.
+            byte[] srcBytes = File.ReadAllBytes(pdfPath);
+
+            byte[] outBytes;
+            using (var inMs = new MemoryStream(srcBytes))
+            using (PdfDocument pdf = PdfReader.Open(inMs,
+                PdfDocumentOpenMode.Modify))
+            {
+                // Very transparent gray (alpha 11/255 ≈ 4.5%) — reads as a subtle
+                // watermark without hiding the drawing beneath. PdfSharp emits the
+                // alpha as a PDF ExtGState, so true transparency works.
+                XBrush brush = new XSolidBrush(XColor.FromArgb(11, 120, 120, 120));
+
+                foreach (PdfPage page in pdf.Pages)
+                {
+                    double w = page.Width.Point;
+                    double h = page.Height.Point;
+
+                    // Lay the text along the sheet's bottom-left → top-right
+                    // diagonal: |angle| = atan(height / width) (≈ 33° for a 17×11
+                    // sheet). NEGATIVE rotates it ASCENDING to the right in
+                    // PdfSharp's y-down space (positive would descend).
+                    double angleDeg =
+                        -System.Math.Atan2(h, w) * 180.0 / System.Math.PI;
+                    double diag = System.Math.Sqrt(w * w + h * h);
+
+                    using (XGraphics gfx = XGraphics.FromPdfPage(
+                        page, XGraphicsPdfPageOptions.Append))
+                    {
+                        // Size the text to span ~48% of the diagonal so it scales
+                        // proportionally with any sheet size (A → E).
+                        XFont trial = new XFont("Arial", 100, XFontStyle.Bold);
+                        XSize ts = gfx.MeasureString("RELEASED", trial);
+                        double size = ts.Width > 1
+                            ? 100.0 * (diag * 0.48) / ts.Width : 78.0;
+                        XFont font = new XFont("Arial", size, XFontStyle.Bold);
+
+                        // Translate to page centre, rotate to the diagonal, then
+                        // draw the text centred on the origin.
+                        XGraphicsState state = gfx.Save();
+                        gfx.TranslateTransform(w / 2.0, h / 2.0);
+                        gfx.RotateTransform(angleDeg);
+                        XSize sz = gfx.MeasureString("RELEASED", font);
+                        gfx.DrawString("RELEASED", font, brush,
+                            new XPoint(-sz.Width / 2, sz.Height / 4));
+                        gfx.Restore(state);
+                    }
+                }
+
+                using (var outMs = new MemoryStream())
+                {
+                    pdf.Save(outMs, false); // false = leave the stream open
+                    outBytes = outMs.ToArray();
+                }
+            }
+
+            // Write the stamped PDF back, retrying while SOLIDWORKS still holds
+            // the export open. The final attempt is outside the loop so a genuine
+            // persistent lock surfaces to the wrapper's catch (PDF left un-stamped).
+            for (int attempt = 0; attempt < 5; attempt++)
+            {
+                try
+                {
+                    File.WriteAllBytes(pdfPath, outBytes);
+                    return;
+                }
+                catch (IOException)
+                {
+                    System.Threading.Thread.Sleep(300);
+                }
+            }
+            File.WriteAllBytes(pdfPath, outBytes);
+        }
+
         // Universal export — SOLIDWORKS picks format from file extension
         private static void ExportFile(ModelDoc2 doc, string outPath)
         {
@@ -300,20 +402,63 @@ namespace PDMLite
                 ref errors,
                 ref warnings);
         }
-        // Export drawing — all sheets to one PDF
+        // Export drawing — all sheets to one PDF.
+        // Suppresses SOLIDWORKS' own "View PDF after publishing" auto-open: that
+        // setting launches the viewer on the UN-watermarked file DURING SaveAs,
+        // before we can stamp it (which is why the auto-opened copy showed no
+        // watermark). We stamp first, then open the finished PDF ourselves
+        // (VaultManager, interactive release only). Falls back to the default
+        // null export data if the PDF export data can't be obtained, so the
+        // export itself never fails over this.
         private static void ExportDrawingPdf(ModelDoc2 doc, string outPath)
         {
             int errors = 0;
             int warnings = 0;
+
+            object exportData = null;
+            try
+            {
+                ISldWorks app = PDMLiteAddin.SwApp;
+                ExportPdfData pdfData = app?.GetExportFileData(
+                    (int)swExportDataFileType_e.swExportPdfData) as ExportPdfData;
+                if (pdfData != null)
+                {
+                    pdfData.ViewPdfAfterSaving = false;
+                    // Preserve the all-sheets behaviour (null exported every sheet).
+                    DrawingDoc dwg = doc as DrawingDoc;
+                    string[] sheetNames = dwg?.GetSheetNames() as string[];
+                    if (sheetNames != null && sheetNames.Length > 0)
+                        pdfData.SetSheets(
+                            (int)swExportDataSheetsToExport_e.swExportData_ExportAllSheets,
+                            sheetNames);
+                    exportData = pdfData;
+                }
+            }
+            catch { exportData = null; }
+
             doc.Extension.SaveAs(
                 outPath,
                 (int)swSaveAsVersion_e.swSaveAsCurrentVersion,
                 (int)swSaveAsOptions_e.swSaveAsOptions_Silent,
-                null,
+                exportData,
                 ref errors,
                 ref warnings);
         }
-        
+
+        // Open a PDF in the user's default viewer. Used after release so the
+        // engineer still sees the just-released drawing — but the STAMPED copy,
+        // not the raw one SOLIDWORKS' auto-open would have shown mid-export.
+        // Non-fatal.
+        public static void OpenPdfExternally(string pdfPath)
+        {
+            try
+            {
+                if (File.Exists(pdfPath))
+                    System.Diagnostics.Process.Start(pdfPath);
+            }
+            catch { }
+        }
+
         // Sheet metal flat pattern DXF
         private static void ExportFlatPattern(ModelDoc2 doc, string outPath)
         {
