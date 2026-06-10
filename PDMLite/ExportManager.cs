@@ -141,19 +141,28 @@ namespace PDMLite
                 foreach (Component2 comp in comps)
                 {
                     if (comp == null) continue;
-                    bool supp = false;
-                    try { supp = comp.IsSuppressed(); } catch { }
+
+                    // Use GetSuppression2(), NOT IsSuppressed(): IsSuppressed()
+                    // wrongly reports LIGHTWEIGHT components as suppressed. Only a
+                    // state of swComponentSuppressed means genuinely suppressed;
+                    // lightweight / resolved / fully-resolved are all PRESENT.
+                    int supState = -1;
+                    try { supState = comp.GetSuppression2(); } catch { }
+                    bool suppressed = supState ==
+                        (int)swComponentSuppressionState_e.swComponentSuppressed;
+
                     string path = "";
                     try { path = comp.GetPathName(); } catch { }
                     string refCfg = "";
                     try { refCfg = comp.ReferencedConfiguration ?? ""; } catch { }
 
                     diag.AppendLine("name=" + SafeName(comp) +
-                        " | suppressed=" + supp +
+                        " | supState=" + supState +
+                        " | suppressed=" + suppressed +
                         " | refCfg=" + refCfg +
                         " | path=" + path);
 
-                    if (supp) continue;
+                    if (suppressed) continue;
                     if (string.IsNullOrEmpty(path)) continue;
 
                     string key = path.ToLowerInvariant() + "|" +
@@ -166,8 +175,13 @@ namespace PDMLite
                         continue;
                     }
 
-                    ModelDoc2 cm = comp.GetModelDoc2() as ModelDoc2;
-                    diag.AppendLine("   model loaded=" + (cm != null) +
+                    // A lightweight component may not return a model from
+                    // GetModelDoc2(); GetReadableModel falls back to an open
+                    // handle or a read-only open so its properties can be read.
+                    bool openedHere;
+                    ModelDoc2 cm = GetReadableModel(comp, path, out openedHere);
+                    diag.AppendLine("   model=" + (cm != null) +
+                        " openedHere=" + openedHere +
                         " | Material1=" + ReadProp(cm, "Material1", refCfg));
 
                     var row = new BomRow
@@ -179,13 +193,17 @@ namespace PDMLite
                         PartType    = ReadProp(cm, "PartType", refCfg),
                         Qty         = 1
                     };
-                    // Fall back to the filename when PartNo is unreadable
-                    // (lightweight/suppressed) so a line is never blank.
+                    // Fall back to the filename when PartNo is unreadable.
                     if (string.IsNullOrEmpty(row.PartNo))
                         row.PartNo = Path.GetFileNameWithoutExtension(path);
 
                     index[key] = row;
                     rows.Add(row);
+
+                    // Close only a doc we opened ourselves (never one the user or
+                    // the assembly already had open).
+                    if (openedHere)
+                        try { PDMLiteAddin.SwApp.CloseDoc(path); } catch { }
                 }
 
                 var sb = new StringBuilder();
@@ -221,6 +239,45 @@ namespace PDMLite
         private static string SafeName(Component2 comp)
         {
             try { return comp.Name2 ?? ""; } catch { return ""; }
+        }
+
+        // Returns a ModelDoc2 whose custom properties can be read, even for a
+        // lightweight component. Priority: the component's own model → an
+        // already-open document → a fresh read-only open (openedHere=true, so
+        // the caller closes it). Never throws.
+        private static ModelDoc2 GetReadableModel(Component2 comp, string path,
+            out bool openedHere)
+        {
+            openedHere = false;
+            ModelDoc2 cm = null;
+            try { cm = comp.GetModelDoc2() as ModelDoc2; } catch { }
+            if (cm != null) return cm;
+
+            try
+            {
+                ISldWorks swApp = PDMLiteAddin.SwApp;
+                if (swApp == null || string.IsNullOrEmpty(path) ||
+                    !File.Exists(path))
+                    return null;
+
+                // Already open somewhere (incl. as a resolved component)? Reuse it
+                // and DON'T mark openedHere, so we never close the user's doc.
+                cm = swApp.GetOpenDocumentByName(path) as ModelDoc2;
+                if (cm != null) return cm;
+
+                int dt = path.EndsWith(".sldasm",
+                        System.StringComparison.OrdinalIgnoreCase)
+                    ? (int)swDocumentTypes_e.swDocASSEMBLY
+                    : (int)swDocumentTypes_e.swDocPART;
+                int e = 0, w = 0;
+                cm = swApp.OpenDoc6(path, dt,
+                    (int)swOpenDocOptions_e.swOpenDocOptions_ReadOnly |
+                    (int)swOpenDocOptions_e.swOpenDocOptions_Silent,
+                    "", ref e, ref w) as ModelDoc2;
+                openedHere = cm != null;
+                return cm;
+            }
+            catch { return null; }
         }
 
         private sealed class BomRow
