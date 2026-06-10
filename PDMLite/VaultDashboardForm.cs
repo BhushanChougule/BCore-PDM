@@ -86,18 +86,18 @@ namespace PDMLite
             this.Font = new Font("Segoe UI", 3.4f * _scale);
 
             Font fTitle  = new Font("Segoe UI", 7f * _scale, FontStyle.Bold);
-            Font fCtrl   = new Font("Segoe UI", 3.6f * _scale);
+            Font fCtrl   = new Font("Segoe UI", 4f * _scale);
             Font fSummary = new Font("Segoe UI", 3.3f * _scale, FontStyle.Bold);
             Font fGrid   = new Font("Segoe UI", 3.3f * _scale);
             Font fHeader = new Font("Segoe UI", 3.3f * _scale, FontStyle.Bold);
-            Font fBtn    = new Font("Segoe UI", 3.6f * _scale, FontStyle.Bold);
+            Font fBtn    = new Font("Segoe UI", 4f * _scale, FontStyle.Bold);
             _cellBold    = new Font("Segoe UI", 3.3f * _scale, FontStyle.Bold);
 
             // ── Top panel: title, search, status filter, refresh, export ──
             Panel top = new Panel
             {
                 Dock = DockStyle.Top,
-                Height = S(96),
+                Height = S(120),
                 BackColor = cBg
             };
 
@@ -111,14 +111,14 @@ namespace PDMLite
             };
             top.Controls.Add(title);
 
-            int rowY = S(50);
+            int rowY = S(54);
 
             _search = new TextBox
             {
                 Font = fCtrl,
+                AutoSize = false,            // lets Height match the other controls
                 Location = new Point(S(14), rowY),
-                Width = S(330),
-                Height = S(26)
+                Width = S(330)
             };
             _search.TextChanged += (s, e) => DebouncedFilter();
             SetCueBanner(_search, "Search part no, description or filename…");
@@ -137,13 +137,20 @@ namespace PDMLite
             _statusFilter.SelectedIndexChanged += (s, e) => ApplyFilter();
             top.Controls.Add(_statusFilter);
 
+            // Uniform control height: match search + buttons to the combo's
+            // natural (font-derived) height so the whole row lines up cleanly.
+            int ctrlH = _statusFilter.PreferredHeight;
+            _search.Height = ctrlH;
+
             Button btnRefresh = MakeButton("Refresh", cBrand, fBtn,
                 new Point(S(514), rowY), S(100));
+            btnRefresh.Height = ctrlH;
             btnRefresh.Click += (s, e) => LoadData();
             top.Controls.Add(btnRefresh);
 
             Button btnExport = MakeButton("Export CSV", cBrandDark, fBtn,
                 new Point(S(620), rowY), S(110));
+            btnExport.Height = ctrlH;
             btnExport.Click += (s, e) => ExportCsv();
             top.Controls.Add(btnExport);
 
@@ -152,7 +159,7 @@ namespace PDMLite
                 Font = fSummary,
                 ForeColor = cTextGray,
                 AutoSize = true,
-                Location = new Point(S(14), rowY + S(34))
+                Location = new Point(S(14), rowY + ctrlH + S(12))
             };
             top.Controls.Add(_summary);
 
@@ -187,7 +194,8 @@ namespace PDMLite
                 RowHeadersVisible = false,
                 MultiSelect = false,
                 SelectionMode = DataGridViewSelectionMode.FullRowSelect,
-                AutoSizeColumnsMode = DataGridViewAutoSizeColumnsMode.Fill,
+                // Widths are set per-column to fit content (+10%) in AutoSizeColumns.
+                AutoSizeColumnsMode = DataGridViewAutoSizeColumnsMode.None,
                 ColumnHeadersHeightSizeMode =
                     DataGridViewColumnHeadersHeightSizeMode.DisableResizing,
                 EnableHeadersVisualStyles = false,
@@ -215,9 +223,10 @@ namespace PDMLite
             AddColumn("Status", 9);
             AddColumn("Rev", 5);
             AddColumn("Modified By", 11);
-            // Typed DateTime + format so the column sorts chronologically (a
-            // string "MM/dd/yyyy" would sort alphabetically — wrong order).
-            AddColumn("Modified", 14, typeof(DateTime), "MM/dd/yyyy HH:mm");
+            // Typed DateTime + format so the date columns sort CHRONOLOGICALLY
+            // (a string "MM/dd/yyyy" would sort alphabetically — wrong order).
+            AddColumn("Modified Date", 14, typeof(DateTime), "MM/dd/yyyy HH:mm");
+            AddColumn("Released Date", 14, typeof(DateTime), "MM/dd/yyyy HH:mm");
             AddColumn("Locked By", 11);
 
             // Add Fill control FIRST, then the docked edge panels, so the grid
@@ -322,10 +331,12 @@ namespace PDMLite
                 // still sorts as the earliest.
                 object modVal = f.ModifiedDate == DateTime.MinValue
                     ? (object)DBNull.Value : f.ModifiedDate;
+                object relVal = f.ReleasedDate == DateTime.MinValue
+                    ? (object)DBNull.Value : f.ReleasedDate;
 
                 int idx = _grid.Rows.Add(
                     f.FileName, f.PartNumber, f.Description, f.Status,
-                    f.Revision, f.ModifiedBy, modVal, f.LockedBy);
+                    f.Revision, f.ModifiedBy, modVal, relVal, f.LockedBy);
 
                 var row = _grid.Rows[idx];
                 row.Tag = f.FilePath;
@@ -342,7 +353,25 @@ namespace PDMLite
             }
             _grid.ResumeLayout();
 
+            AutoSizeColumns();
             UpdateSummary(view.Count);
+        }
+
+        // Size each column to its widest value + ~10% so columns always look
+        // uniform and tidy (like a content-fit Status column) instead of evenly
+        // stretched. GetPreferredWidth(AllCells) measures header + every cell;
+        // clamped to a sane min/max so a long description can't blow out.
+        private void AutoSizeColumns()
+        {
+            foreach (DataGridViewColumn col in _grid.Columns)
+            {
+                int pref = col.GetPreferredWidth(
+                    DataGridViewAutoSizeColumnMode.AllCells, true);
+                int w = (int)(pref * 1.10);
+                if (w < S(48))  w = S(48);
+                if (w > S(520)) w = S(520);
+                col.Width = w;
+            }
         }
 
         private void UpdateSummary(int showing)
