@@ -69,8 +69,10 @@ namespace PDMLite
             new Dictionary<int, HashSet<string>>();
 
         // Current sort (manual, because header clicks are split sort/filter).
-        private int _sortColumn = -1;
-        private ListSortDirection _sortDir = ListSortDirection.Ascending;
+        // Default = Modified Date, newest first, so the freshest work is on top.
+        private const int DefaultSortColumn = 6; // Modified Date
+        private int _sortColumn = DefaultSortColumn;
+        private ListSortDirection _sortDir = ListSortDirection.Descending;
 
         // Set when the Master double-clicks a row; the caller opens it after the
         // dialog closes. Null = nothing to open.
@@ -432,7 +434,8 @@ namespace PDMLite
         private void ClearAllFilters()
         {
             _colFilters.Clear();
-            _sortColumn = -1;
+            _sortColumn = DefaultSortColumn;          // back to newest-first
+            _sortDir = ListSortDirection.Descending;
             _search.Text = "";       // triggers a debounced re-filter…
             ApplyFilter();           // …and apply immediately too
             _grid.Invalidate();      // repaint headers (clear funnel/sort glyphs)
