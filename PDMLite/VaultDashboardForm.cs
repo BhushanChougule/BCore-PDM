@@ -63,6 +63,11 @@ namespace PDMLite
         private int GlyphZone => S(20);         // right-edge hit area for the arrow
 
         private List<VaultFile> _all = new List<VaultFile>();
+        // The current filtered + sorted rows. In VirtualMode the grid renders
+        // straight from this list (no DataGridViewRow objects), so it scales to
+        // 50–100k files. Index in the grid == index in _view.
+        private List<VaultFile> _view = new List<VaultFile>();
+        private const int WidthSampleRows = 400; // cap column-measure cost
 
         // Active per-column filters: column index → the SET of allowed display
         // values for that column. A column NOT in the map = unfiltered.
@@ -226,6 +231,8 @@ namespace PDMLite
                     DataGridViewColumnHeadersHeightSizeMode.DisableResizing,
                 EnableHeadersVisualStyles = false,
                 AutoGenerateColumns = false,
+                // VirtualMode: scales to 50–100k rows — see CellValueNeeded.
+                VirtualMode = true,
                 Cursor = Cursors.Hand
             };
             _grid.ColumnHeadersHeight = S(26);
@@ -245,6 +252,12 @@ namespace PDMLite
             // header click between sort (text) and filter (arrow).
             _grid.CellPainting += Grid_CellPainting;
             _grid.ColumnHeaderMouseClick += Grid_ColumnHeaderMouseClick;
+            // VirtualMode providers — the grid pulls value / colour / tooltip for
+            // ONLY the visible cells, so nothing is materialised for off-screen
+            // rows (the key to handling tens of thousands of files).
+            _grid.CellValueNeeded += Grid_CellValueNeeded;
+            _grid.CellFormatting += Grid_CellFormatting;
+            _grid.CellToolTipTextNeeded += Grid_CellToolTipTextNeeded;
 
             AddColumn("File Name");
             AddColumn("Part No");
@@ -450,39 +463,66 @@ namespace PDMLite
                     : view.OrderByDescending(key)).ToList();
             }
 
-            // Repopulate the grid. SuspendLayout keeps it snappy on big lists.
-            _grid.SuspendLayout();
-            _grid.Rows.Clear();
-            foreach (var f in view)
-            {
-                // DBNull for a missing date → an empty (not 01/01/0001) cell that
-                // still sorts as the earliest.
-                object modVal = f.ModifiedDate == DateTime.MinValue
-                    ? (object)DBNull.Value : f.ModifiedDate;
-                object relVal = f.ReleasedDate == DateTime.MinValue
-                    ? (object)DBNull.Value : f.ReleasedDate;
+            // VirtualMode: just swap the backing list and set RowCount — the grid
+            // pulls values for visible rows via CellValueNeeded. No per-row objects
+            // are created, so this stays instant at 50–100k rows and on every
+            // keystroke. CurrentCell is cleared first so a shrinking RowCount can't
+            // reference a now-invalid cell.
+            _view = view;
+            _grid.CurrentCell = null;
+            _grid.RowCount = _view.Count;
+            _grid.Invalidate();
 
-                int idx = _grid.Rows.Add(
-                    f.FileName, f.PartNumber, f.Description, f.Status,
-                    f.Revision, f.ModifiedBy, modVal, f.ReleasedBy, relVal);
-
-                var row = _grid.Rows[idx];
-                row.Tag = f.FilePath;
-
-                var statusCell = row.Cells[3];
-                statusCell.Style.ForeColor = StatusColor(f.Status);
-                statusCell.Style.Font = _cellBold;
-
-                if (f.HasBrokenRefs)
-                {
-                    row.Cells[0].Style.ForeColor = cRed;
-                    row.Cells[0].ToolTipText = "Has broken references";
-                }
-            }
-            _grid.ResumeLayout();
-
-            UpdateSummary(view.Count);
+            UpdateSummary(_view.Count);
             LayoutTopControls(); // re-centre: the summary width changed
+        }
+
+        // ── VirtualMode providers (called for VISIBLE cells only) ───────────
+        private void Grid_CellValueNeeded(object sender,
+            DataGridViewCellValueEventArgs e)
+        {
+            if (e.RowIndex < 0 || e.RowIndex >= _view.Count) return;
+            var f = _view[e.RowIndex];
+            switch (e.ColumnIndex)
+            {
+                case 0: e.Value = f.FileName; break;
+                case 1: e.Value = f.PartNumber; break;
+                case 2: e.Value = f.Description; break;
+                case 3: e.Value = f.Status; break;
+                case 4: e.Value = f.Revision; break;
+                case 5: e.Value = f.ModifiedBy; break;
+                // Real DateTime so the column's format applies; DBNull for a
+                // missing date → an empty (not 01/01/0001) cell.
+                case 6: e.Value = f.ModifiedDate == DateTime.MinValue
+                            ? (object)DBNull.Value : f.ModifiedDate; break;
+                case 7: e.Value = f.ReleasedBy; break;
+                case 8: e.Value = f.ReleasedDate == DateTime.MinValue
+                            ? (object)DBNull.Value : f.ReleasedDate; break;
+            }
+        }
+
+        private void Grid_CellFormatting(object sender,
+            DataGridViewCellFormattingEventArgs e)
+        {
+            if (e.RowIndex < 0 || e.RowIndex >= _view.Count) return;
+            var f = _view[e.RowIndex];
+            if (e.ColumnIndex == 3) // Status — coloured + bold
+            {
+                e.CellStyle.ForeColor = StatusColor(f.Status);
+                e.CellStyle.Font = _cellBold;
+            }
+            else if (e.ColumnIndex == 0 && f.HasBrokenRefs) // File Name — red
+            {
+                e.CellStyle.ForeColor = cRed;
+            }
+        }
+
+        private void Grid_CellToolTipTextNeeded(object sender,
+            DataGridViewCellToolTipTextNeededEventArgs e)
+        {
+            if (e.RowIndex < 0 || e.RowIndex >= _view.Count) return; // keep header tooltips
+            if (e.ColumnIndex == 0 && _view[e.RowIndex].HasBrokenRefs)
+                e.ToolTipText = "Has broken references";
         }
 
         private void ClearAllFilters()
@@ -637,16 +677,24 @@ namespace PDMLite
             }
         }
 
-        // Size each column to its widest value + ~20% so columns always look
-        // uniform and tidy instead of evenly stretched. GetPreferredWidth(AllCells)
-        // measures header + every cell; clamped to a sane min/max.
+        // Size each column to its widest value + ~20%. Measured from a BOUNDED
+        // SAMPLE (header + up to WidthSampleRows rows) with TextRenderer, NOT
+        // GetPreferredWidth(AllCells) — the latter would measure every cell
+        // (100k×9) and is unusable in VirtualMode anyway. O(sample), not O(rows).
         private void AutoSizeColumns()
         {
+            int sample = Math.Min(_all.Count, WidthSampleRows);
+            Font cellFont = _grid.Font;
             foreach (DataGridViewColumn col in _grid.Columns)
             {
-                int pref = col.GetPreferredWidth(
-                    DataGridViewAutoSizeColumnMode.AllCells, true);
-                int w = (int)(pref * 1.20) + GlyphZone; // room for the filter arrow
+                int ci = col.Index;
+                int max = TextRenderer.MeasureText(col.HeaderText, _cellBold).Width;
+                for (int i = 0; i < sample; i++)
+                {
+                    int wv = TextRenderer.MeasureText(CellText(_all[i], ci), cellFont).Width;
+                    if (wv > max) max = wv;
+                }
+                int w = (int)(max * 1.20) + GlyphZone + S(10); // arrow + cell padding
                 if (w < S(56))  w = S(56);
                 if (w > S(540)) w = S(540);
                 col.Width = w;
@@ -734,8 +782,8 @@ namespace PDMLite
         // ── Row open (deferred to caller) ───────────────────────────────────
         private void Grid_CellDoubleClick(object sender, DataGridViewCellEventArgs e)
         {
-            if (e.RowIndex < 0) return;
-            string path = _grid.Rows[e.RowIndex].Tag as string;
+            if (e.RowIndex < 0 || e.RowIndex >= _view.Count) return;
+            string path = _view[e.RowIndex].FilePath;
             if (string.IsNullOrEmpty(path)) return;
             FileToOpen = path;
             this.DialogResult = DialogResult.OK;
@@ -745,7 +793,7 @@ namespace PDMLite
         // ── Export the CURRENT (filtered) view to CSV ───────────────────────
         private void ExportCsv()
         {
-            if (_grid.Rows.Count == 0)
+            if (_view.Count == 0)
             {
                 MessageBox.Show("Nothing to export — the list is empty.",
                     "BCore PDM — Vault Dashboard",
@@ -765,22 +813,25 @@ namespace PDMLite
 
                 try
                 {
+                    int cols = _grid.Columns.Count;
                     var sb = new StringBuilder();
                     var headers = _grid.Columns.Cast<DataGridViewColumn>()
                         .Select(c => Csv(c.HeaderText));
                     sb.AppendLine(string.Join(",", headers));
 
-                    foreach (DataGridViewRow row in _grid.Rows)
+                    // Export straight from the backing list (VirtualMode has no
+                    // materialised rows). CellText gives each column's displayed
+                    // string, including the formatted dates.
+                    foreach (var f in _view)
                     {
-                        // FormattedValue applies each column's display format, so
-                        // the dates export as shown (not the raw DateTime).
-                        var cells = row.Cells.Cast<DataGridViewCell>()
-                            .Select(c => Csv(Convert.ToString(c.FormattedValue)));
+                        var cells = new string[cols];
+                        for (int ci = 0; ci < cols; ci++)
+                            cells[ci] = Csv(CellText(f, ci));
                         sb.AppendLine(string.Join(",", cells));
                     }
 
                     File.WriteAllText(dlg.FileName, sb.ToString());
-                    MessageBox.Show("Exported " + _grid.Rows.Count +
+                    MessageBox.Show("Exported " + _view.Count +
                         " rows to:\n" + dlg.FileName,
                         "BCore PDM — Export Complete",
                         MessageBoxButtons.OK, MessageBoxIcon.Information);
@@ -815,11 +866,14 @@ namespace PDMLite
             private readonly float _scale;
             private int S(float v) => (int)(v * _scale);
 
+            private const int DisplayCap = 2000;  // max items rendered in the list
+
             private readonly List<string> _allValues;            // raw distinct values
             private readonly Dictionary<string, bool> _state;    // raw → checked
             private readonly List<string> _visibleRaw = new List<string>();
             private CheckedListBox _list;
             private TextBox _search;
+            private Label _count;
 
             // The checked subset of the shown values (never null). The caller
             // decides whether that equals "no filter" (it also folds in any
@@ -872,7 +926,18 @@ namespace PDMLite
                 btnNone.Click += (s, e) => SetVisible(false);
                 Controls.Add(btnNone);
 
-                int listY = btnY + rowH + S(6);
+                int countY = btnY + rowH + S(6);
+                _count = new Label
+                {
+                    Font = fCtrl,
+                    AutoSize = false,
+                    Location = new Point(S(8), countY),
+                    Size = new Size(S(220), S(18)),
+                    ForeColor = Color.FromArgb(120, 128, 140)
+                };
+                Controls.Add(_count);
+
+                int listY = countY + S(20);
                 int okY = ClientSize.Height - rowH - S(8);
                 _list = new CheckedListBox
                 {
@@ -942,17 +1007,28 @@ namespace PDMLite
                 _list.BeginUpdate();
                 _list.Items.Clear();
                 _visibleRaw.Clear();
+                int matched = 0;
                 foreach (var raw in _allValues)
                 {
                     string disp = raw.Length == 0 ? "(Blanks)" : raw;
                     if (term.Length > 0 &&
                         disp.IndexOf(term, StringComparison.OrdinalIgnoreCase) < 0)
                         continue;
+                    matched++;
+                    // Cap the RENDERED items so a high-cardinality column (e.g.
+                    // 100k file names) never builds a 100k-item list. _state still
+                    // covers every value, so Commit and check state stay correct.
+                    if (_visibleRaw.Count >= DisplayCap) continue;
                     _visibleRaw.Add(raw);
                     _list.Items.Add(disp, _state[raw]);
                 }
                 _list.EndUpdate();
                 _list.ItemCheck += List_ItemCheck;
+
+                _count.Text = matched > _visibleRaw.Count
+                    ? string.Format("{0:N0} of {1:N0} shown — type to narrow",
+                        _visibleRaw.Count, matched)
+                    : string.Format("{0:N0} value{1}", matched, matched == 1 ? "" : "s");
             }
 
             private void Commit()
