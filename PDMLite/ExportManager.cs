@@ -84,8 +84,22 @@ namespace PDMLite
                 string bomFolder = Path.Combine(exportRoot, "BOM");
                 Directory.CreateDirectory(bomFolder);
 
-                // Top-level components only (toplevelOnly = true).
-                object[] comps = asm.GetComponents(true) as object[];
+                // Enumerate top-level components via the active config's root
+                // component. GetRootComponent3(true) RESOLVES lightweight
+                // components (otherwise their models aren't loaded and properties
+                // read back empty) and GetChildren() returns the direct (top-level)
+                // children only — sub-assembly internals are not expanded.
+                // AssemblyDoc.GetComponents(true) proved unreliable here (it
+                // returned only the first component when others were lightweight),
+                // so it is only a fallback.
+                object[] comps = null;
+                Configuration activeCfg =
+                    asmDoc.GetActiveConfiguration() as Configuration;
+                Component2 root = activeCfg?.GetRootComponent3(true);
+                if (root != null)
+                    comps = root.GetChildren() as object[];
+                if (comps == null)
+                    comps = asm.GetComponents(true) as object[];
 
                 // Group identical components (same path + referenced config) so
                 // each BOM line carries a quantity instead of repeating instances.
@@ -163,16 +177,27 @@ namespace PDMLite
             public int Qty;
         }
 
-        // Config-aware property read; "" config falls back to the active config.
-        // Swallows failures so an unreadable component never breaks the BOM.
+        // Read a property wherever it lives, in priority order:
+        //   1. the referenced configuration (config-specific "Configuration
+        //      Specific" tab — where our PropertyForm writes it),
+        //   2. document level (configName "" — the "Custom" tab, used when a
+        //      property was entered there instead of per-config),
+        //   3. the model's active configuration (last-resort fallback).
+        // This is why a filled Material1 could come back empty: it was stored in
+        // a different scope than the component's referenced config. Swallows
+        // failures so an unreadable component never breaks the BOM.
         private static string ReadProp(ModelDoc2 model, string prop, string cfg)
         {
             if (model == null) return "";
             try
             {
-                return !string.IsNullOrEmpty(cfg)
-                    ? PropertyValidator.GetProperty(model, prop, cfg)
-                    : PropertyValidator.GetProperty(model, prop);
+                string v = !string.IsNullOrEmpty(cfg)
+                    ? PropertyValidator.GetProperty(model, prop, cfg) : "";
+                if (string.IsNullOrWhiteSpace(v))
+                    v = PropertyValidator.GetProperty(model, prop, ""); // document level
+                if (string.IsNullOrWhiteSpace(v))
+                    v = PropertyValidator.GetProperty(model, prop);     // active config
+                return v ?? "";
             }
             catch { return ""; }
         }
