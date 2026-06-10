@@ -355,7 +355,7 @@ namespace PDMLite
                 // hiding the drawing beneath. PdfSharp emits the alpha as a PDF
                 // ExtGState, so true transparency works (the earlier "invisible"
                 // problem was the file-lock write failure, since fixed).
-                XBrush brush = new XSolidBrush(XColor.FromArgb(38, 120, 120, 120));
+                XBrush brush = new XSolidBrush(XColor.FromArgb(22, 120, 120, 120));
 
                 foreach (PdfPage page in pdf.Pages)
                 {
@@ -363,22 +363,22 @@ namespace PDMLite
                     double h = page.Height.Point;
 
                     // Lay the text along the sheet's bottom-left → top-right
-                    // diagonal: angle = atan(height / width) (≈ 33° for a 17×11
-                    // sheet). Positive rotates it ASCENDING to the right in
-                    // PdfSharp's y-down space.
+                    // diagonal: |angle| = atan(height / width) (≈ 33° for a 17×11
+                    // sheet). NEGATIVE rotates it ASCENDING to the right in
+                    // PdfSharp's y-down space (positive would descend).
                     double angleDeg =
-                        System.Math.Atan2(h, w) * 180.0 / System.Math.PI;
+                        -System.Math.Atan2(h, w) * 180.0 / System.Math.PI;
                     double diag = System.Math.Sqrt(w * w + h * h);
 
                     using (XGraphics gfx = XGraphics.FromPdfPage(
                         page, XGraphicsPdfPageOptions.Append))
                     {
-                        // Size the text to span ~60% of the diagonal so it scales
+                        // Size the text to span ~48% of the diagonal so it scales
                         // proportionally with any sheet size (A → E).
                         XFont trial = new XFont("Arial", 100, XFontStyle.Bold);
                         XSize ts = gfx.MeasureString("RELEASED", trial);
                         double size = ts.Width > 1
-                            ? 100.0 * (diag * 0.60) / ts.Width : 96.0;
+                            ? 100.0 * (diag * 0.48) / ts.Width : 78.0;
                         XFont font = new XFont("Arial", size, XFontStyle.Bold);
 
                         // Translate to page centre, rotate to the diagonal, then
