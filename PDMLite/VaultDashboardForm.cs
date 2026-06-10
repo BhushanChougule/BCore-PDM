@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.ComponentModel;
 using System.Drawing;
+using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Text;
@@ -371,6 +372,58 @@ namespace PDMLite
             return f => (CellText(f, col) ?? "").ToLowerInvariant();
         }
 
+        // The value a column is FILTERED on. Same as the display text EXCEPT for
+        // the date columns, which are grouped to DAY granularity (so the filter
+        // list shows distinct days, not every minute) — checking a day keeps
+        // every time on that day. Invariant culture so the key is locale-stable.
+        private string FilterKey(VaultFile f, int col)
+        {
+            if (col == 6) return f.ModifiedDate == DateTime.MinValue
+                ? "" : f.ModifiedDate.ToString("MM/dd/yyyy", CultureInfo.InvariantCulture);
+            if (col == 8) return f.ReleasedDate == DateTime.MinValue
+                ? "" : f.ReleasedDate.ToString("MM/dd/yyyy", CultureInfo.InvariantCulture);
+            return CellText(f, col);
+        }
+
+        // Filter keys of `col` over the rows that pass every OTHER active column
+        // filter + the global search — so a column's dropdown NARROWS to what's
+        // relevant given the other filters, like Excel.
+        private IEnumerable<string> KeysPassingOtherFilters(int col)
+        {
+            string term = (_search.Text ?? "").Trim().ToLowerInvariant();
+            foreach (var f in _all)
+            {
+                bool ok = true;
+                foreach (var kv in _colFilters)
+                {
+                    if (kv.Key == col) continue;
+                    if (!kv.Value.Contains(FilterKey(f, kv.Key))) { ok = false; break; }
+                }
+                if (!ok) continue;
+                if (term.Length > 0 &&
+                    !((f.PartNumber  ?? "").ToLowerInvariant().Contains(term)
+                   || (f.Description ?? "").ToLowerInvariant().Contains(term)
+                   || (f.FileName    ?? "").ToLowerInvariant().Contains(term)))
+                    continue;
+                yield return FilterKey(f, col);
+            }
+        }
+
+        // Order a column's filter values for display: date columns CHRONOLOGICALLY
+        // (parsing the day key; blanks first), everything else alphabetically.
+        private List<string> OrderFilterValues(int col, IEnumerable<string> values)
+        {
+            if (col == 6 || col == 8)
+                return values.OrderBy(v =>
+                {
+                    DateTime d;
+                    return DateTime.TryParseExact(v, "MM/dd/yyyy",
+                        CultureInfo.InvariantCulture, DateTimeStyles.None, out d)
+                        ? d : DateTime.MinValue; // blanks sort earliest
+                }).ToList();
+            return values.OrderBy(v => v, StringComparer.OrdinalIgnoreCase).ToList();
+        }
+
         private void ApplyFilter()
         {
             string term = (_search.Text ?? "").Trim().ToLowerInvariant();
@@ -378,8 +431,9 @@ namespace PDMLite
             var view = _all.Where(f =>
             {
                 // Per-column (Excel-style) value filters — ALL must pass.
+                // FilterKey (not CellText) so date columns match by DAY.
                 foreach (var kv in _colFilters)
-                    if (!kv.Value.Contains(CellText(f, kv.Key)))
+                    if (!kv.Value.Contains(FilterKey(f, kv.Key)))
                         return false;
                 // Global quick text search across the three text columns.
                 if (term.Length == 0) return true;
@@ -527,22 +581,35 @@ namespace PDMLite
         }
 
         // Open the Excel-style checkbox filter for one column, anchored under its
-        // header arrow. Distinct values come from the FULL data set for that
-        // column (so the list is stable regardless of other active filters).
+        // header arrow. The list NARROWS to the values present given every OTHER
+        // active filter (+ the global search), like Excel.
         private void ShowColumnFilter(int col)
         {
-            var values = _all
-                .Select(f => CellText(f, col))
-                .Distinct(StringComparer.OrdinalIgnoreCase)
-                .OrderBy(v => v, StringComparer.OrdinalIgnoreCase)
-                .ToList();
+            // Every distinct filter key for this column across the WHOLE dataset —
+            // used to decide "all selected = no filter" and to know which allowed
+            // values are merely hidden by another filter (must be preserved).
+            var allKeys = new HashSet<string>(
+                _all.Select(f => FilterKey(f, col)), StringComparer.OrdinalIgnoreCase);
+
+            // The values actually shown: narrowed by the other filters + search.
+            var shown = OrderFilterValues(col,
+                KeysPassingOtherFilters(col).Distinct(StringComparer.OrdinalIgnoreCase));
+            var shownSet = new HashSet<string>(shown, StringComparer.OrdinalIgnoreCase);
 
             HashSet<string> current;
             if (!_colFilters.TryGetValue(col, out current))
-                current = null; // null = currently unfiltered (all checked)
+                current = null; // null = currently unfiltered (all allowed)
+
+            // Values this column currently ALLOWS but that are hidden by another
+            // filter (not in `shown`). Kept so removing the other filter later
+            // doesn't silently drop them — they just aren't shown right now.
+            var hiddenAllowed = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (var v in allKeys)
+                if (!shownSet.Contains(v) && (current == null || current.Contains(v)))
+                    hiddenAllowed.Add(v);
 
             using (var dlg = new ColumnFilterDialog(_scale,
-                _grid.Columns[col].HeaderText, values, current,
+                _grid.Columns[col].HeaderText, shown, current,
                 cBrand, cBrandDark, cBg, cTextDark))
             {
                 var rect = _grid.GetCellDisplayRectangle(col, -1, true);
@@ -557,8 +624,13 @@ namespace PDMLite
 
                 if (dlg.ShowDialog(this) == DialogResult.OK)
                 {
-                    if (dlg.SelectedValues == null) _colFilters.Remove(col);
-                    else _colFilters[col] = dlg.SelectedValues;
+                    // Ticked (visible) values + the allowed-but-hidden ones.
+                    var allowed = new HashSet<string>(dlg.SelectedValues,
+                        StringComparer.OrdinalIgnoreCase);
+                    allowed.UnionWith(hiddenAllowed);
+
+                    if (allowed.Count >= allKeys.Count) _colFilters.Remove(col);
+                    else _colFilters[col] = allowed;
                     ApplyFilter();
                     _grid.Invalidate(); // repaint funnel glyph
                 }
@@ -734,8 +806,9 @@ namespace PDMLite
 
         // ────────────────────────────────────────────────────────────────────
         //  Excel-style per-column filter popup: a searchable checkbox list of the
-        //  column's distinct values, with Select All / Clear and OK / Cancel.
-        //  SelectedValues == null  →  every value is ticked (i.e. NO filter).
+        //  (already narrowed) values it's given, with Select All / Clear and
+        //  OK / Cancel. SelectedValues = the checked subset (the caller folds in
+        //  hidden-allowed values and decides whether that means "no filter").
         // ────────────────────────────────────────────────────────────────────
         private sealed class ColumnFilterDialog : Form
         {
@@ -748,7 +821,9 @@ namespace PDMLite
             private CheckedListBox _list;
             private TextBox _search;
 
-            // null = all values selected (no filter); otherwise the allowed set.
+            // The checked subset of the shown values (never null). The caller
+            // decides whether that equals "no filter" (it also folds in any
+            // allowed values that were hidden by other filters).
             public HashSet<string> SelectedValues { get; private set; }
 
             public ColumnFilterDialog(float scale, string columnName,
@@ -882,10 +957,8 @@ namespace PDMLite
 
             private void Commit()
             {
-                var chosen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-                foreach (var kv in _state) if (kv.Value) chosen.Add(kv.Key);
-                // All values ticked → treat as no filter (null).
-                SelectedValues = chosen.Count == _allValues.Count ? null : chosen;
+                SelectedValues = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                foreach (var kv in _state) if (kv.Value) SelectedValues.Add(kv.Key);
             }
         }
     }
