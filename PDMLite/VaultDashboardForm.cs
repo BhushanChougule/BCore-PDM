@@ -40,6 +40,10 @@ namespace PDMLite
         private DataGridView _grid;
         private TextBox _search;
         private ComboBox _statusFilter;
+        private ComboBox _modifiedByFilter;
+        private ComboBox _releasedByFilter;
+        private Label _lblModBy;
+        private Label _lblRelBy;
         private Label _summary;
         private Label _title;
         private Button _btnRefresh;
@@ -48,6 +52,9 @@ namespace PDMLite
         private Panel _bottomPanel;
         private System.Windows.Forms.Timer _searchTimer;
         private Font _cellBold; // one shared bold font for the Status cell
+        // True while the engineer dropdowns are being (re)populated, so the
+        // SelectedIndexChanged handlers don't filter mid-rebuild.
+        private bool _populating;
 
         private const int VisibleRows = 20;     // fixed grid height = 20 rows
         private const double MaxScreenFraction = 0.80; // popup ≤ 80% of screen
@@ -113,7 +120,7 @@ namespace PDMLite
 
             _title = new Label
             {
-                Text = "VAULT DASHBOARD",
+                Text = "BCore VAULT DASHBOARD",
                 Font = fTitle,
                 ForeColor = cBrandDark,
                 AutoSize = true,
@@ -164,7 +171,64 @@ namespace PDMLite
             _btnExport.Click += (s, e) => ExportCsv();
             _topPanel.Controls.Add(_btnExport);
 
-            int summaryY = rowY + ctrlH + S(10);
+            // ── Second filter row: per-engineer Modified By / Released By ──
+            // Lets a Master isolate one engineer's work (their saves and/or
+            // their releases). "All" = no filter. Lists are rebuilt from the
+            // data on every load (PopulateEngineerFilters).
+            int row2Y = rowY + ctrlH + S(12);
+
+            _lblModBy = new Label
+            {
+                Text = "Modified By:",
+                Font = fCtrl,
+                ForeColor = cTextGray,
+                AutoSize = true,
+                Location = new Point(S(14), row2Y)
+            };
+            _topPanel.Controls.Add(_lblModBy);
+
+            _modifiedByFilter = new ComboBox
+            {
+                Font = fCtrl,
+                DropDownStyle = ComboBoxStyle.DropDownList,
+                Location = new Point(S(120), row2Y),
+                Width = S(180)
+            };
+            _modifiedByFilter.Items.Add("All");
+            _modifiedByFilter.SelectedIndex = 0;
+            _modifiedByFilter.SelectedIndexChanged += (s, e) => ApplyFilter();
+            _topPanel.Controls.Add(_modifiedByFilter);
+
+            _lblRelBy = new Label
+            {
+                Text = "Released By:",
+                Font = fCtrl,
+                ForeColor = cTextGray,
+                AutoSize = true,
+                Location = new Point(S(320), row2Y)
+            };
+            _topPanel.Controls.Add(_lblRelBy);
+
+            _releasedByFilter = new ComboBox
+            {
+                Font = fCtrl,
+                DropDownStyle = ComboBoxStyle.DropDownList,
+                Location = new Point(S(430), row2Y),
+                Width = S(180)
+            };
+            _releasedByFilter.Items.Add("All");
+            _releasedByFilter.SelectedIndex = 0;
+            _releasedByFilter.SelectedIndexChanged += (s, e) => ApplyFilter();
+            _topPanel.Controls.Add(_releasedByFilter);
+
+            // Match the two engineer combos to the control-row height, then
+            // vertically centre their labels against the combos.
+            _modifiedByFilter.Height = ctrlH;
+            _releasedByFilter.Height = ctrlH;
+            _lblModBy.Top = row2Y + Math.Max(0, (ctrlH - _lblModBy.PreferredHeight) / 2);
+            _lblRelBy.Top = row2Y + Math.Max(0, (ctrlH - _lblRelBy.PreferredHeight) / 2);
+
+            int summaryY = row2Y + ctrlH + S(10);
             _summary = new Label
             {
                 Font = fSummary,
@@ -311,6 +375,9 @@ namespace PDMLite
                     MessageBoxButtons.OK, MessageBoxIcon.Warning);
                 _all = new List<VaultFile>();
             }
+            // Rebuild the engineer dropdowns from the freshly loaded data
+            // (preserving the current selection if that user is still present).
+            PopulateEngineerFilters();
             // Populate the (unfiltered) grid, then size columns to the full data
             // ONCE and fit the form to them — so columns/width stay stable while
             // the user types in the search box (no per-keystroke resizing).
@@ -318,6 +385,36 @@ namespace PDMLite
             AutoSizeColumns();
             FitFormSize();
             LayoutTopControls();
+        }
+
+        // Rebuild the Modified By / Released By dropdowns from the distinct
+        // engineer names in the current data set. Each list is "All" + the
+        // sorted unique names. The user's current pick is restored when it
+        // still exists, otherwise the filter falls back to "All".
+        private void PopulateEngineerFilters()
+        {
+            _populating = true;
+            try
+            {
+                FillEngineerCombo(_modifiedByFilter, _all.Select(f => f.ModifiedBy));
+                FillEngineerCombo(_releasedByFilter, _all.Select(f => f.ReleasedBy));
+            }
+            finally { _populating = false; }
+        }
+
+        private static void FillEngineerCombo(ComboBox cb, IEnumerable<string> names)
+        {
+            string prev = cb.SelectedItem as string;
+            cb.Items.Clear();
+            cb.Items.Add("All");
+            foreach (var u in names
+                .Where(s => !string.IsNullOrWhiteSpace(s))
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .OrderBy(s => s, StringComparer.OrdinalIgnoreCase))
+                cb.Items.Add(u);
+
+            int i = string.IsNullOrEmpty(prev) ? -1 : cb.Items.IndexOf(prev);
+            cb.SelectedIndex = i >= 0 ? i : 0;
         }
 
         private void DebouncedFilter()
@@ -328,9 +425,15 @@ namespace PDMLite
 
         private void ApplyFilter()
         {
+            if (_populating) return; // skip filtering while combos are rebuilt
+
             string term = (_search.Text ?? "").Trim().ToLowerInvariant();
             string statusSel = _statusFilter.SelectedIndex <= 0
                 ? null : (string)_statusFilter.SelectedItem;
+            string modSel = _modifiedByFilter.SelectedIndex <= 0
+                ? null : (string)_modifiedByFilter.SelectedItem;
+            string relSel = _releasedByFilter.SelectedIndex <= 0
+                ? null : (string)_releasedByFilter.SelectedItem;
 
             var view = _all.Where(f =>
             {
@@ -338,6 +441,8 @@ namespace PDMLite
                     !string.Equals(f.Status, statusSel,
                         StringComparison.OrdinalIgnoreCase))
                     return false;
+                if (modSel != null && !Eq(f.ModifiedBy, modSel)) return false;
+                if (relSel != null && !Eq(f.ReleasedBy, relSel)) return false;
                 if (term.Length == 0) return true;
                 return (f.PartNumber  ?? "").ToLowerInvariant().Contains(term)
                     || (f.Description ?? "").ToLowerInvariant().Contains(term)
@@ -447,6 +552,19 @@ namespace PDMLite
             _statusFilter.Left = _search.Right + gap;
             _btnRefresh.Left   = _statusFilter.Right + gap;
             _btnExport.Left    = _btnRefresh.Right + gap;
+
+            // Second row: "Modified By: [combo]   Released By: [combo]" centred.
+            if (_modifiedByFilter != null && _releasedByFilter != null)
+            {
+                int lblGap = S(6);
+                int row2W = _lblModBy.Width + lblGap + _modifiedByFilter.Width
+                          + gap + _lblRelBy.Width + lblGap + _releasedByFilter.Width;
+                int start2 = Math.Max(S(14), (panelW - row2W) / 2);
+                _lblModBy.Left         = start2;
+                _modifiedByFilter.Left = _lblModBy.Right + lblGap;
+                _lblRelBy.Left         = _modifiedByFilter.Right + gap;
+                _releasedByFilter.Left = _lblRelBy.Right + lblGap;
+            }
 
             if (_summary != null)
                 _summary.Left = Math.Max(S(14), (panelW - _summary.Width) / 2);
