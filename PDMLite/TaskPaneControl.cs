@@ -465,13 +465,15 @@ namespace PDMLite
         // the canonical WIP copy, read-only when Released).
         private void OpenDashboard()
         {
-            var form = new VaultDashboardForm(_scale);
-            var result = form.ShowDialog(this);
-            if (result == DialogResult.OK &&
-                !string.IsNullOrEmpty(form.FileToOpen))
+            using (var form = new VaultDashboardForm(_scale))
             {
-                try { VaultManager.OpenByPath(form.FileToOpen); }
-                catch { }
+                var result = form.ShowDialog(this);
+                if (result == DialogResult.OK &&
+                    !string.IsNullOrEmpty(form.FileToOpen))
+                {
+                    try { VaultManager.OpenByPath(form.FileToOpen); }
+                    catch { }
+                }
             }
         }
 

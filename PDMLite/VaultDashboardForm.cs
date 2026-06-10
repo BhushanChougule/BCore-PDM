@@ -506,7 +506,10 @@ namespace PDMLite
             DataGridViewCellMouseEventArgs e)
         {
             if (e.ColumnIndex < 0 || e.Button != MouseButtons.Left) return;
-            var rect = _grid.GetCellDisplayRectangle(e.ColumnIndex, -1, true);
+            // cutOverflow:false → the FULL column width, matching e.X (which is
+            // relative to the cell's full left edge). Using the clipped width
+            // would mis-split sort vs filter on a horizontally-scrolled column.
+            var rect = _grid.GetCellDisplayRectangle(e.ColumnIndex, -1, false);
             if (e.X >= rect.Width - GlyphZone)
                 ShowColumnFilter(e.ColumnIndex);
             else
