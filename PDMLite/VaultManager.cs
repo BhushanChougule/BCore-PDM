@@ -752,6 +752,14 @@ namespace PDMLite
             {
                 ArchiveOldExports(partNo, isDrawing: true);
                 ExportManager.ExportAll(doc, ExportRoot, stamp);
+
+                // SOLIDWORKS' own PDF auto-open was suppressed (it would have
+                // shown the un-watermarked file). The watermark is now stamped on
+                // disk, so open the finished PDF ourselves for an interactive
+                // release. Skipped for chained/bulk releases (suppressPrompts).
+                if (!suppressPrompts)
+                    ExportManager.OpenPdfExternally(
+                        Path.Combine(ExportRoot, "PDF", stamp + ".pdf"));
             }
             else
             {
