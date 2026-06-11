@@ -7,9 +7,18 @@ using System.Windows.Forms;
 
 namespace PDMLite
 {
+    // DPI-aware (house convention): _scale = g.DpiX / 96f, every size via
+    // S(v) = (int)(v * _scale), every font as pt * _scale. AutoScaleMode.None
+    // so this explicit scaling is the ONLY scaling — the form then looks the
+    // same proportionally on a 1080p 100% machine and a 4K 250% machine.
+    // Single-line labels use AutoSize so the bold text can never clip at the
+    // bottom/right regardless of DPI; the subtitle wraps via MaximumSize.
     public class PropertyForm : Form
     {
         public bool PropertiesSaved { get; private set; } = false;
+
+        private readonly float _scale = 1f;
+        private int S(float v) => (int)(v * _scale);
 
         private ModelDoc2 _doc;
         private List<string> _fieldsToFill;                     // active-config mode
@@ -21,17 +30,20 @@ namespace PDMLite
         private Dictionary<string, Control> _inputControls = new Dictionary<string, Control>();
         private Dictionary<string, string[]> _inputTargets = new Dictionary<string, string[]>();
 
-        // ── Fixed sizes that work well together ───────────────────────
-        private const int FormWidthPx = 1200;
-        private const int LabelWidth = 380;
+        // Fonts are fields so they can be disposed with the form (assigning a
+        // Font to a control does not transfer ownership — they would otherwise
+        // leak a handle per dialog, and this dialog pops on every blocked save).
+        private Font _headerFont, _subFont, _sectionFont, _labelFont, _inputFont, _buttonFont;
+
+        // ── Baseline sizes at 96 DPI (scaled by S()) ──────────────────────
+        private const int FormWidthBase = 1200;
+        private const int LabelWidth = 360;
         private const int InputWidth = 480;
+        private const int InputHeight = 46;
         private const int RowHeight = 62;
         private const int LeftMargin = 30;
         private const int InputLeft = 410;
-        private const int StartY = 210;
-
-        private Font _labelFont;
-        private Font _inputFont;
+        private const int StartYBase = 200;
 
         private static readonly Dictionary<string, string> FieldLabels =
             new Dictionary<string, string>
@@ -107,6 +119,7 @@ namespace PDMLite
         {
             _doc = doc;
             _fieldsToFill = emptyFields;
+            using (var g = CreateGraphics()) _scale = g.DpiX / 96f;
             BuildUI();
         }
 
@@ -121,6 +134,7 @@ namespace PDMLite
         {
             _doc = doc;
             _configIssues = configIssues;
+            using (var g = CreateGraphics()) _scale = g.DpiX / 96f;
             BuildUI();
         }
 
@@ -128,81 +142,87 @@ namespace PDMLite
         {
             bool multiCfg = _configIssues != null;
 
-            _labelFont = new Font("Segoe UI", 11f);
-            _inputFont = new Font("Segoe UI", 11f);
-            Font headerFont = new Font("Segoe UI", 12f, FontStyle.Bold);
-            Font sectionFont = new Font("Segoe UI", 11f, FontStyle.Bold);
-            Font buttonFont = new Font("Segoe UI", 11f, FontStyle.Bold);
+            // Point sizes (× _scale). Chosen to match the form's prior
+            // readability at 100% while now scaling cleanly to any DPI.
+            _headerFont  = new Font("Segoe UI", 13.5f * _scale, FontStyle.Bold);
+            _subFont     = new Font("Segoe UI",  9.5f * _scale);
+            _sectionFont = new Font("Segoe UI", 11.5f * _scale, FontStyle.Bold);
+            _labelFont   = new Font("Segoe UI", 10.5f * _scale);
+            _inputFont   = new Font("Segoe UI", 10.5f * _scale);
+            _buttonFont  = new Font("Segoe UI", 10.5f * _scale, FontStyle.Bold);
 
             this.Text = "BCore PDM — Complete Required Properties";
             this.StartPosition = FormStartPosition.CenterScreen;
             this.FormBorderStyle = FormBorderStyle.FixedDialog;
             this.MaximizeBox = false;
             this.MinimizeBox = false;
+            // None = our S()/_scale is the ONLY scaling (no WinForms autoscale
+            // on top of it), so the layout is identical on every monitor.
+            this.AutoScaleMode = AutoScaleMode.None;
             this.BackColor = Color.FromArgb(245, 247, 250);
-            this.Width = FormWidthPx;
+            this.ClientSize = new Size(S(FormWidthBase), S(StartYBase));
             this.AutoScroll = false;
 
-            // ── Header ────────────────────────────────────────────────────
+            int contentWidth = S(FormWidthBase) - S(LeftMargin) * 2;
+
+            // ── Header (AutoSize — never clips) ───────────────────────────
             Label headerLbl = new Label
             {
                 Text = "Required properties are missing",
-                Font = headerFont,
+                Font = _headerFont,
                 ForeColor = Color.FromArgb(180, 50, 50),
-                AutoSize = false,
-                Width = FormWidthPx - 40,
-                Height = 52,
-                Location = new Point(LeftMargin, 45)
+                AutoSize = true,
+                Location = new Point(S(LeftMargin), S(40))
             };
             this.Controls.Add(headerLbl);
+            int y = headerLbl.Bottom + S(12);
 
-            // Subtitle word-wraps (AutoSize=false + enough height) so it never
-            // clips on the right at higher DPI, where the text renders wider
-            // than the form's usable client width. Kept short for the same
-            // reason.
+            // ── Subtitle (wraps via MaximumSize, grows vertically) ────────
             Label subLbl = new Label
             {
                 Text = multiCfg
                     ? "Each configuration missing a field has its own row below."
                     : "File cannot be saved until all fields are filled.",
-                Font = new Font("Segoe UI", 10f),
+                Font = _subFont,
                 ForeColor = Color.FromArgb(90, 90, 90),
-                AutoSize = false,
-                Width = FormWidthPx - 60,
-                Height = 56,
-                Location = new Point(LeftMargin, 120)
+                AutoSize = true,
+                MaximumSize = new Size(contentWidth, 0),
+                Location = new Point(S(LeftMargin), y)
             };
             this.Controls.Add(subLbl);
+            y = subLbl.Bottom + S(12);
 
-            // ── Divider ── (below the subtitle, not on top of it) ──────────
+            // ── Divider (below the subtitle) ──────────────────────────────
             Panel divider = new Panel
             {
                 BackColor = Color.FromArgb(200, 210, 220),
-                Height = 2,
-                Width = FormWidthPx - 60,
-                Location = new Point(LeftMargin, 184)
+                Height = Math.Max(1, S(2)),
+                Width = contentWidth,
+                Location = new Point(S(LeftMargin), y)
             };
             this.Controls.Add(divider);
+            y = divider.Bottom + S(14);
 
             // ── Rows live in a scrollable panel so any number of configs ×
             //    fields fits on screen (buttons stay fixed below the panel) ──
+            int panelTop = y;
             Panel rowsPanel = new Panel
             {
-                Location = new Point(0, StartY),
-                Width = FormWidthPx - 20,
+                Location = new Point(0, panelTop),
+                Width = S(FormWidthBase),
                 AutoScroll = true,
                 BackColor = this.BackColor
             };
 
-            int y = 0;
+            int ry = 0;
             if (!multiCfg)
             {
                 // One row per empty field, active configuration.
                 foreach (string field in _fieldsToFill)
                 {
                     if (!FieldLabels.ContainsKey(field)) continue;
-                    y = AddFieldRow(rowsPanel, field,
-                        FieldLabels[field] + " *", null, y);
+                    ry = AddFieldRow(rowsPanel, field,
+                        FieldLabels[field] + " *", null, ry);
                 }
             }
             else
@@ -228,40 +248,38 @@ namespace PDMLite
                     Label fieldHdr = new Label
                     {
                         Text = FieldLabels[field] + " *",
-                        Font = sectionFont,
-                        // AutoSize so the bold header is never clipped at the
-                        // bottom regardless of DPI (a fixed 36px height cut off
-                        // the descenders at higher scaling).
-                        AutoSize = true,
-                        Location = new Point(LeftMargin, y + 10),
+                        Font = _sectionFont,
+                        AutoSize = true,           // bold header never clips
+                        Location = new Point(S(LeftMargin), ry + S(10)),
                         ForeColor = Color.FromArgb(44, 85, 128)
                     };
                     rowsPanel.Controls.Add(fieldHdr);
-                    y += 52;
+                    ry = fieldHdr.Bottom + S(6);
 
                     foreach (string cfg in needy)
-                        y = AddFieldRow(rowsPanel, field,
-                            "      " + cfg, cfg, y);
+                        ry = AddFieldRow(rowsPanel, field,
+                            "      " + cfg, cfg, ry);
                 }
             }
 
             // Cap the rows area to the screen so long lists scroll instead of
             // pushing the buttons off-screen.
-            int maxRows = Screen.PrimaryScreen.WorkingArea.Height - StartY - 260;
-            if (maxRows < RowHeight) maxRows = RowHeight;
-            rowsPanel.Height = Math.Min(y + 10, maxRows);
+            int maxRows = Screen.PrimaryScreen.WorkingArea.Height
+                          - panelTop - S(160);
+            if (maxRows < S(RowHeight)) maxRows = S(RowHeight);
+            rowsPanel.Height = Math.Min(ry + S(8), maxRows);
             this.Controls.Add(rowsPanel);
 
-            int btnY = StartY + rowsPanel.Height + 20;
+            int btnY = rowsPanel.Bottom + S(20);
 
             // ── Buttons ───────────────────────────────────────────────────
             Button btnSave = new Button
             {
                 Text = "Save Properties",
-                Font = buttonFont,
-                Width = 300,
-                Height = 44,
-                Location = new Point(InputLeft, btnY),
+                Font = _buttonFont,
+                Width = S(300),
+                Height = S(44),
+                Location = new Point(S(InputLeft), btnY),
                 BackColor = Color.FromArgb(0, 122, 204),
                 ForeColor = Color.White,
                 FlatStyle = FlatStyle.Flat
@@ -272,20 +290,25 @@ namespace PDMLite
 
             Button btnCancel = new Button
             {
-                Text = "Cancel  ",
-                Font = buttonFont,
-                Width = 160,
-                Height = 44,
-                Location = new Point(InputLeft + 320, btnY),
+                Text = "Cancel",
+                Font = _buttonFont,
+                Width = S(160),
+                Height = S(44),
+                Location = new Point(S(InputLeft) + S(316), btnY),
                 BackColor = Color.FromArgb(220, 220, 220),
                 ForeColor = Color.FromArgb(60, 60, 60),
-                FlatStyle = FlatStyle.Flat
+                FlatStyle = FlatStyle.Flat,
+                DialogResult = DialogResult.Cancel
             };
             btnCancel.Click += (s, e) => { PropertiesSaved = false; this.Close(); };
             this.Controls.Add(btnCancel);
 
-            // ── Set form height to fit panel + buttons ────────────────────
-            this.Height = btnY + 160;
+            // Enter = Save, Esc = Cancel (every other house dialog wires these).
+            this.AcceptButton = btnSave;
+            this.CancelButton = btnCancel;
+
+            // ── Final form height: fit panel + buttons + bottom padding ───
+            this.ClientSize = new Size(S(FormWidthBase), btnY + S(44) + S(24));
         }
 
         // Adds one label+input row for `field` targeting `configName` (null =
@@ -293,14 +316,16 @@ namespace PDMLite
         private int AddFieldRow(Control parent, string field, string labelText,
             string configName, int y)
         {
+            // Vertically centre the label against the input box.
             Label fieldLbl = new Label
             {
                 Text = labelText,
                 Font = _labelFont,
                 AutoSize = false,
-                Width = LabelWidth,
-                Height = 50,
-                Location = new Point(LeftMargin, y + 4),
+                Width = S(LabelWidth),
+                Height = S(InputHeight),
+                TextAlign = ContentAlignment.MiddleLeft,
+                Location = new Point(S(LeftMargin), y),
                 ForeColor = Color.FromArgb(50, 50, 50)
             };
             parent.Controls.Add(fieldLbl);
@@ -315,9 +340,8 @@ namespace PDMLite
                 ComboBox combo = new ComboBox
                 {
                     Font = _inputFont,
-                    Width = InputWidth,
-                    Height = 50,
-                    Location = new Point(InputLeft, y),
+                    Width = S(InputWidth),
+                    Location = new Point(S(InputLeft), y),
                     DropDownStyle = ComboBoxStyle.DropDownList,
                     BackColor = Color.White
                 };
@@ -335,9 +359,8 @@ namespace PDMLite
                 DateTimePicker dtp = new DateTimePicker
                 {
                     Font = _inputFont,
-                    Width = InputWidth,
-                    Height = 50,
-                    Location = new Point(InputLeft, y),
+                    Width = S(InputWidth),
+                    Location = new Point(S(InputLeft), y),
                     Format = DateTimePickerFormat.Short,
                     Value = DateTime.Today
                 };
@@ -358,9 +381,8 @@ namespace PDMLite
                 TextBox tb = new TextBox
                 {
                     Font = _inputFont,
-                    Width = InputWidth,
-                    Height = 50,
-                    Location = new Point(InputLeft, y),
+                    Width = S(InputWidth),
+                    Location = new Point(S(InputLeft), y),
                     Text = defaultText,
                     BackColor = Color.White,
                     BorderStyle = BorderStyle.FixedSingle,
@@ -373,7 +395,7 @@ namespace PDMLite
             string key = (configName ?? "") + "|" + field;
             _inputControls[key] = input;
             _inputTargets[key] = new[] { configName, field };
-            return y + RowHeight;
+            return y + S(RowHeight);
         }
 
         // Current user's initials: first two letters of the Windows username,
@@ -457,6 +479,20 @@ namespace PDMLite
 
             PropertiesSaved = true;
             this.Close();
+        }
+
+        protected override void Dispose(bool disposing)
+        {
+            if (disposing)
+            {
+                _headerFont?.Dispose();
+                _subFont?.Dispose();
+                _sectionFont?.Dispose();
+                _labelFont?.Dispose();
+                _inputFont?.Dispose();
+                _buttonFont?.Dispose();
+            }
+            base.Dispose(disposing);
         }
     }
 }

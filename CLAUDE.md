@@ -160,13 +160,13 @@ Main entry point, ISwAddin implementation.
 
 \### PropertyForm.cs
 
-WinForms dialog for missing properties. Fixed sizes (not DPI-scaled, form is shown at system scale).
+WinForms dialog for missing properties. DPI-AWARE (house convention): _scale = g.DpiX / 96f (read once in the constructor via CreateGraphics), every size via S(v) = (int)(v * _scale), every font as pt × _scale, and AutoScaleMode.None so that explicit scaling is the ONLY scaling (no WinForms autoscale on top) — the dialog looks the same proportionally on a 1080p 100% machine and a 4K 250% machine. Single-line labels (header, subtitle, per-field section headers, row labels) use AutoSize / TextAlign so bold text can never clip at the bottom or right at any DPI; the subtitle wraps via MaximumSize. Fonts are stored as fields and disposed in Dispose(bool) (a Font assigned to a control is not owned by it). Enter=Save, Esc=Cancel (AcceptButton/CancelButton). Layout is laid out with a running y-cursor (label.Bottom + gap) rather than fixed offsets so it never overlaps regardless of wrap/scale.
 
 TWO MODES via two constructors: (1) ACTIVE-CONFIG mode — PropertyForm(doc, List<string> emptyFields), one row per missing field, values written to the active configuration (save-time Rules 3/3.5); (2) MULTI-CONFIG mode — PropertyForm(doc, Dictionary<configName, List<missingFields>>), used by the RELEASE GATE: ONE dialog showing every configuration's missing fields, grouped BY FIELD with one row per config under each bold field header (rows labelled with the config name, indented), so the Master fills e.g. Material for every config in one pass with NO active-config switching; each row's value is written to ITS OWN config via SetProperty(doc, field, value, configName) and values may differ per config. Inputs are registered under a composite "{config}|{field}" key (_inputControls + _inputTargets). Rows live in a SCROLLABLE panel capped to the screen working area (buttons stay fixed below), so any number of configs × fields fits.
 
-\- formWidth=1200, labelWidth=380, inputWidth=480, inputHeight=46
+\- Baseline sizes at 96 DPI (all × _scale via S()): formWidthBase=1200, labelWidth=360, inputWidth=480, inputHeight=46
 
-\- rowHeight=62, inputLeft=410, startY=210
+\- rowHeight=62, inputLeft=410, startYBase=200. Fonts (× _scale): header 13.5f bold, subtitle 9.5f, section 11.5f bold, label/input 10.5f, button 10.5f bold
 
 \- DateTimePicker format: MM/dd/yyyy
 
