@@ -35,15 +35,19 @@ namespace PDMLite
         // leak a handle per dialog, and this dialog pops on every blocked save).
         private Font _headerFont, _subFont, _sectionFont, _labelFont, _inputFont, _buttonFont;
 
-        // ── Baseline sizes at 96 DPI (scaled by S()) ──────────────────────
-        private const int FormWidthBase = 1200;
-        private const int LabelWidth = 360;
-        private const int InputWidth = 480;
-        private const int InputHeight = 46;
-        private const int RowHeight = 62;
-        private const int LeftMargin = 30;
-        private const int InputLeft = 410;
-        private const int StartYBase = 200;
+        // ── Baseline sizes (× _scale via S()) ─────────────────────────────
+        // Calibrated to the house unit system (cf. ConfigRevisionPickerForm:
+        // ~440-wide dialog, small base fonts) so this dialog renders at the
+        // SAME physical size as the other BCore dialogs at any DPI — at
+        // 4K/250% (_scale = 2.5) the form is ~1200px, not ~3000px.
+        private const int FormWidthBase = 480;
+        private const int LabelWidth = 126;
+        private const int InputWidth = 314;
+        private const int InputHeight = 24;
+        private const int RowHeight = 32;
+        private const int LeftMargin = 16;
+        private const int InputLeft = 150;
+        private const int StartYBase = 100;
 
         private static readonly Dictionary<string, string> FieldLabels =
             new Dictionary<string, string>
@@ -142,14 +146,15 @@ namespace PDMLite
         {
             bool multiCfg = _configIssues != null;
 
-            // Point sizes (× _scale). Chosen to match the form's prior
-            // readability at 100% while now scaling cleanly to any DPI.
-            _headerFont  = new Font("Segoe UI", 13.5f * _scale, FontStyle.Bold);
-            _subFont     = new Font("Segoe UI",  9.5f * _scale);
-            _sectionFont = new Font("Segoe UI", 11.5f * _scale, FontStyle.Bold);
-            _labelFont   = new Font("Segoe UI", 10.5f * _scale);
-            _inputFont   = new Font("Segoe UI", 10.5f * _scale);
-            _buttonFont  = new Font("Segoe UI", 10.5f * _scale, FontStyle.Bold);
+            // Base font sizes (× _scale) calibrated to the house dialogs
+            // (cf. ConfigRevisionPickerForm: title 6f, body 3.7f) so the text
+            // is the same physical size as the rest of the app at any DPI.
+            _headerFont  = new Font("Segoe UI", 5.5f * _scale, FontStyle.Bold);
+            _subFont     = new Font("Segoe UI", 3.4f * _scale);
+            _sectionFont = new Font("Segoe UI", 4.1f * _scale, FontStyle.Bold);
+            _labelFont   = new Font("Segoe UI", 3.7f * _scale);
+            _inputFont   = new Font("Segoe UI", 3.7f * _scale);
+            _buttonFont  = new Font("Segoe UI", 3.9f * _scale, FontStyle.Bold);
 
             this.Text = "BCore PDM — Complete Required Properties";
             this.StartPosition = FormStartPosition.CenterScreen;
@@ -172,10 +177,10 @@ namespace PDMLite
                 Font = _headerFont,
                 ForeColor = Color.FromArgb(180, 50, 50),
                 AutoSize = true,
-                Location = new Point(S(LeftMargin), S(40))
+                Location = new Point(S(LeftMargin), S(16))
             };
             this.Controls.Add(headerLbl);
-            int y = headerLbl.Bottom + S(12);
+            int y = headerLbl.Bottom + S(6);
 
             // ── Subtitle (wraps via MaximumSize, grows vertically) ────────
             Label subLbl = new Label
@@ -190,18 +195,18 @@ namespace PDMLite
                 Location = new Point(S(LeftMargin), y)
             };
             this.Controls.Add(subLbl);
-            y = subLbl.Bottom + S(12);
+            y = subLbl.Bottom + S(6);
 
             // ── Divider (below the subtitle) ──────────────────────────────
             Panel divider = new Panel
             {
                 BackColor = Color.FromArgb(200, 210, 220),
-                Height = Math.Max(1, S(2)),
+                Height = Math.Max(1, S(1)),
                 Width = contentWidth,
                 Location = new Point(S(LeftMargin), y)
             };
             this.Controls.Add(divider);
-            y = divider.Bottom + S(14);
+            y = divider.Bottom + S(8);
 
             // ── Rows live in a scrollable panel so any number of configs ×
             //    fields fits on screen (buttons stay fixed below the panel) ──
@@ -250,11 +255,11 @@ namespace PDMLite
                         Text = FieldLabels[field] + " *",
                         Font = _sectionFont,
                         AutoSize = true,           // bold header never clips
-                        Location = new Point(S(LeftMargin), ry + S(10)),
+                        Location = new Point(S(LeftMargin), ry + S(6)),
                         ForeColor = Color.FromArgb(44, 85, 128)
                     };
                     rowsPanel.Controls.Add(fieldHdr);
-                    ry = fieldHdr.Bottom + S(6);
+                    ry = fieldHdr.Bottom + S(4);
 
                     foreach (string cfg in needy)
                         ry = AddFieldRow(rowsPanel, field,
@@ -265,20 +270,21 @@ namespace PDMLite
             // Cap the rows area to the screen so long lists scroll instead of
             // pushing the buttons off-screen.
             int maxRows = Screen.PrimaryScreen.WorkingArea.Height
-                          - panelTop - S(160);
+                          - panelTop - S(80);
             if (maxRows < S(RowHeight)) maxRows = S(RowHeight);
-            rowsPanel.Height = Math.Min(ry + S(8), maxRows);
+            rowsPanel.Height = Math.Min(ry + S(6), maxRows);
             this.Controls.Add(rowsPanel);
 
-            int btnY = rowsPanel.Bottom + S(20);
+            int btnH = S(26);
+            int btnY = rowsPanel.Bottom + S(10);
 
             // ── Buttons ───────────────────────────────────────────────────
             Button btnSave = new Button
             {
                 Text = "Save Properties",
                 Font = _buttonFont,
-                Width = S(300),
-                Height = S(44),
+                Width = S(150),
+                Height = btnH,
                 Location = new Point(S(InputLeft), btnY),
                 BackColor = Color.FromArgb(0, 122, 204),
                 ForeColor = Color.White,
@@ -292,9 +298,9 @@ namespace PDMLite
             {
                 Text = "Cancel",
                 Font = _buttonFont,
-                Width = S(160),
-                Height = S(44),
-                Location = new Point(S(InputLeft) + S(316), btnY),
+                Width = S(84),
+                Height = btnH,
+                Location = new Point(S(InputLeft) + S(158), btnY),
                 BackColor = Color.FromArgb(220, 220, 220),
                 ForeColor = Color.FromArgb(60, 60, 60),
                 FlatStyle = FlatStyle.Flat,
@@ -308,7 +314,7 @@ namespace PDMLite
             this.CancelButton = btnCancel;
 
             // ── Final form height: fit panel + buttons + bottom padding ───
-            this.ClientSize = new Size(S(FormWidthBase), btnY + S(44) + S(24));
+            this.ClientSize = new Size(S(FormWidthBase), btnY + btnH + S(14));
         }
 
         // Adds one label+input row for `field` targeting `configName` (null =

@@ -164,9 +164,9 @@ WinForms dialog for missing properties. DPI-AWARE (house convention): _scale = g
 
 TWO MODES via two constructors: (1) ACTIVE-CONFIG mode — PropertyForm(doc, List<string> emptyFields), one row per missing field, values written to the active configuration (save-time Rules 3/3.5); (2) MULTI-CONFIG mode — PropertyForm(doc, Dictionary<configName, List<missingFields>>), used by the RELEASE GATE: ONE dialog showing every configuration's missing fields, grouped BY FIELD with one row per config under each bold field header (rows labelled with the config name, indented), so the Master fills e.g. Material for every config in one pass with NO active-config switching; each row's value is written to ITS OWN config via SetProperty(doc, field, value, configName) and values may differ per config. Inputs are registered under a composite "{config}|{field}" key (_inputControls + _inputTargets). Rows live in a SCROLLABLE panel capped to the screen working area (buttons stay fixed below), so any number of configs × fields fits.
 
-\- Baseline sizes at 96 DPI (all × _scale via S()): formWidthBase=1200, labelWidth=360, inputWidth=480, inputHeight=46
+\- Baseline sizes (× _scale via S()) calibrated to the HOUSE UNIT SYSTEM (cf. ConfigRevisionPickerForm ~440-wide) so the dialog is the SAME physical size as the other BCore dialogs at any DPI — at 4K/250% (_scale=2.5) the form is ~1200px, not ~3000px: formWidthBase=480, labelWidth=126, inputWidth=314, inputHeight=24, rowHeight=32, leftMargin=16, inputLeft=150
 
-\- rowHeight=62, inputLeft=410, startYBase=200. Fonts (× _scale): header 13.5f bold, subtitle 9.5f, section 11.5f bold, label/input 10.5f, button 10.5f bold
+\- Fonts (× _scale, calibrated to house dialogs' 3.3–6f range): header 5.5f bold, subtitle 3.4f, section 4.1f bold, label/input 3.7f, button 3.9f bold
 
 \- DateTimePicker format: MM/dd/yyyy
 
