@@ -277,6 +277,20 @@ namespace PDMLite
                           - panelTop - S(80);
             if (maxRows < S(RowHeight)) maxRows = S(RowHeight);
             rowsPanel.Height = Math.Min(ry + S(6), maxRows);
+
+            // When the cap bites, AutoScroll shows a vertical scrollbar that
+            // would sit over the inputs' right edge (the right margin is
+            // thinner than a scrollbar at high DPI) — shrink the inputs by
+            // whatever part of the scrollbar the margin doesn't absorb.
+            if (ry + S(6) > maxRows)
+            {
+                int rightMargin = S(FormWidthBase) - S(InputLeft) - S(InputWidth);
+                int overlap = SystemInformation.VerticalScrollBarWidth
+                              - rightMargin + S(4);
+                if (overlap > 0)
+                    foreach (var row in _rows)
+                        row.Control.Width -= overlap;
+            }
             this.Controls.Add(rowsPanel);
 
             int btnH = S(26);
