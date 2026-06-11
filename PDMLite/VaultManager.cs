@@ -786,21 +786,55 @@ namespace PDMLite
             }
 
             // This programmatic save must bypass the released-file save lock.
+            // Save3 returns false when SOLIDWORKS refuses the save (read-only
+            // context, transient share error) — previously ignored, so the
+            // release continued and published a snapshot MISSING the just
+            // auto-filled CheckedBy/CheckedDate/PartWeight. Abort BEFORE any
+            // archive/export/DB step: at this point nothing has been mutated.
+            bool releaseSaveOk;
             PDMLiteAddin.SuppressSaveValidation = true;
-            try { doc.Save3((int)swSaveAsOptions_e.swSaveAsOptions_Silent, 0, 0); }
+            try
+            {
+                releaseSaveOk = doc.Save3(
+                    (int)swSaveAsOptions_e.swSaveAsOptions_Silent, 0, 0);
+            }
             finally { PDMLiteAddin.SuppressSaveValidation = false; }
 
+            if (!releaseSaveOk)
+            {
+                AuditLogger.Log("ReleaseFailed", user,
+                    Path.GetFileName(filePath), partNo, rev,
+                    "Save3 failed before export");
+                MessageBox.Show(
+                    "Release ABORTED — SOLIDWORKS could not save the file:\n" +
+                    filePath + "\n\n" +
+                    "Nothing was exported and the vault was NOT changed.\n" +
+                    "The file may be read-only on disk or the network share " +
+                    "unavailable. Resolve the save problem and release again.",
+                    "BCore PDM — Release Failed",
+                    MessageBoxButtons.OK, MessageBoxIcon.Error);
+                return;
+            }
+
             // ── Archive old exports + export files ────────────────────────
+            // Every primary export (PDF / STEP) is verified. A failed export
+            // ABORTS the release before the DB is touched: previously the file
+            // was still marked Released with NO current export on disk (the old
+            // one had already been archived) and the user saw a success dialog.
+            bool exportOk = true;
+            var failedExports = new List<string>();
+
             if (isDrawing)
             {
                 ArchiveOldExports(partNo, isDrawing: true);
-                ExportManager.ExportAll(doc, ExportRoot, stamp);
+                exportOk = ExportManager.ExportAll(doc, ExportRoot, stamp);
+                if (!exportOk) failedExports.Add(stamp + ".pdf");
 
                 // SOLIDWORKS' own PDF auto-open was suppressed (it would have
                 // shown the un-watermarked file). The watermark is now stamped on
                 // disk, so open the finished PDF ourselves for an interactive
                 // release. Skipped for chained/bulk releases (suppressPrompts).
-                if (!suppressPrompts)
+                if (exportOk && !suppressPrompts)
                     ExportManager.OpenPdfExternally(
                         Path.Combine(ExportRoot, "PDF", stamp + ".pdf"));
             }
@@ -812,7 +846,8 @@ namespace PDMLite
                     // Single-config: existing path
                     ArchiveOldExports(partNo.Replace(".", ""), isDrawing: false,
                         bomIdentifier: partNo);
-                    ExportManager.ExportAll(doc, ExportRoot, stamp);
+                    exportOk = ExportManager.ExportAll(doc, ExportRoot, stamp);
+                    if (!exportOk) failedExports.Add(stamp + ".step");
                 }
                 else
                 {
@@ -855,7 +890,9 @@ namespace PDMLite
                                 continue;
                             }
                             doc.ShowConfiguration2(c);
-                            ExportManager.ExportStepOnly(doc, ExportRoot, cfgStamp);
+                            if (!ExportManager.ExportStepOnly(doc, ExportRoot,
+                                    cfgStamp))
+                                failedExports.Add(cfgStamp + ".step");
                         }
                     }
                     finally
@@ -865,6 +902,7 @@ namespace PDMLite
                             doc.ShowConfiguration2(origCfgEx);
                     }
                     ExportManager.ExportFlatPatternOnly(doc, ExportRoot, stamp);
+                    if (failedExports.Count > 0) exportOk = false;
 
                     if (collidedStamps.Count > 0)
                         MessageBox.Show(
@@ -877,6 +915,24 @@ namespace PDMLite
                             "BCore PDM — Duplicate Export Skipped",
                             MessageBoxButtons.OK, MessageBoxIcon.Warning);
                 }
+            }
+
+            if (!exportOk)
+            {
+                AuditLogger.Log("ReleaseFailed", user,
+                    Path.GetFileName(filePath), partNo, rev,
+                    "export failed: " + string.Join(", ", failedExports));
+                MessageBox.Show(
+                    "Release ABORTED — these exports FAILED:\n\n  • " +
+                    string.Join("\n  • ", failedExports) + "\n\n" +
+                    "The file was NOT marked Released and remains editable " +
+                    "(WIP). The previous exports (if any) were moved to the " +
+                    "ARCHIVE folder and can be restored from there.\n\n" +
+                    "Check that the EXPORTS folder is reachable and writable, " +
+                    "then release again.",
+                    "BCore PDM — Release Failed",
+                    MessageBoxButtons.OK, MessageBoxIcon.Error);
+                return;
             }
 
             // ── BOM CSV (assemblies only, top-level) ──────────────────────
@@ -923,13 +979,28 @@ namespace PDMLite
             }
             catch (Exception ex)
             {
+                // ABORT — do NOT fall through to the DB write. Previously this
+                // warned and then marked the file Released anyway, leaving the
+                // DB saying Released while the RELEASED folder held a stale
+                // (or no) snapshot and the WIP file was never set read-only.
+                // Re-clear read-only (it may have been applied before the
+                // failing step) so the aborted release leaves a consistent,
+                // editable WIP state.
+                SetReadOnly(filePath, false);
+                AuditLogger.Log("ReleaseFailed", user,
+                    Path.GetFileName(filePath), partNo, rev,
+                    "copy to RELEASED failed: " + ex.Message);
                 MessageBox.Show(
-                    "WARNING: the released copy could not be updated in:\n" +
-                    RelFolder + "\n\n" + ex.Message + "\n\n" +
-                    "The exports were updated, but the SOLIDWORKS file in the " +
-                    "RELEASED folder is STALE. Check folder/file permissions.",
-                    "BCore PDM — Released Copy Failed",
-                    MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                    "Release ABORTED — the file could not be copied to the " +
+                    "RELEASED folder:\n" + RelFolder + "\n\n" + ex.Message +
+                    "\n\n" +
+                    "The vault database was NOT updated — the file remains " +
+                    "editable (WIP). The new exports are already in EXPORTS " +
+                    "and will be overwritten by the next successful release.\n\n" +
+                    "Check folder/file permissions and release again.",
+                    "BCore PDM — Release Failed",
+                    MessageBoxButtons.OK, MessageBoxIcon.Error);
+                return;
             }
 
             // ── Update database ───────────────────────────────────────────
@@ -1215,9 +1286,56 @@ namespace PDMLite
             {
                 PropertyValidator.SetProperty(fresh, "Revision", nextRev);
             }
+            bool revSaveOk;
             PDMLiteAddin.SuppressSaveValidation = true;
-            try { fresh.Save3((int)swSaveAsOptions_e.swSaveAsOptions_Silent, 0, 0); }
+            try
+            {
+                revSaveOk = fresh.Save3(
+                    (int)swSaveAsOptions_e.swSaveAsOptions_Silent, 0, 0);
+            }
             finally { PDMLiteAddin.SuppressSaveValidation = false; }
+
+            if (!revSaveOk)
+            {
+                // The revision bump never reached disk — previously ignored, so
+                // the DB went WIP at the new rev and the drawing was bumped
+                // while the model stayed at the OLD rev on disk (exactly the
+                // divergence this feature fights). Abort BEFORE any DB write:
+                // revert the in-memory property, restore the Released state
+                // (read-only) so disk, memory and DB stay consistent.
+                try
+                {
+                    if (isMultiCfg)
+                    {
+                        foreach (string cfgN in selectedCfgs)
+                        {
+                            string cr = cfgCurrentRevs.ContainsKey(cfgN)
+                                ? cfgCurrentRevs[cfgN] : currentRev;
+                            PropertyValidator.SetProperty(
+                                fresh, "Revision", cr, cfgN);
+                        }
+                    }
+                    else
+                    {
+                        PropertyValidator.SetProperty(
+                            fresh, "Revision", currentRev);
+                    }
+                }
+                catch { }
+                SetReadOnly(filePath, true);
+                AuditLogger.Log("NewRevisionFailed", user,
+                    Path.GetFileName(filePath), partNo, nextRev,
+                    "Save3 failed — revision bump never reached disk");
+                MessageBox.Show(
+                    "New Revision ABORTED — SOLIDWORKS could not save the " +
+                    "revision bump to disk:\n" + filePath + "\n\n" +
+                    "The file is still Released at REV " + currentRev + " and " +
+                    "the vault was NOT changed. Close the file (do not save) " +
+                    "and try again.",
+                    "BCore PDM — New Revision Failed",
+                    MessageBoxButtons.OK, MessageBoxIcon.Error);
+                return;
+            }
 
             // Reset to WIP — source path only (no separate entry for RELEASED copy)
             DatabaseManager.UnlockFile(filePath);
@@ -1492,11 +1610,27 @@ namespace PDMLite
                     if (drwDoc != null)
                     {
                         PropertyValidator.SetProperty(drwDoc, "Revision", nextRev);
+                        bool drwSaveOk;
                         PDMLiteAddin.SuppressSaveValidation = true;
-                        try { drwDoc.Save3(
-                            (int)swSaveAsOptions_e.swSaveAsOptions_Silent, 0, 0); }
+                        try
+                        {
+                            drwSaveOk = drwDoc.Save3(
+                                (int)swSaveAsOptions_e.swSaveAsOptions_Silent,
+                                0, 0);
+                        }
                         finally { PDMLiteAddin.SuppressSaveValidation = false; }
                         PDMLiteAddin.SwApp.CloseDoc(drwPath);
+                        // Surface a failed bump in the summary instead of
+                        // silently reporting success with a stale rev on disk.
+                        if (!drwSaveOk)
+                            result += "  (WARNING: its Revision property could " +
+                                "NOT be saved — open the drawing and set REV " +
+                                nextRev + " manually)";
+                    }
+                    else
+                    {
+                        result += "  (WARNING: could not open the drawing to " +
+                            "bump its Revision to REV " + nextRev + ")";
                     }
                 }
                 catch { }

@@ -89,6 +89,11 @@ namespace PDMLite
     {
         private const string VaultFolder = @"N:\PDM-SolidWorks\VAULT";
         private const string DataFile = @"N:\PDM-SolidWorks\VAULT\vault.xml";
+        // One-generation backup, refreshed by every successful atomic Save
+        // (File.Replace's backup argument — the previous vault.xml is renamed,
+        // not deleted). LoadOrCreate restores from it when vault.xml is missing
+        // or corrupt, so a crash mid-write can never cost more than one save.
+        private const string BackupFile = @"N:\PDM-SolidWorks\VAULT\vault.xml.bak";
         private const string WipRoot = @"N:\PDM-SolidWorks\WIP";
         private const string ScrapRoot = @"N:\PDM-SolidWorks\SCRAP";
 
@@ -119,6 +124,14 @@ namespace PDMLite
 
             if (!File.Exists(DataFile))
             {
+                // A missing vault.xml on an ESTABLISHED vault (crash mid-write,
+                // accidental delete) must never silently bootstrap an empty
+                // database over years of records — restore the last good backup
+                // instead. Only a genuinely fresh vault (no backup either)
+                // creates the empty template.
+                var restored = TryRestoreFromBackup("vault.xml missing");
+                if (restored != null) return restored;
+
                 var doc = new XDocument(
                     new XElement("BCorePDMVault",
                         new XElement("Files"),
@@ -136,11 +149,39 @@ namespace PDMLite
                         new XElement("RevisionRequests")
                     )
                 );
-                doc.Save(DataFile);
+                Save(doc); // atomic-path write, not a direct overwrite
                 return doc;
             }
 
-            return XDocument.Load(DataFile);
+            try
+            {
+                return XDocument.Load(DataFile);
+            }
+            catch (System.Xml.XmlException)
+            {
+                // Truncated/corrupt vault.xml (a crash inside the non-atomic
+                // save fallback). Restore the last good backup rather than
+                // failing every DB operation until someone hand-repairs the XML.
+                var restored = TryRestoreFromBackup("vault.xml corrupt");
+                if (restored != null) return restored;
+                throw;
+            }
+        }
+
+        // Restore vault.xml from vault.xml.bak (refreshed by every successful
+        // atomic Save). Returns the restored document, or null when no usable
+        // backup exists. Audit-logged so a restore is never invisible.
+        private static XDocument TryRestoreFromBackup(string reason)
+        {
+            try
+            {
+                if (!File.Exists(BackupFile)) return null;
+                var doc = XDocument.Load(BackupFile); // proves the backup parses
+                File.Copy(BackupFile, DataFile, overwrite: true);
+                LogDbEvent("VaultRestoredFromBackup", reason);
+                return doc;
+            }
+            catch { return null; }
         }
 
         // Write atomically: serialise to a temp file, then atomically replace the
@@ -156,17 +197,52 @@ namespace PDMLite
             string tmp = DataFile + "." + Environment.MachineName + "."
                 + System.Diagnostics.Process.GetCurrentProcess().Id + ".tmp";
             doc.Save(tmp);
+
+            // Atomic replace, with brief retries: a degraded-mode reader on
+            // another machine can hold vault.xml open (share-read) for a moment,
+            // which blocks Replace/Move. Most such blockers clear in well under
+            // a second. File.Replace's third argument keeps the PREVIOUS
+            // vault.xml as vault.xml.bak — the recovery file LoadOrCreate
+            // restores from (it is a rename, so it costs nothing extra).
+            for (int attempt = 0; attempt < 5; attempt++)
+            {
+                try
+                {
+                    if (File.Exists(DataFile))
+                        File.Replace(tmp, DataFile, BackupFile);
+                    else
+                        File.Move(tmp, DataFile);
+                    return;
+                }
+                catch (IOException) { }
+                catch (UnauthorizedAccessException) { }
+                System.Threading.Thread.Sleep(200);
+            }
+
+            // File.Replace genuinely unavailable (some SMB configs). The old
+            // fallback here was doc.Save(DataFile) — a truncate-then-write of
+            // the ONLY copy of the database, where a crash mid-write meant
+            // total data loss. Instead: refresh the backup, then delete+move
+            // the fully-written temp into place. The unsafe window shrinks to
+            // a single rename, and even a crash inside it leaves BOTH the .bak
+            // and the .tmp on disk for recovery. Audit-logged (throttled) so a
+            // share that never supports atomic replace is visible, not silent.
+            LogDbEvent("VaultSaveFallback", "atomic File.Replace failed");
             try
             {
-                if (File.Exists(DataFile))
-                    File.Replace(tmp, DataFile, null);
-                else
-                    File.Move(tmp, DataFile);
+                try
+                {
+                    if (File.Exists(DataFile))
+                        File.Copy(DataFile, BackupFile, overwrite: true);
+                }
+                catch { }
+                if (File.Exists(DataFile)) File.Delete(DataFile);
+                File.Move(tmp, DataFile);
             }
             catch
             {
-                // File.Replace can fail on some SMB configs — fall back to a
-                // direct overwrite so the save still lands.
+                // Absolute last resort — the original direct overwrite, kept so
+                // a save still lands when even delete+move is blocked.
                 doc.Save(DataFile);
                 try { if (File.Exists(tmp)) File.Delete(tmp); } catch { }
             }
@@ -189,6 +265,17 @@ namespace PDMLite
 
         [ThreadStatic] private static FileStream _procLockStream;
         [ThreadStatic] private static int _procLockDepth;
+        // True while the current thread's critical section runs WITHOUT the
+        // cross-machine lock (acquisition failed → degraded last-writer-wins
+        // mode). Janitorial writes (stale-session purge, orphan auto-purge,
+        // presence bookkeeping) check LockDegraded and skip their Save: in
+        // degraded mode a mere READ must never write its stale snapshot back
+        // over other machines' committed changes. User-initiated mutations
+        // (UpsertFile, SetFileStatus, …) still proceed — degraded, never blocked.
+        [ThreadStatic] private static bool _procLockDegraded;
+
+        private static bool LockDegraded
+            => _procLockDepth > 0 && _procLockDegraded;
 
         private static IDisposable AcquireProcessLock()
         {
@@ -199,17 +286,25 @@ namespace PDMLite
                 return new LockReleaser();
             }
 
+            // The lock is held for a full load→save of vault.xml over SMB, so
+            // hold times grow with the vault — the retry budget must comfortably
+            // exceed a worst-case hold, or every busy moment silently degrades
+            // to last-writer-wins (the original 3 s budget did exactly that at
+            // scale). 100 × 300 ms = 30 s: a save blocked for a few seconds is
+            // far cheaper than a silently lost write.
             // Spin only on genuine sharing violations (another machine holds the
             // lock). Anything else (path unreachable / access denied) means the
             // network is down or misconfigured — don't waste seconds retrying;
             // fall through and let the subsequent vault.xml load surface the error.
-            for (int attempt = 0; attempt < 30; attempt++)
+            string failReason = "contention timeout (30s)";
+            for (int attempt = 0; attempt < 100; attempt++)
             {
                 try
                 {
                     _procLockStream = new FileStream(LockFilePath,
                         FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None);
                     _procLockDepth = 1;
+                    _procLockDegraded = false;
                     return new LockReleaser();
                 }
                 catch (IOException ex)
@@ -217,18 +312,30 @@ namespace PDMLite
                     int hr = ex.HResult & 0xFFFF;
                     bool sharing = hr == 32 /* ERROR_SHARING_VIOLATION */
                                 || hr == 33 /* ERROR_LOCK_VIOLATION   */;
-                    if (!sharing) break;
-                    System.Threading.Thread.Sleep(100);
+                    if (!sharing)
+                    {
+                        failReason = "I/O error on vault.lock: " + ex.Message;
+                        break;
+                    }
+                    System.Threading.Thread.Sleep(300);
                 }
-                catch (UnauthorizedAccessException) { break; }
+                catch (UnauthorizedAccessException)
+                {
+                    failReason = "access denied on vault.lock";
+                    break;
+                }
             }
 
             // Couldn't acquire (persistent contention or network issue). Proceed
-            // WITHOUT the lock rather than blocking the user forever — this is the
-            // pre-existing last-writer-wins behaviour, never worse than before.
+            // WITHOUT the lock rather than blocking the user forever — degraded
+            // last-writer-wins, never worse than the pre-lock behaviour. But the
+            // degradation is now OBSERVABLE (audit-logged, throttled) and
+            // janitorial writes are suppressed while it is active (LockDegraded).
             // depth=1 so the matching using-dispose stays balanced.
             _procLockStream = null;
             _procLockDepth = 1;
+            _procLockDegraded = true;
+            LogDbEvent("LockDegraded", failReason);
             return new LockReleaser();
         }
 
@@ -240,12 +347,41 @@ namespace PDMLite
                 if (_done) return;
                 _done = true;
                 if (_procLockDepth > 0) _procLockDepth--;
-                if (_procLockDepth == 0 && _procLockStream != null)
+                if (_procLockDepth == 0)
                 {
-                    try { _procLockStream.Dispose(); } catch { }
-                    _procLockStream = null;
+                    _procLockDegraded = false;
+                    if (_procLockStream != null)
+                    {
+                        try { _procLockStream.Dispose(); } catch { }
+                        _procLockStream = null;
+                    }
                 }
             }
+        }
+
+        // Throttled audit logging for DB-layer health events (degraded lock,
+        // non-atomic save fallback, backup restore). At most one entry per
+        // event type per 5 minutes per process, so a persistent condition is
+        // visible in the Audit Report without flooding audit.csv. Never throws.
+        private static readonly Dictionary<string, DateTime> _lastDbEventLog =
+            new Dictionary<string, DateTime>(StringComparer.OrdinalIgnoreCase);
+
+        private static void LogDbEvent(string action, string note)
+        {
+            try
+            {
+                lock (_lastDbEventLog)
+                {
+                    DateTime last;
+                    if (_lastDbEventLog.TryGetValue(action, out last) &&
+                        (DateTime.Now - last).TotalMinutes < 5)
+                        return;
+                    _lastDbEventLog[action] = DateTime.Now;
+                }
+                AuditLogger.Log(action, "system", "vault.xml", "", "",
+                    note + " (machine " + Environment.MachineName + ")");
+            }
+            catch { }
         }
 
         public static void Initialize()
@@ -648,6 +784,10 @@ namespace PDMLite
             if (string.IsNullOrWhiteSpace(filePath)) return;
             lock (_lock) using (AcquireProcessLock())
             {
+                // Presence is purely advisory — never worth a degraded-mode
+                // write-back of a stale whole-vault snapshot.
+                if (LockDegraded) return;
+
                 var doc = LoadOrCreate();
                 var sessions = EnsureOpenSessions(doc);
 
@@ -728,7 +868,11 @@ namespace PDMLite
                     });
                 }
 
-                if (stale.Count > 0)
+                // Janitorial: skip the stale-session purge in degraded mode —
+                // a READ must never write a stale snapshot back (the entries
+                // are already skipped above; the 24h backstop catches them on
+                // a later, lock-held pass).
+                if (stale.Count > 0 && !LockDegraded)
                 {
                     foreach (var el in stale) el.Remove();
                     Save(doc);
@@ -744,6 +888,8 @@ namespace PDMLite
             if (string.IsNullOrWhiteSpace(filePath)) return;
             lock (_lock) using (AcquireProcessLock())
             {
+                if (LockDegraded) return; // advisory presence — see RegisterOpenSession
+
                 var doc = LoadOrCreate();
                 var sessions = doc.Root.Element("OpenSessions");
                 if (sessions == null) return;
@@ -776,6 +922,8 @@ namespace PDMLite
             if (string.IsNullOrWhiteSpace(machine)) return;
             lock (_lock) using (AcquireProcessLock())
             {
+                if (LockDegraded) return; // advisory presence — see RegisterOpenSession
+
                 var doc = LoadOrCreate();
                 var sessions = doc.Root.Element("OpenSessions");
                 if (sessions == null) return;
@@ -877,8 +1025,13 @@ namespace PDMLite
                 var doc = LoadOrCreate();
 
                 // Network-down guard for the auto-purge (see method summary).
-                bool vaultOnline = false;
-                try { vaultOnline = Directory.Exists(WipRoot); } catch { }
+                // Also never purge in degraded-lock mode: a search is a READ,
+                // and writing a stale whole-vault snapshot back without the
+                // cross-machine lock can erase other machines' committed
+                // changes just to delete an orphan record.
+                bool canPurge = false;
+                try { canPurge = Directory.Exists(WipRoot) && !LockDegraded; }
+                catch { }
 
                 var toPurge = new List<XElement>();
 
@@ -923,7 +1076,7 @@ namespace PDMLite
                                    !File.Exists(filePath);
                     if (missing)
                     {
-                        if (vaultOnline)
+                        if (canPurge)
                         {
                             toPurge.Add(el);
                             purged.Add(new VaultFile
