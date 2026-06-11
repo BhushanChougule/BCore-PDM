@@ -54,7 +54,6 @@ namespace PDMLite
 
         private DataGridView _grid;
         private TextBox _search;
-        private Label _summary;
         private Label _title;
         private Button _btnRefresh;
         private Button _btnExport;
@@ -63,6 +62,23 @@ namespace PDMLite
         private Panel _bottomPanel;
         private System.Windows.Forms.Timer _searchTimer;
         private Font _cellBold; // shared bold font: Status cell + header text
+
+        // Summary strip: clickable count "links" (Total/WIP/Released/Locked/
+        // Broken Refs act as quick filters) + a plain showing/page label.
+        private FlowLayoutPanel _summaryPanel;
+        private Label _lblTotal, _lblWip, _lblReleased, _lblLocked, _lblBroken, _lblShowing;
+        private Font _summaryFont;       // base (bold)
+        private Font _summaryFontActive; // active quick-filter (bold + underline)
+        private ToolTip _summaryTip;     // shared tip for the clickable counts
+        // Special non-column filter: show only files with broken references
+        // (HasBrokenRefs is a flag, not a column, so it can't live in _colFilters).
+        private bool _brokenRefsOnly = false;
+
+        // Row right-click menu (Open / Open linked / Copy path / Open folder).
+        private ContextMenuStrip _rowMenu;
+        private ToolStripMenuItem _miOpen, _miOpenLinked, _miCopyPath, _miOpenFolder;
+        private int _menuRowIndex = -1;   // grid row the menu was opened on
+        private string _menuLinkedPath;   // drawing for a model row, model for a drawing row
 
         private const int VisibleRows = 20;     // fixed grid height = 20 rows
         private const int PageSize = VisibleRows; // 20 rows per page (the "20 row rule")
@@ -136,11 +152,13 @@ namespace PDMLite
 
             Font fTitle  = new Font("Segoe UI", 7f * _scale, FontStyle.Bold);
             Font fCtrl   = new Font("Segoe UI", 4f * _scale);
-            Font fSummary = new Font("Segoe UI", 4f * _scale, FontStyle.Bold);
             Font fGrid   = new Font("Segoe UI", 3.3f * _scale);
             Font fBtn    = new Font("Segoe UI", 4f * _scale, FontStyle.Bold);
             _cellBold    = new Font("Segoe UI", 3.3f * _scale, FontStyle.Bold);
             _pagerFont   = new Font("Segoe UI", 4f * _scale);
+            _summaryFont       = new Font("Segoe UI", 4f * _scale, FontStyle.Bold);
+            _summaryFontActive = new Font("Segoe UI", 4f * _scale,
+                FontStyle.Bold | FontStyle.Underline);
 
             // ── Top panel: title, search, Refresh, Export, Clear ──────────
             // CENTERED horizontally by LayoutTopControls (on load + resize).
@@ -198,18 +216,43 @@ namespace PDMLite
             _topPanel.Controls.Add(_btnClear);
 
             int summaryY = rowY + ctrlH + S(10);
-            _summary = new Label
+            // Summary strip = a row of count "links". Total/WIP/Released/Locked/
+            // Broken Refs are clickable quick filters; the trailing label shows the
+            // page range. A FlowLayoutPanel lays them out left-to-right and is
+            // centred as one unit by LayoutTopControls.
+            _summaryPanel = new FlowLayoutPanel
             {
-                Font = fSummary,
-                ForeColor = cTextGray,
                 AutoSize = true,
+                AutoSizeMode = AutoSizeMode.GrowAndShrink,
+                WrapContents = false,
+                FlowDirection = FlowDirection.LeftToRight,
+                BackColor = cBg,
+                Margin = Padding.Empty,
+                Padding = Padding.Empty,
                 Location = new Point(S(14), summaryY)
             };
-            _topPanel.Controls.Add(_summary);
+            _lblTotal    = MakeCountLabel("All files (clear filters)", () => ClearAllFilters());
+            _lblWip      = MakeCountLabel("Filter to WIP",      () => ToggleStatusFilter("WIP"));
+            _lblReleased = MakeCountLabel("Filter to Released", () => ToggleStatusFilter("Released"));
+            _lblLocked   = MakeCountLabel("Filter to Locked",   () => ToggleStatusFilter("Locked"));
+            _lblBroken   = MakeCountLabel("Show only broken references", () => ToggleBrokenFilter());
+            _lblShowing  = new Label
+            {
+                Font = _summaryFont,
+                ForeColor = cTextGray,
+                AutoSize = true,
+                Margin = new Padding(S(6), 0, 0, 0)
+            };
+            _summaryPanel.Controls.AddRange(new Control[]
+            {
+                _lblTotal, _lblWip, _lblReleased, _lblLocked, _lblBroken, _lblShowing
+            });
+            _topPanel.Controls.Add(_summaryPanel);
 
             // Tighten the panel to the summary so the grid sits right below it
-            // (removes the dead space under the counts).
-            _topPanel.Height = summaryY + _summary.PreferredHeight + S(6);
+            // (removes the dead space under the counts). Use the font line height
+            // (stable regardless of label text) so the panel never clips.
+            _topPanel.Height = summaryY + (int)_summaryFont.GetHeight() + S(10);
             _topPanel.Resize += (s, e) => LayoutTopControls();
 
             // ── Bottom panel: Close ───────────────────────────────────────
@@ -266,10 +309,24 @@ namespace PDMLite
             _grid.DefaultCellStyle.Padding = new Padding(S(4), 0, 0, 0);
             _grid.AlternatingRowsDefaultCellStyle.BackColor = cRowAlt;
             _grid.CellDoubleClick += Grid_CellDoubleClick;
+            _grid.MouseDown += Grid_MouseDown; // right-click row menu
             // Excel-style header: paint the filter arrow + sort glyph; split the
             // header click between sort (text) and filter (arrow).
             _grid.CellPainting += Grid_CellPainting;
             _grid.ColumnHeaderMouseClick += Grid_ColumnHeaderMouseClick;
+
+            // Row right-click menu: Open, Open linked drawing/model, Copy path,
+            // Open containing folder. Item text/enabled is set per-row in
+            // Grid_MouseDown (the linked item flips Drawing↔Model by row type).
+            _rowMenu = new ContextMenuStrip { Font = fCtrl };
+            _miOpen       = new ToolStripMenuItem("Open", null, (s, e) => MenuOpen());
+            _miOpenLinked = new ToolStripMenuItem("Open Drawing", null, (s, e) => MenuOpenLinked());
+            _miCopyPath   = new ToolStripMenuItem("Copy File Path", null, (s, e) => MenuCopyPath());
+            _miOpenFolder = new ToolStripMenuItem("Open Containing Folder", null, (s, e) => MenuOpenFolder());
+            _rowMenu.Items.AddRange(new ToolStripItem[]
+            {
+                _miOpen, _miOpenLinked, new ToolStripSeparator(), _miCopyPath, _miOpenFolder
+            });
             // VirtualMode providers — the grid pulls value / colour / tooltip for
             // ONLY the visible cells, so nothing is materialised for off-screen
             // rows (the key to handling tens of thousands of files).
@@ -303,6 +360,10 @@ namespace PDMLite
                 _searchTimer.Dispose();
                 _cellBold?.Dispose();
                 _pagerFont?.Dispose();
+                _summaryFont?.Dispose();
+                _summaryFontActive?.Dispose();
+                _summaryTip?.Dispose();
+                _rowMenu?.Dispose();
             };
         }
 
@@ -425,6 +486,7 @@ namespace PDMLite
             string term = (_search.Text ?? "").Trim().ToLowerInvariant();
             foreach (var f in _all)
             {
+                if (_brokenRefsOnly && !f.HasBrokenRefs) continue;
                 bool ok = true;
                 foreach (var kv in _colFilters)
                 {
@@ -462,6 +524,8 @@ namespace PDMLite
 
             var view = _all.Where(f =>
             {
+                // Broken-refs-only quick filter (from the summary strip).
+                if (_brokenRefsOnly && !f.HasBrokenRefs) return false;
                 // Per-column (Excel-style) value filters — ALL must pass.
                 // FilterKey (not CellText) so date columns match by DAY.
                 foreach (var kv in _colFilters)
@@ -714,6 +778,7 @@ namespace PDMLite
         private void ClearAllFilters()
         {
             _colFilters.Clear();
+            _brokenRefsOnly = false;                  // clear the broken-refs view
             _sortColumn = DefaultSortColumn;          // back to newest-first
             _sortDir = ListSortDirection.Descending;
             _search.Text = "";       // triggers a debounced re-filter…
@@ -937,8 +1002,9 @@ namespace PDMLite
             _btnExport.Left  = _btnRefresh.Right + gap;
             _btnClear.Left   = _btnExport.Right + gap;
 
-            if (_summary != null)
-                _summary.Left = Math.Max(S(14), (panelW - _summary.Width) / 2);
+            if (_summaryPanel != null)
+                _summaryPanel.Left = Math.Max(S(14),
+                    (panelW - _summaryPanel.Width) / 2);
         }
 
         private void UpdateSummary(int showing)
@@ -948,13 +1014,70 @@ namespace PDMLite
             int lck = _all.Count(f => Eq(f.Status, "Locked"));
             int brk = _all.Count(f => f.HasBrokenRefs);
 
+            _lblTotal.Text    = $"Total: {_all.Count}";
+            _lblWip.Text      = $"WIP: {wip}";
+            _lblReleased.Text = $"Released: {rel}";
+            _lblLocked.Text   = $"Locked: {lck}";
+            _lblBroken.Text   = $"Broken Refs: {brk}";
+
             int from = showing == 0 ? 0 : PageStart + 1;
             int to = Math.Min(showing, PageStart + PageSize);
-            _summary.Text =
-                $"Total: {_all.Count}      WIP: {wip}      Released: {rel}" +
-                $"      Locked: {lck}      Broken Refs: {brk}" +
-                $"          (Showing {from}–{to} of {showing}" +
+            _lblShowing.Text =
+                $"     (Showing {from}–{to} of {showing}" +
                 $" · Page {_page + 1} of {PageCount})";
+
+            // Underline the active quick-filter so it's obvious what's applied.
+            SetActive(_lblWip,      IsStatusFilter("WIP"));
+            SetActive(_lblReleased, IsStatusFilter("Released"));
+            SetActive(_lblLocked,   IsStatusFilter("Locked"));
+            SetActive(_lblBroken,   _brokenRefsOnly);
+        }
+
+        private void SetActive(Label l, bool active) =>
+            l.Font = active ? _summaryFontActive : _summaryFont;
+
+        // ── Summary quick-filter helpers ────────────────────────────────────
+        // A clickable count "link": blue, hand cursor. Text is set in
+        // UpdateSummary; the tip explains the click action.
+        private Label MakeCountLabel(string tip, Action onClick)
+        {
+            var l = new Label
+            {
+                Font = _summaryFont,
+                ForeColor = cBrand,
+                AutoSize = true,
+                Margin = new Padding(0, 0, S(14), 0),
+                Cursor = Cursors.Hand
+            };
+            if (_summaryTip == null) _summaryTip = new ToolTip();
+            _summaryTip.SetToolTip(l, tip);
+            if (onClick != null) l.Click += (s, e) => onClick();
+            return l;
+        }
+
+        // Is the Status column filtered to EXACTLY this one value?
+        private bool IsStatusFilter(string status)
+        {
+            HashSet<string> set;
+            return _colFilters.TryGetValue(3, out set)
+                && set.Count == 1 && set.Contains(status);
+        }
+
+        // Click a status count → toggle the Status column filter to that value.
+        private void ToggleStatusFilter(string status)
+        {
+            if (IsStatusFilter(status)) _colFilters.Remove(3);
+            else _colFilters[3] = new HashSet<string>(
+                new[] { status }, StringComparer.OrdinalIgnoreCase);
+            ApplyFilter();
+            _grid.Invalidate(); // repaint the Status header funnel glyph
+        }
+
+        // Click "Broken Refs" → toggle the broken-references-only view.
+        private void ToggleBrokenFilter()
+        {
+            _brokenRefsOnly = !_brokenRefsOnly;
+            ApplyFilter();
         }
 
         private static bool Eq(string a, string b) =>
@@ -973,11 +1096,119 @@ namespace PDMLite
         {
             int idx = PageStart + e.RowIndex;
             if (e.RowIndex < 0 || idx >= _view.Count) return;
-            string path = _view[idx].FilePath;
+            OpenDeferred(_view[idx].FilePath);
+        }
+
+        // ── Row right-click menu ────────────────────────────────────────────
+        private void Grid_MouseDown(object sender, MouseEventArgs e)
+        {
+            if (e.Button != MouseButtons.Right) return;
+            var hit = _grid.HitTest(e.X, e.Y);
+            if (hit.RowIndex < 0) return; // not on a data row (header / empty area)
+            int idx = PageStart + hit.RowIndex;
+            if (idx < 0 || idx >= _view.Count) return;
+
+            _menuRowIndex = hit.RowIndex;
+            // Select the row under the cursor for visual feedback (FullRowSelect).
+            _grid.CurrentCell = _grid[Math.Max(0, hit.ColumnIndex), hit.RowIndex];
+
+            // The linked item flips Drawing↔Model by row type; disabled if none.
+            // Resolved IN-MEMORY from _all (the dashboard never hits the DB per
+            // row — see GetAllFiles), by the shared {basename}.ext convention.
+            var f = _view[idx];
+            bool isDrawing = (f.FileName ?? "")
+                .EndsWith(".slddrw", StringComparison.OrdinalIgnoreCase);
+            _menuLinkedPath = FindLinkedPath(f, wantDrawing: !isDrawing);
+            _miOpenLinked.Text = isDrawing ? "Open Model" : "Open Drawing";
+            _miOpenLinked.Enabled = !string.IsNullOrEmpty(_menuLinkedPath);
+
+            _rowMenu.Show(_grid, e.Location);
+        }
+
+        // The path of the file linked to f by the shared base-filename convention:
+        // wantDrawing → the {basename}.slddrw; else the {basename}.sldprt/.sldasm.
+        // Resolved from the in-memory _all list (no DB/disk hit). null if none.
+        private string FindLinkedPath(VaultFile f, bool wantDrawing)
+        {
+            if (f == null || string.IsNullOrEmpty(f.FileName)) return null;
+            string baseName = Path.GetFileNameWithoutExtension(f.FileName);
+            foreach (var o in _all)
+            {
+                if (ReferenceEquals(o, f)) continue;
+                string ext = (Path.GetExtension(o.FileName ?? "") ?? "").ToLowerInvariant();
+                bool typeOk = wantDrawing
+                    ? ext == ".slddrw"
+                    : (ext == ".sldprt" || ext == ".sldasm");
+                if (typeOk && string.Equals(
+                        Path.GetFileNameWithoutExtension(o.FileName ?? ""), baseName,
+                        StringComparison.OrdinalIgnoreCase))
+                    return o.FilePath;
+            }
+            return null;
+        }
+
+        // The VaultFile the menu was opened on (null if the view changed under it).
+        private VaultFile MenuRow()
+        {
+            int idx = PageStart + _menuRowIndex;
+            if (idx < 0 || idx >= _view.Count) return null;
+            return _view[idx];
+        }
+
+        // Defer the open to the caller (OpenByPath runs after this modal closes).
+        private void OpenDeferred(string path)
+        {
             if (string.IsNullOrEmpty(path)) return;
             FileToOpen = path;
             this.DialogResult = DialogResult.OK;
             Close();
+        }
+
+        private void MenuOpen()
+        {
+            var f = MenuRow();
+            if (f != null) OpenDeferred(f.FilePath);
+        }
+
+        private void MenuOpenLinked()
+        {
+            if (!string.IsNullOrEmpty(_menuLinkedPath)) OpenDeferred(_menuLinkedPath);
+        }
+
+        private void MenuCopyPath()
+        {
+            var f = MenuRow();
+            if (f == null || string.IsNullOrEmpty(f.FilePath)) return;
+            try { Clipboard.SetText(f.FilePath); } catch { /* clipboard busy — ignore */ }
+        }
+
+        // Open Explorer with the file selected (or its folder if the file is gone).
+        private void MenuOpenFolder()
+        {
+            var f = MenuRow();
+            if (f == null || string.IsNullOrEmpty(f.FilePath)) return;
+            try
+            {
+                if (File.Exists(f.FilePath))
+                {
+                    System.Diagnostics.Process.Start(
+                        "explorer.exe", "/select,\"" + f.FilePath + "\"");
+                    return;
+                }
+                string dir = Path.GetDirectoryName(f.FilePath);
+                if (!string.IsNullOrEmpty(dir) && Directory.Exists(dir))
+                    System.Diagnostics.Process.Start("explorer.exe", "\"" + dir + "\"");
+                else
+                    MessageBox.Show("Folder not found:\n" + dir,
+                        "BCore PDM — Vault Dashboard",
+                        MessageBoxButtons.OK, MessageBoxIcon.Information);
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show("Could not open the folder.\n\n" + ex.Message,
+                    "BCore PDM — Vault Dashboard",
+                    MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            }
         }
 
         // ── Export the CURRENT (filtered) view to CSV ───────────────────────
