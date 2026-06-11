@@ -800,6 +800,15 @@ namespace PDMLite
             }
             finally { PDMLiteAddin.SuppressSaveValidation = false; }
 
+            // Save3's bool alone is NOT a reliable failure signal — it can
+            // return false even though the save landed (or nothing needed
+            // saving), which aborted perfectly good releases. The dirty flag
+            // is the ground truth: if the document reports NO unsaved changes
+            // after the call, the save effectively succeeded; if it is still
+            // dirty (e.g. file read-only on disk), the save genuinely failed.
+            if (!releaseSaveOk)
+                try { releaseSaveOk = !doc.GetSaveFlag(); } catch { }
+
             if (!releaseSaveOk)
             {
                 AuditLogger.Log("ReleaseFailed", user,
@@ -1295,6 +1304,11 @@ namespace PDMLite
             }
             finally { PDMLiteAddin.SuppressSaveValidation = false; }
 
+            // Save3 can false-negative (see ReleaseFile) — the dirty flag is
+            // the ground truth: no unsaved changes = the bump reached disk.
+            if (!revSaveOk)
+                try { revSaveOk = !fresh.GetSaveFlag(); } catch { }
+
             if (!revSaveOk)
             {
                 // The revision bump never reached disk — previously ignored, so
@@ -1619,6 +1633,10 @@ namespace PDMLite
                                 0, 0);
                         }
                         finally { PDMLiteAddin.SuppressSaveValidation = false; }
+                        // Save3 can false-negative (see ReleaseFile) — trust
+                        // the dirty flag before reporting a failed bump.
+                        if (!drwSaveOk)
+                            try { drwSaveOk = !drwDoc.GetSaveFlag(); } catch { }
                         PDMLiteAddin.SwApp.CloseDoc(drwPath);
                         // Surface a failed bump in the summary instead of
                         // silently reporting success with a stale rev on disk.
