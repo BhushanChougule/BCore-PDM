@@ -214,9 +214,18 @@ namespace PDMLite
                         File.Move(tmp, DataFile);
                     return;
                 }
-                catch (IOException) { }
-                catch (UnauthorizedAccessException) { }
-                System.Threading.Thread.Sleep(200);
+                catch (IOException)
+                {
+                    // Transient (open handle) — retry, but don't sleep after
+                    // the final attempt; go straight to the fallback.
+                    if (attempt < 4) System.Threading.Thread.Sleep(200);
+                }
+                catch (UnauthorizedAccessException)
+                {
+                    // ACL/read-only — not transient, retrying just stalls the
+                    // global lock. Go straight to the fallback.
+                    break;
+                }
             }
 
             // File.Replace genuinely unavailable (some SMB configs). The old

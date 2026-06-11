@@ -783,31 +783,10 @@ namespace PDMLite
                 PropertyValidator.SetProperty(doc, "CheckedDate", checkedDateVal);
             }
 
-            // This programmatic save must bypass the released-file save lock.
-            // Save3 returns false when SOLIDWORKS refuses the save (read-only
-            // context, transient share error) — previously ignored, so the
-            // release continued and published a snapshot MISSING the just
-            // auto-filled CheckedBy/CheckedDate/PartWeight. Abort BEFORE any
+            // A refused save here would publish a snapshot MISSING the just
+            // auto-filled CheckedBy/CheckedDate/PartWeight — abort BEFORE any
             // archive/export/DB step: at this point nothing has been mutated.
-            bool releaseSaveOk;
-            PDMLiteAddin.SuppressSaveValidation = true;
-            try
-            {
-                releaseSaveOk = doc.Save3(
-                    (int)swSaveAsOptions_e.swSaveAsOptions_Silent, 0, 0);
-            }
-            finally { PDMLiteAddin.SuppressSaveValidation = false; }
-
-            // Save3's bool alone is NOT a reliable failure signal — it can
-            // return false even though the save landed (or nothing needed
-            // saving), which aborted perfectly good releases. The dirty flag
-            // is the ground truth: if the document reports NO unsaved changes
-            // after the call, the save effectively succeeded; if it is still
-            // dirty (e.g. file read-only on disk), the save genuinely failed.
-            if (!releaseSaveOk)
-                try { releaseSaveOk = !doc.GetSaveFlag(); } catch { }
-
-            if (!releaseSaveOk)
+            if (!TrySaveVerified(doc))
             {
                 AuditLogger.Log("ReleaseFailed", user,
                     Path.GetFileName(filePath), partNo, rev,
@@ -828,20 +807,20 @@ namespace PDMLite
             // ABORTS the release before the DB is touched: previously the file
             // was still marked Released with NO current export on disk (the old
             // one had already been archived) and the user saw a success dialog.
-            bool exportOk = true;
+            // failedExports is the single source of truth — empty = all good.
             var failedExports = new List<string>();
 
             if (isDrawing)
             {
                 ArchiveOldExports(partNo, isDrawing: true);
-                exportOk = ExportManager.ExportAll(doc, ExportRoot, stamp);
-                if (!exportOk) failedExports.Add(stamp + ".pdf");
+                if (!ExportManager.ExportAll(doc, ExportRoot, stamp))
+                    failedExports.Add(stamp + ".pdf");
 
                 // SOLIDWORKS' own PDF auto-open was suppressed (it would have
                 // shown the un-watermarked file). The watermark is now stamped on
                 // disk, so open the finished PDF ourselves for an interactive
                 // release. Skipped for chained/bulk releases (suppressPrompts).
-                if (exportOk && !suppressPrompts)
+                if (failedExports.Count == 0 && !suppressPrompts)
                     ExportManager.OpenPdfExternally(
                         Path.Combine(ExportRoot, "PDF", stamp + ".pdf"));
             }
@@ -853,8 +832,8 @@ namespace PDMLite
                     // Single-config: existing path
                     ArchiveOldExports(partNo.Replace(".", ""), isDrawing: false,
                         bomIdentifier: partNo);
-                    exportOk = ExportManager.ExportAll(doc, ExportRoot, stamp);
-                    if (!exportOk) failedExports.Add(stamp + ".step");
+                    if (!ExportManager.ExportAll(doc, ExportRoot, stamp))
+                        failedExports.Add(stamp + ".step");
                 }
                 else
                 {
@@ -909,7 +888,6 @@ namespace PDMLite
                             doc.ShowConfiguration2(origCfgEx);
                     }
                     ExportManager.ExportFlatPatternOnly(doc, ExportRoot, stamp);
-                    if (failedExports.Count > 0) exportOk = false;
 
                     if (collidedStamps.Count > 0)
                         MessageBox.Show(
@@ -924,7 +902,7 @@ namespace PDMLite
                 }
             }
 
-            if (!exportOk)
+            if (failedExports.Count > 0)
             {
                 AuditLogger.Log("ReleaseFailed", user,
                     Path.GetFileName(filePath), partNo, rev,
@@ -935,6 +913,10 @@ namespace PDMLite
                     "The file was NOT marked Released and remains editable " +
                     "(WIP). The previous exports (if any) were moved to the " +
                     "ARCHIVE folder and can be restored from there.\n\n" +
+                    "NOTE: any exports that DID succeed in this attempt are " +
+                    "already in EXPORTS — do not use them until this file " +
+                    "shows Released (the next successful release rewrites " +
+                    "them).\n\n" +
                     "Check that the EXPORTS folder is reachable and writable, " +
                     "then release again.",
                     "BCore PDM — Release Failed",
@@ -1293,21 +1275,7 @@ namespace PDMLite
             {
                 PropertyValidator.SetProperty(fresh, "Revision", nextRev);
             }
-            bool revSaveOk;
-            PDMLiteAddin.SuppressSaveValidation = true;
-            try
-            {
-                revSaveOk = fresh.Save3(
-                    (int)swSaveAsOptions_e.swSaveAsOptions_Silent, 0, 0);
-            }
-            finally { PDMLiteAddin.SuppressSaveValidation = false; }
-
-            // Save3 can false-negative (see ReleaseFile) — the dirty flag is
-            // the ground truth: no unsaved changes = the bump reached disk.
-            if (!revSaveOk)
-                try { revSaveOk = !fresh.GetSaveFlag(); } catch { }
-
-            if (!revSaveOk)
+            if (!TrySaveVerified(fresh))
             {
                 // The revision bump never reached disk — previously ignored, so
                 // the DB went WIP at the new rev and the drawing was bumped
@@ -1457,6 +1425,29 @@ namespace PDMLite
         }
 
         // ── HELPERS ───────────────────────────────────────────────────────
+        // Programmatic save with the released-file save lock bypassed, result
+        // VERIFIED. Save3's bool alone FALSE-NEGATIVES — it can return false
+        // even though the save landed (or nothing needed saving), which
+        // aborted perfectly good releases in testing. On a false return the
+        // dirty flag is the ground truth: no unsaved changes = the save
+        // effectively succeeded; still dirty (e.g. file read-only on disk) =
+        // genuine failure. EVERY internal Save3 call site must go through
+        // this helper, or the false-negative abort bug comes back.
+        private static bool TrySaveVerified(ModelDoc2 doc)
+        {
+            bool ok;
+            PDMLiteAddin.SuppressSaveValidation = true;
+            try
+            {
+                ok = doc.Save3(
+                    (int)swSaveAsOptions_e.swSaveAsOptions_Silent, 0, 0);
+            }
+            finally { PDMLiteAddin.SuppressSaveValidation = false; }
+            if (!ok)
+                try { ok = !doc.GetSaveFlag(); } catch { }
+            return ok;
+        }
+
         private static bool IsMaster(string user) =>
             DatabaseManager.GetUserRole(user) == "Master";
 
@@ -1622,19 +1613,9 @@ namespace PDMLite
                     if (drwDoc != null)
                     {
                         PropertyValidator.SetProperty(drwDoc, "Revision", nextRev);
-                        bool drwSaveOk;
-                        PDMLiteAddin.SuppressSaveValidation = true;
-                        try
-                        {
-                            drwSaveOk = drwDoc.Save3(
-                                (int)swSaveAsOptions_e.swSaveAsOptions_Silent,
-                                0, 0);
-                        }
-                        finally { PDMLiteAddin.SuppressSaveValidation = false; }
-                        // Save3 can false-negative (see ReleaseFile) — trust
-                        // the dirty flag before reporting a failed bump.
-                        if (!drwSaveOk)
-                            try { drwSaveOk = !drwDoc.GetSaveFlag(); } catch { }
+                        // TrySaveVerified queries the dirty flag, so it must
+                        // run BEFORE CloseDoc releases the document.
+                        bool drwSaveOk = TrySaveVerified(drwDoc);
                         PDMLiteAddin.SwApp.CloseDoc(drwPath);
                         // Surface a failed bump in the summary instead of
                         // silently reporting success with a stale rev on disk.

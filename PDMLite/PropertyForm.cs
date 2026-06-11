@@ -24,11 +24,15 @@ namespace PDMLite
         private List<string> _fieldsToFill;                     // active-config mode
         private Dictionary<string, List<string>> _configIssues; // multi-config mode (null otherwise)
 
-        // Composite input registry. Key = "{config}|{field}" ("" = active
-        // config). _inputTargets maps the key back to [configOrNull, field] so
-        // OnSaveClick writes each value to the right configuration.
-        private Dictionary<string, Control> _inputControls = new Dictionary<string, Control>();
-        private Dictionary<string, string[]> _inputTargets = new Dictionary<string, string[]>();
+        // One entry per input row: the control plus the (config, field) it
+        // writes to. ConfigName == null targets the active configuration.
+        private sealed class InputRow
+        {
+            public Control Control;
+            public string ConfigName;
+            public string Field;
+        }
+        private readonly List<InputRow> _rows = new List<InputRow>();
 
         // Fonts are fields so they can be disposed with the form (assigning a
         // Font to a control does not transfer ownership — they would otherwise
@@ -360,7 +364,10 @@ namespace PDMLite
                 }
                 input = combo;
             }
-            else if (field == "DrawnDate" || field == "CheckedDate")
+            // DrawnDate is the only user-entered date (CheckedDate is
+            // auto-filled at release and is not in FieldLabels, so no row
+            // can ever be created for it).
+            else if (field == "DrawnDate")
             {
                 DateTimePicker dtp = new DateTimePicker
                 {
@@ -398,9 +405,12 @@ namespace PDMLite
             }
 
             parent.Controls.Add(input);
-            string key = (configName ?? "") + "|" + field;
-            _inputControls[key] = input;
-            _inputTargets[key] = new[] { configName, field };
+            _rows.Add(new InputRow
+            {
+                Control = input,
+                ConfigName = configName,
+                Field = field
+            });
             return y + S(RowHeight);
         }
 
@@ -437,25 +447,22 @@ namespace PDMLite
         {
             var stillEmpty = new List<string>();
 
-            foreach (var kvp in _inputControls)
+            foreach (var row in _rows)
             {
-                string[] target = _inputTargets[kvp.Key];
-                string cfgName = target[0];
-                string field = target[1];
-                Control ctrl = kvp.Value;
-                string value = InputValue(ctrl);
+                string value = InputValue(row.Control);
 
                 if (string.IsNullOrEmpty(value))
                 {
-                    string label = FieldLabels.ContainsKey(field)
-                        ? FieldLabels[field] : field;
-                    if (cfgName != null) label += "  (config \"" + cfgName + "\")";
+                    string label = FieldLabels.ContainsKey(row.Field)
+                        ? FieldLabels[row.Field] : row.Field;
+                    if (row.ConfigName != null)
+                        label += "  (config \"" + row.ConfigName + "\")";
                     stillEmpty.Add(label);
-                    ctrl.BackColor = Color.FromArgb(255, 220, 220);
+                    row.Control.BackColor = Color.FromArgb(255, 220, 220);
                 }
                 else
                 {
-                    ctrl.BackColor = Color.White;
+                    row.Control.BackColor = Color.White;
                 }
             }
 
@@ -470,17 +477,15 @@ namespace PDMLite
                 return;
             }
 
-            foreach (var kvp in _inputControls)
+            foreach (var row in _rows)
             {
-                string[] target = _inputTargets[kvp.Key];
-                string cfgName = target[0];
-                string field = target[1];
-                string value = InputValue(kvp.Value);
+                string value = InputValue(row.Control);
 
-                if (cfgName == null)
-                    PropertyValidator.SetProperty(_doc, field, value);
+                if (row.ConfigName == null)
+                    PropertyValidator.SetProperty(_doc, row.Field, value);
                 else
-                    PropertyValidator.SetProperty(_doc, field, value, cfgName);
+                    PropertyValidator.SetProperty(
+                        _doc, row.Field, value, row.ConfigName);
             }
 
             PropertiesSaved = true;
