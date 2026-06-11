@@ -162,6 +162,8 @@ Main entry point, ISwAddin implementation.
 
 WinForms dialog for missing properties. Fixed sizes (not DPI-scaled, form is shown at system scale).
 
+TWO MODES via two constructors: (1) ACTIVE-CONFIG mode — PropertyForm(doc, List<string> emptyFields), one row per missing field, values written to the active configuration (save-time Rules 3/3.5); (2) MULTI-CONFIG mode — PropertyForm(doc, Dictionary<configName, List<missingFields>>), used by the RELEASE GATE: ONE dialog showing every configuration's missing fields, grouped BY FIELD with one row per config under each bold field header (rows labelled with the config name, indented), so the Master fills e.g. Material for every config in one pass with NO active-config switching; each row's value is written to ITS OWN config via SetProperty(doc, field, value, configName) and values may differ per config. Inputs are registered under a composite "{config}|{field}" key (_inputControls + _inputTargets). Rows live in a SCROLLABLE panel capped to the screen working area (buttons stay fixed below), so any number of configs × fields fits.
+
 \- formWidth=1200, labelWidth=380, inputWidth=480, inputHeight=46
 
 \- rowHeight=62, inputLeft=410, startY=210
@@ -686,7 +688,7 @@ auto-weight → (multi-config) unique PartNo per config (block) + combined per-c
 
 \### Master Release (Part/Assembly)
 
-validate ALL configs (ValidateAllConfigs) → offer PropertyForm for active config → check broken refs →
+validate ALL configs (ValidateAllConfigs) → offer ONE multi-config PropertyForm covering EVERY config's missing fields (grouped by field, one row per config — no per-config activate-and-retry loop) → check broken refs →
 
 (assembly) check child parts Released → (assembly) drawing-release gate →
 

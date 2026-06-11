@@ -577,19 +577,17 @@ namespace PDMLite
                 var cfgIssues = PropertyValidator.ValidateAllConfigs(doc);
                 if (cfgIssues.Count > 0)
                 {
-                    // Offer PropertyForm for the active config first so the
-                    // Master can fix its fields without a separate manual save.
-                    string activeCfg = (doc.GetActiveConfiguration()
-                        as SolidWorks.Interop.sldworks.Configuration)?.Name ?? "";
-                    if (cfgIssues.ContainsKey(activeCfg))
+                    // ONE dialog covering EVERY configuration's missing fields
+                    // (PropertyForm multi-config mode: grouped by field, one
+                    // row per config) so the Master completes the whole file
+                    // in a single pass. Previously only the ACTIVE config got
+                    // a form and the release then blocked listing the others,
+                    // forcing the user to activate each config one by one.
+                    using (var form = new PropertyForm(doc, cfgIssues))
                     {
-                        using (var form = new PropertyForm(
-                            doc, cfgIssues[activeCfg]))
-                        {
-                            form.ShowDialog();
-                            if (form.PropertiesSaved)
-                                cfgIssues = PropertyValidator.ValidateAllConfigs(doc);
-                        }
+                        form.ShowDialog();
+                        if (form.PropertiesSaved)
+                            cfgIssues = PropertyValidator.ValidateAllConfigs(doc);
                     }
 
                     if (cfgIssues.Count > 0)
