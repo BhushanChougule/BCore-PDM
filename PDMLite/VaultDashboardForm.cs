@@ -79,6 +79,7 @@ namespace PDMLite
         private ToolStripMenuItem _miOpen, _miOpenLinked, _miCopyPath, _miOpenFolder;
         private int _menuRowIndex = -1;   // grid row the menu was opened on
         private string _menuLinkedPath;   // drawing for a model row, model for a drawing row
+        private string _menuLinkedConfig; // config to land on when opening a drawing's model
 
         private const int VisibleRows = 20;     // fixed grid height = 20 rows
         private const int PageSize = VisibleRows; // 20 rows per page (the "20 row rule")
@@ -111,9 +112,12 @@ namespace PDMLite
         private int _sortColumn = DefaultSortColumn;
         private ListSortDirection _sortDir = ListSortDirection.Descending;
 
-        // Set when the Master double-clicks a row; the caller opens it after the
-        // dialog closes. Null = nothing to open.
+        // Set when the user opens a row; the caller opens it after the dialog
+        // closes. Null = nothing to open.
         public string FileToOpen { get; private set; }
+        // Optional configuration to switch the opened file to (set when "Open
+        // Model" is used on a config-specific drawing). Null/empty = active config.
+        public string FileToOpenConfig { get; private set; }
 
         public VaultDashboardForm(float scale)
         {
@@ -1130,6 +1134,9 @@ namespace PDMLite
             bool isDrawing = (f.FileName ?? "")
                 .EndsWith(".slddrw", StringComparison.OrdinalIgnoreCase);
             _menuLinkedPath = FindLinkedPath(f, wantDrawing: !isDrawing);
+            // Opening a config-specific drawing's model → land on that config.
+            _menuLinkedConfig = isDrawing
+                ? DrawingConfigToOpen(f, _menuLinkedPath) : null;
             _miOpenLinked.Text = isDrawing ? "Open Model" : "Open Drawing";
             _miOpenLinked.Enabled = !string.IsNullOrEmpty(_menuLinkedPath);
 
@@ -1210,10 +1217,12 @@ namespace PDMLite
         }
 
         // Defer the open to the caller (OpenByPath runs after this modal closes).
-        private void OpenDeferred(string path)
+        // config = optional configuration to switch the file to once open.
+        private void OpenDeferred(string path, string config = null)
         {
             if (string.IsNullOrEmpty(path)) return;
             FileToOpen = path;
+            FileToOpenConfig = config;
             this.DialogResult = DialogResult.OK;
             Close();
         }
@@ -1226,7 +1235,31 @@ namespace PDMLite
 
         private void MenuOpenLinked()
         {
-            if (!string.IsNullOrEmpty(_menuLinkedPath)) OpenDeferred(_menuLinkedPath);
+            if (!string.IsNullOrEmpty(_menuLinkedPath))
+                OpenDeferred(_menuLinkedPath, _menuLinkedConfig);
+        }
+
+        // The configuration a drawing documents — used to land its model on the
+        // right config. Prefers the drawing's ReferencedConfigs when it names a
+        // SINGLE config; else falls back to a config-specific {configName}.slddrw
+        // filename (basename ≠ the model's). Null = open at the active config
+        // (shared / all-config drawing). The switch itself is best-effort.
+        private string DrawingConfigToOpen(VaultFile drawing, string modelPath)
+        {
+            if (drawing == null) return null;
+            var refs = (drawing.ReferencedConfigs ?? "")
+                .Split(',').Select(s => s.Trim())
+                .Where(s => s.Length > 0).ToList();
+            if (refs.Count == 1) return refs[0];
+            if (refs.Count > 1) return null; // documents several → don't force one
+
+            string drwBase = Path.GetFileNameWithoutExtension(drawing.FileName ?? "");
+            string modelBase = Path.GetFileNameWithoutExtension(
+                Path.GetFileName(modelPath ?? ""));
+            if (!string.IsNullOrEmpty(drwBase) &&
+                !string.Equals(drwBase, modelBase, StringComparison.OrdinalIgnoreCase))
+                return drwBase; // config-specific by filename convention
+            return null;        // shared drawing → active config
         }
 
         private void MenuCopyPath()

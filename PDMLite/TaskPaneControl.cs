@@ -473,7 +473,19 @@ namespace PDMLite
                 if (result == DialogResult.OK &&
                     !string.IsNullOrEmpty(form.FileToOpen))
                 {
-                    try { VaultManager.OpenByPath(form.FileToOpen); }
+                    try
+                    {
+                        VaultManager.OpenByPath(form.FileToOpen);
+                        // "Open Model" on a config-specific drawing lands the model
+                        // on that drawing's configuration (best-effort).
+                        if (!string.IsNullOrEmpty(form.FileToOpenConfig))
+                        {
+                            ModelDoc2 doc = PDMLiteAddin.SwApp
+                                ?.GetOpenDocumentByName(form.FileToOpen) as ModelDoc2;
+                            if (doc != null)
+                                doc.ShowConfiguration2(form.FileToOpenConfig);
+                        }
+                    }
                     catch { }
                 }
             }
