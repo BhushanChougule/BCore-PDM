@@ -366,6 +366,8 @@ Open Drawing button label when a drawing is active: VaultManager.GetDrawingOpenL
 
 7b. Vault Dashboard button (ALL users, cBrand) — OpenDashboard() opens VaultDashboardForm (modal). On close, if the user opened a row, VaultManager.OpenByPath(form.FileToOpen) opens that file (deferred until after the dialog closes, mirroring OpenRequestsPopup); if form.FileToOpenConfig is set (Open Model on a config-specific drawing) it then ModelDoc2.ShowConfiguration2() to land on that config. Engineers get it too — it is read-only and only opens files (OpenByPath respects every vault rule), so it carries no risk; its y-advance is unconditional while Pending Requests above it stays Master-only (the Pending Requests button AND its divider are both gated behind isMaster — otherwise an engineer saw an orphan divider line with no button above the dashboard)
 
+7c. Audit Report button (ALL users, cBrand) — OpenAuditReport() opens AuditReportForm (modal, self-contained; nothing deferred back). Read-only history of every logged vault event from audit.csv; engineers get it too (it only reads the log + exports the filtered view to CSV, so no risk). Sits between the Vault Dashboard button and Send Test Email; y-advance unconditional.
+
 8\. Send Test Email button (all users) — calls EmailManager.SendTestEmail, shows success/error in MessageBox
 
 9\. Remove from Vault button (Masters only, cSwRed — muted SOLIDWORKS red) — DoAction("remove") → VaultManager.RemoveFromVault on the active file (moves to SCRAP + deletes record; blocked if Released)
@@ -477,6 +479,20 @@ DPI-aware Form (S(v)=v\*\_scale, fonts = pt\*\_scale), ALL users (read-only). Op
 \- OPEN MODEL ON THE DRAWING'S CONFIG: "Open Model" on a config-specific drawing also lands the model on the configuration that drawing documents. DrawingConfigToOpen derives it from the drawing's ReferencedConfigs when that names a SINGLE config, else from a config-specific {configName}.slddrw filename (basename ≠ the model's); a shared/all-config drawing yields null (open at active config). It is carried out of the modal via FileToOpenConfig (alongside FileToOpen); TaskPaneControl.OpenDashboard, after VaultManager.OpenByPath, calls ModelDoc2.ShowConfiguration2(FileToOpenConfig) — best-effort, so a stale/illegal config name simply no-ops.
 
 \- "Export CSV" → SaveFileDialog → dumps the WHOLE filtered \_view (all pages, RFC-4180 Csv helper, headers + CellText per column). "Refresh" → re-runs GetAllFiles. "Close" → closes. Disposed on FormClosed: search debounce Timer, \_cellBold, \_pagerFont, \_summaryFont, \_summaryFontActive, \_summaryTip, \_rowMenu. Placeholder via Win32 EM_SETCUEBANNER (no PlaceholderText on .NET 4.8).
+
+
+
+\### AuditReportForm.cs
+
+DPI-aware Form (S(v)=v\*\_scale, fonts=pt\*\_scale), ALL users (read-only). Opened from the "Audit Report" task-pane button. The COMPANION to the Vault Dashboard: the dashboard shows the CURRENT state of every file; this shows the HISTORY of events over time, read from N:\\PDM-SolidWorks\\VAULT\\audit.csv. Built on the SAME proven plumbing as VaultDashboardForm (VirtualMode DataGridView, PAGINATED 20 rows/page with the First·‹·numbered·›·Last pager, EXCEL-STYLE per-column filtering, global search, clickable-count summary strip, keyboard nav). Self-contained (own palette, S(), SetCueBanner, and a private copy of ColumnFilterDialog — the house "one form, one file" convention). The log is the source of truth; the report NEVER writes it (only reads + exports the filtered view to CSV).
+
+\- Columns (index): Timestamp(0, typed DateTime "MM/dd/yyyy HH:mm:ss" so it sorts chronologically), User(1), Action(2), File Name(3), Part No(4), Rev(5), Note(6). DEFAULT sort = Timestamp DESC (freshest event on top). Action cell is COLOUR-CODED by category via ActionColor (Release/ApproveRequest=green, NewRevision=cBrand, Rollback=orange, RemoveFromVault/RejectRequest=red, Lock/Unlock=maroon, Request\*=purple, Create/Save/AutoPurgeOrphan/else=grey) in a shared bold font.
+
+\- ReadAuditLog() reads the whole audit.csv ONCE (FileStream FileShare.ReadWrite so an in-progress AuditLogger append or the file open in Excel never blocks the read; missing file = empty report) and ParseCsv() turns it into List<AuditEntry>. ParseCsv is a proper RFC-4180 parser (handles quoted fields, escaped "" quotes, and commas/newlines INSIDE quotes — the Note field can contain them), mirroring AuditLogger.Csv's escaping. The header row (first record, field 0 == "Timestamp") is skipped. ParseTimestamp parses AuditLogger's "yyyy-MM-dd HH:mm:ss" (then a lenient fallback, else DateTime.MinValue → blank cell). Reading it all is fine — a report can afford it; rendering stays cheap because the grid is VirtualMode + paginated.
+
+\- FilterKey groups the Timestamp column to DAY granularity ("MM/dd/yyyy") so the column filter lists distinct days (date-range filtering) not every second; KeySelector sorts Timestamp by the real DateTime, others by lower-cased text; OrderFilterValues orders the Timestamp filter list chronologically. Global search matches User/Action/FileName/PartNo/Note. ApplyFilter resets to page 1; ShowGridPage folds in UpdateSummary; GoToPage early-returns on a dead-end page move; \_pagerFont nulled after dispose (same hardening as the dashboard).
+
+\- Summary strip = clickable count quick-filters: Total (click = Clear Filters), Releases / Revisions / Removals (click = toggle the Action column filter to "Release"/"NewRevision"/"RemoveFromVault" via ToggleActionFilter → \_colFilters[ColAction]; the active one is underlined and its header funnel lights up), then a plain "(Showing from–to of N · Page X of Y · as of HH:mm)" label. Counts (\_cntRelease/\_cntRevision/\_cntRemoval) cached once per load by ComputeCounts. NO row-open / context menu (it's a log, not a file browser — opening files is the dashboard's job). Export CSV dumps the whole filtered \_view; Refresh re-reads audit.csv. Disposed on FormClosed: search debounce Timer, \_cellBold, \_pagerFont(+null), \_summaryFont, \_summaryFontActive, \_summaryTip.
 
 
 
@@ -890,11 +906,11 @@ GetNextRevision() in VaultManager.cs handles this
 
 \- ConfigRevisionPickerForm restyled to house convention (PR39): brand title bar, 3.7–6f ×\_scale fonts, flat coloured buttons (All=cBrand/fSmall, None=cDark/fSmall, OK=cGreen/fBtn, Cancel=cDark/fBtn), white bordered CheckedListBox with IntegralHeight=false so text never clips at any DPI. List height is dynamic (fills space between body label and button row). Fixes text and button label truncation visible at high DPI on the multi-config New Revision picker.
 
+\- Audit Report (ALL users, read-only): AuditReportForm — a sortable/filterable/paginated view of the WHOLE audit trail (audit.csv), companion to the Vault Dashboard (dashboard = current file state; audit report = event history over time). Reuses the dashboard's VirtualMode + 20-rows/page pager, Excel-style per-column filtering (Timestamp grouped to DAY for date-range filtering), global search, keyboard nav and CSV export. Columns Timestamp/User/Action/File Name/Part No/Rev/Note; default sort Timestamp DESC; Action colour-coded by category. Reads audit.csv with a proper RFC-4180 parser (handles quoted fields + embedded commas/newlines); the log is never written. Summary strip = clickable Total / Releases / Revisions / Removals quick filters + page range. "Export history to Excel" delivered as a CSV (opens directly in Excel — same no-NuGet/native-dep convention as audit.csv and the BOM export). Opened from an "Audit Report" task-pane button shown to all users.
+
 
 
 \## Remaining Features (in priority order)
-
-8\. Audit Report (export history to Excel)
 
 9\. Engineer PC rollout
 

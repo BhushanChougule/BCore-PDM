@@ -397,6 +397,27 @@ namespace PDMLite
             this.Controls.Add(btnDashboard);
             y += S(28);
 
+            // ── Audit Report (all users) ──────────────────────────────
+            // Read-only history of every logged vault event (audit.csv). Like
+            // the dashboard it carries no risk — it only reads the log and
+            // exports the filtered view to CSV — so engineers get it too.
+            Button btnAudit = new Button
+            {
+                Text = "Audit Report",
+                Font = fBtn,
+                Width = w,
+                Height = S(24),
+                Location = new Point(x, y),
+                BackColor = cBrand,
+                ForeColor = Color.White,
+                FlatStyle = FlatStyle.Flat,
+                Cursor = Cursors.Hand
+            };
+            btnAudit.FlatAppearance.BorderSize = 0;
+            btnAudit.Click += (s, e) => OpenAuditReport();
+            this.Controls.Add(btnAudit);
+            y += S(28);
+
             // ── Send Test Email (all users) ───────────────────────────
             Button btnTestEmail = new Button
             {
@@ -495,6 +516,14 @@ namespace PDMLite
                     catch { }
                 }
             }
+        }
+
+        // Open the read-only Audit Report (all users). A modal, self-contained
+        // history view of audit.csv — nothing to defer back to the caller.
+        private void OpenAuditReport()
+        {
+            using (var form = new AuditReportForm(_scale))
+                form.ShowDialog(this);
         }
 
         // ── Send a diagnostic test email and show the result ──────────
