@@ -65,6 +65,7 @@ namespace PDMLite
         private Button _btnRefresh;
         private Button _btnExport;
         private Button _btnClear;
+        private Button _btnDashboard; // switch back to the Vault Dashboard
         private Button _btnClose;
         private Panel _topPanel;
         private Panel _bottomPanel;
@@ -123,6 +124,10 @@ namespace PDMLite
             public string Revision;
             public string Note;
         }
+
+        // Set when the user clicks the "Vault Dashboard" button: the caller closes
+        // this form and reopens the dashboard instead (single-window switch).
+        public bool SwitchToDashboard { get; private set; }
 
         public AuditReportForm(float scale)
         {
@@ -244,6 +249,15 @@ namespace PDMLite
             _btnClear.Height = ctrlH;
             _btnClear.Click += (s, e) => ClearAllFilters();
             _topPanel.Controls.Add(_btnClear);
+
+            // Switch back to the Vault Dashboard (single-window nav): signal the
+            // caller and close — the task pane reopens the dashboard in its place.
+            _btnDashboard = MakeButton("« Vault Dashboard", cBrandDark, fBtn,
+                new Point(S(764), rowY), S(170));
+            _btnDashboard.Height = ctrlH;
+            _btnDashboard.Click += (s, e) =>
+            { SwitchToDashboard = true; this.DialogResult = DialogResult.Cancel; Close(); };
+            _topPanel.Controls.Add(_btnDashboard);
 
             int summaryY = rowY + ctrlH + S(10);
             _summaryPanel = new FlowLayoutPanel
@@ -1051,12 +1065,14 @@ namespace PDMLite
                 _title.Left = Math.Max(S(14), (panelW - _title.Width) / 2);
 
             int rowW = _search.Width + gap + _btnRefresh.Width + gap
-                     + _btnExport.Width + gap + _btnClear.Width;
+                     + _btnExport.Width + gap + _btnClear.Width
+                     + gap + _btnDashboard.Width;
             int startX = Math.Max(S(14), (panelW - rowW) / 2);
-            _search.Left     = startX;
-            _btnRefresh.Left = _search.Right + gap;
-            _btnExport.Left  = _btnRefresh.Right + gap;
-            _btnClear.Left   = _btnExport.Right + gap;
+            _search.Left      = startX;
+            _btnRefresh.Left  = _search.Right + gap;
+            _btnExport.Left   = _btnRefresh.Right + gap;
+            _btnClear.Left    = _btnExport.Right + gap;
+            _btnDashboard.Left = _btnClear.Right + gap;
 
             if (_summaryPanel != null)
                 _summaryPanel.Left = Math.Max(S(14),

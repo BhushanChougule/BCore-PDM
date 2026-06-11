@@ -58,6 +58,7 @@ namespace PDMLite
         private Button _btnRefresh;
         private Button _btnExport;
         private Button _btnClear;
+        private Button _btnAudit;   // switch to the Audit Report (single-window nav)
         private Panel _topPanel;
         private Panel _bottomPanel;
         private System.Windows.Forms.Timer _searchTimer;
@@ -126,6 +127,10 @@ namespace PDMLite
         // Optional configuration to switch the opened file to (set when "Open
         // Model" is used on a config-specific drawing). Null/empty = active config.
         public string FileToOpenConfig { get; private set; }
+
+        // Set when the user clicks the "Audit Report" button: the caller closes
+        // this form and opens the Audit Report instead (single-window switch).
+        public bool SwitchToAudit { get; private set; }
 
         public VaultDashboardForm(float scale)
         {
@@ -259,6 +264,15 @@ namespace PDMLite
             _btnClear.Height = ctrlH;
             _btnClear.Click += (s, e) => ClearAllFilters();
             _topPanel.Controls.Add(_btnClear);
+
+            // Switch to the Audit Report (single-window nav): signal the caller and
+            // close — the task pane reopens the Audit Report in this window's place.
+            _btnAudit = MakeButton("Audit Report »", cBrandDark, fBtn,
+                new Point(S(764), rowY), S(150));
+            _btnAudit.Height = ctrlH;
+            _btnAudit.Click += (s, e) =>
+            { SwitchToAudit = true; this.DialogResult = DialogResult.Cancel; Close(); };
+            _topPanel.Controls.Add(_btnAudit);
 
             int summaryY = rowY + ctrlH + S(10);
             // Summary strip = a row of count "links". Total/WIP/Released/Locked/
@@ -1114,12 +1128,14 @@ namespace PDMLite
                 _title.Left = Math.Max(S(14), (panelW - _title.Width) / 2);
 
             int rowW = _search.Width + gap + _btnRefresh.Width + gap
-                     + _btnExport.Width + gap + _btnClear.Width;
+                     + _btnExport.Width + gap + _btnClear.Width
+                     + gap + _btnAudit.Width;
             int startX = Math.Max(S(14), (panelW - rowW) / 2);
             _search.Left     = startX;
             _btnRefresh.Left = _search.Right + gap;
             _btnExport.Left  = _btnRefresh.Right + gap;
             _btnClear.Left   = _btnExport.Right + gap;
+            _btnAudit.Left   = _btnClear.Right + gap;
 
             if (_summaryPanel != null)
                 _summaryPanel.Left = Math.Max(S(14),
