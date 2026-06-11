@@ -397,6 +397,10 @@ namespace PDMLite
             this.Controls.Add(btnDashboard);
             y += S(28);
 
+            // (The Audit Report is reached by switching from inside the Vault
+            // Dashboard — see OpenDashboard's view-switch loop — so it needs no
+            // separate task-pane button, keeping the pane uncluttered.)
+
             // ── Send Test Email (all users) ───────────────────────────
             Button btnTestEmail = new Button
             {
@@ -467,33 +471,52 @@ namespace PDMLite
             RefreshRequests();
         }
 
-        // Open the full-screen Vault Dashboard (all users). If the user
-        // double-clicked a row, open that file AFTER the modal dialog closes
-        // (OpenByPath returns the already-open doc if SOLIDWORKS has it; opens
-        // the canonical WIP copy, read-only when Released).
+        // Open the full-screen Vault Dashboard (all users), with a SINGLE-WINDOW
+        // view switch between it and the Audit Report: each form has a button that
+        // closes it asking to switch to the other, and this loop reopens the
+        // other one (so only ever one window is up at a time — no modal stacking).
+        // The loop ends when a form is closed normally (Close/Esc) or — for the
+        // dashboard — with a file to open, which is deferred until after the modal
+        // closes (OpenByPath opens the canonical WIP copy, read-only when Released).
         private void OpenDashboard()
         {
-            using (var form = new VaultDashboardForm(_scale))
+            bool showAudit = false;
+            while (true)
             {
-                var result = form.ShowDialog(this);
-                if (result == DialogResult.OK &&
-                    !string.IsNullOrEmpty(form.FileToOpen))
+                if (showAudit)
                 {
-                    try
+                    using (var form = new AuditReportForm(_scale))
                     {
-                        VaultManager.OpenByPath(form.FileToOpen);
-                        // "Open Model" on a config-specific drawing lands the model
-                        // on that drawing's configuration (best-effort).
-                        if (!string.IsNullOrEmpty(form.FileToOpenConfig))
-                        {
-                            ModelDoc2 doc = PDMLiteAddin.SwApp
-                                ?.GetOpenDocumentByName(form.FileToOpen) as ModelDoc2;
-                            if (doc != null)
-                                doc.ShowConfiguration2(form.FileToOpenConfig);
-                        }
+                        form.ShowDialog(this);
+                        if (form.SwitchToDashboard) { showAudit = false; continue; }
                     }
-                    catch { }
+                    break; // closed normally
                 }
+
+                using (var form = new VaultDashboardForm(_scale))
+                {
+                    form.ShowDialog(this);
+                    if (form.SwitchToAudit) { showAudit = true; continue; }
+
+                    if (!string.IsNullOrEmpty(form.FileToOpen))
+                    {
+                        try
+                        {
+                            VaultManager.OpenByPath(form.FileToOpen);
+                            // "Open Model" on a config-specific drawing lands the
+                            // model on that drawing's configuration (best-effort).
+                            if (!string.IsNullOrEmpty(form.FileToOpenConfig))
+                            {
+                                ModelDoc2 doc = PDMLiteAddin.SwApp
+                                    ?.GetOpenDocumentByName(form.FileToOpen) as ModelDoc2;
+                                if (doc != null)
+                                    doc.ShowConfiguration2(form.FileToOpenConfig);
+                            }
+                        }
+                        catch { }
+                    }
+                }
+                break; // closed normally / file opened
             }
         }
 

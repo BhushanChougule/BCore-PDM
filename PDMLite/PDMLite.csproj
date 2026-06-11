@@ -61,6 +61,9 @@
   </ItemGroup>
   <ItemGroup>
     <Compile Include="AuditLogger.cs" />
+    <Compile Include="AuditReportForm.cs">
+      <SubType>Form</SubType>
+    </Compile>
     <Compile Include="BulkReleaseForm.cs">
       <SubType>Form</SubType>
     </Compile>
