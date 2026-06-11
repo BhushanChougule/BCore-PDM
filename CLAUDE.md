@@ -554,6 +554,48 @@ DPI-aware Form. S(v)=v\*\_scale.
 
 
 
+\### ConfigRevisionPickerForm.cs
+
+DPI-aware Form. S(v)=v\*\_scale. Opened by VaultManager.StartNewRevision for multi-config parts/assemblies.
+
+Styled to house convention (brand title bar, 3.7–6f ×\_scale fonts, flat coloured buttons, white bordered CheckedListBox) matching DrawingScopeDialog / PendingRequestsForm.
+
+\- Brand title bar (cBrandDark), body/list font 3.7f × \_scale, title font 6f × \_scale Bold
+
+\- CheckedListBox: white background, BorderStyle.FixedSingle, IntegralHeight=false (no clipping at any DPI)
+
+\- All configs pre-checked; Master unchecks configs whose drawing did NOT change
+
+\- Each item shows: "ConfigName   (REV A  →  REV B)"
+
+\- Buttons: All (cBrand), None (cDark), OK (cGreen), Cancel (cDark) — all flat, white text
+
+\- Helpers: SetAll(bool) + MakeButton(...) to keep layout code concise
+
+\- Public API: ConfigRevisionPickerForm(List<string> configNames, List<string> currentRevs, List<string> nextRevs) + SelectedConfigs (null if cancelled)
+
+
+
+\### DrawingScopeDialog.cs
+
+DPI-aware Form. S(v)=v\*\_scale. Opened ONCE when a multi-config part/assembly gets its FIRST drawing via OpenOrCreateDrawing.
+
+Lets the user decide whether the new drawing is shared by all configurations ({modelBasename}.slddrw) or specific to the active configuration ({configName}.slddrw). After this choice the filename on disk carries the decision so the prompt never repeats.
+
+Styled to house convention: brand title bar (cBrandDark), body 3.7f × \_scale, option labels 3.9f Bold, hints 3.1f, buttons 3.6f Bold.
+
+\- RadioButton: "Common drawing (one for ALL configurations)" — default checked
+
+\- RadioButton: "This configuration only ("{activeConfig}")"
+
+\- Hint labels beneath each option explain the trade-off
+
+\- Buttons: OK (cGreen), Cancel (cDark) — flat, white text, anchored to client bottom
+
+\- Result enum: Scope { Cancel, Common, PerConfig }; accessed via Result property
+
+
+
 \## Key Technical Decisions
 
 \- SQLite abandoned → XML (System.Xml.Linq) due to native DLL conflicts
