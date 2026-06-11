@@ -331,8 +331,14 @@ namespace PDMLite
             y += S(266);
 
             // ── Pending Requests (Master only) ────────────────────────
-            this.Controls.Add(Divider(x, y, w));
-            y += S(10);
+            // Divider + button are BOTH Master-only: engineers don't get the
+            // Pending Requests button, so its divider must be gated too (else
+            // engineers see an orphan line above the Vault Dashboard button).
+            if (isMaster)
+            {
+                this.Controls.Add(Divider(x, y, w));
+                y += S(10);
+            }
 
             _btnRequests = new Button
             {
