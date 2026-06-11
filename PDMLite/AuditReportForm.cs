@@ -472,6 +472,10 @@ namespace PDMLite
                     string.Equals(r[0], "Timestamp", StringComparison.OrdinalIgnoreCase))
                     continue;
                 if (r.Length == 0) continue;
+                // Skip a blank/empty line (parses to a single empty field): every
+                // real audit event carries a Timestamp, so an all-empty record can
+                // only be a stray blank line — never a phantom row in the report.
+                if (r.All(string.IsNullOrEmpty)) continue;
 
                 list.Add(new AuditEntry
                 {
