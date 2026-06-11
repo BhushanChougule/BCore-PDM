@@ -156,28 +156,31 @@ namespace PDMLite
             };
             this.Controls.Add(headerLbl);
 
+            // Subtitle word-wraps (AutoSize=false + enough height) so it never
+            // clips on the right at higher DPI, where the text renders wider
+            // than the form's usable client width. Kept short for the same
+            // reason.
             Label subLbl = new Label
             {
                 Text = multiCfg
-                    ? "Complete all fields below. Each configuration missing a " +
-                      "field has its own row — values may differ per configuration."
-                    : "Complete all fields below. File cannot be saved until all fields are filled.",
+                    ? "Each configuration missing a field has its own row below."
+                    : "File cannot be saved until all fields are filled.",
                 Font = new Font("Segoe UI", 10f),
                 ForeColor = Color.FromArgb(90, 90, 90),
                 AutoSize = false,
-                Width = FormWidthPx - 40,
-                Height = 44,
-                Location = new Point(LeftMargin, 128)
+                Width = FormWidthPx - 60,
+                Height = 56,
+                Location = new Point(LeftMargin, 120)
             };
             this.Controls.Add(subLbl);
 
-            // ── Divider ───────────────────────────────────────────────────
+            // ── Divider ── (below the subtitle, not on top of it) ──────────
             Panel divider = new Panel
             {
                 BackColor = Color.FromArgb(200, 210, 220),
                 Height = 2,
-                Width = FormWidthPx - 50,
-                Location = new Point(LeftMargin, 128)
+                Width = FormWidthPx - 60,
+                Location = new Point(LeftMargin, 184)
             };
             this.Controls.Add(divider);
 
