@@ -11,7 +11,13 @@ namespace PDMLite
 {
     public static class ExportManager
     {
-        public static void ExportAll(ModelDoc2 doc, string exportRoot, string stamp)
+        // Returns true when the PRIMARY export for the doc type succeeded
+        // (PDF for drawings, STEP for parts/assemblies). The flat-pattern DXF
+        // remains best-effort — its failure never fails a release. Callers
+        // (ReleaseFile) MUST honour the return value: a failed primary export
+        // previously went unnoticed and the file was still marked Released
+        // with no current export on disk.
+        public static bool ExportAll(ModelDoc2 doc, string exportRoot, string stamp)
         {
             int docType = doc.GetType();
 
@@ -28,31 +34,35 @@ namespace PDMLite
             {
                 // Drawing → PDF (all sheets), then stamp RELEASED watermark
                 string pdfPath = Path.Combine(pdfFolder, stamp + ".pdf");
-                ExportDrawingPdf(doc, pdfPath);
-                StampWatermark(pdfPath);
+                bool ok = ExportDrawingPdf(doc, pdfPath);
+                if (ok) StampWatermark(pdfPath);
+                return ok;
             }
-            else if (docType == (int)swDocumentTypes_e.swDocPART)
+            if (docType == (int)swDocumentTypes_e.swDocPART)
             {
-                // Part → STEP + flat pattern DXF (sheet metal only)
-                ExportFile(doc, Path.Combine(stepFolder, stamp + ".step"));
+                // Part → STEP + flat pattern DXF (sheet metal only, best-effort)
+                bool ok = ExportFile(doc, Path.Combine(stepFolder, stamp + ".step"));
                 ExportFlatPattern(doc, Path.Combine(dxfFolder,
                     stamp + "_FLAT.dxf"));
+                return ok;
             }
-            else if (docType == (int)swDocumentTypes_e.swDocASSEMBLY)
+            if (docType == (int)swDocumentTypes_e.swDocASSEMBLY)
             {
                 // Assembly → STEP
-                ExportFile(doc, Path.Combine(stepFolder, stamp + ".step"));
+                return ExportFile(doc, Path.Combine(stepFolder, stamp + ".step"));
             }
+            return false; // unknown doc type — nothing was exported
         }
 
         // Export STEP only — called once per config during multi-config release.
         // The active configuration at call time determines the exported geometry.
-        public static void ExportStepOnly(ModelDoc2 doc, string exportRoot,
+        // Returns true when the STEP landed on disk.
+        public static bool ExportStepOnly(ModelDoc2 doc, string exportRoot,
             string stamp)
         {
             string stepFolder = Path.Combine(exportRoot, "STEP");
             Directory.CreateDirectory(stepFolder);
-            ExportFile(doc, Path.Combine(stepFolder, stamp + ".step"));
+            return ExportFile(doc, Path.Combine(stepFolder, stamp + ".step"));
         }
 
         // Export flat pattern DXF only — called for the original active config
@@ -389,18 +399,22 @@ namespace PDMLite
             File.WriteAllBytes(pdfPath, outBytes);
         }
 
-        // Universal export — SOLIDWORKS picks format from file extension
-        private static void ExportFile(ModelDoc2 doc, string outPath)
+        // Universal export — SOLIDWORKS picks format from file extension.
+        // Success = SaveAs returned true, reported no errors, AND the file is
+        // actually on disk. The return value was previously discarded, so a
+        // failed export was indistinguishable from a successful one.
+        private static bool ExportFile(ModelDoc2 doc, string outPath)
         {
             int errors = 0;
             int warnings = 0;
-            doc.Extension.SaveAs(
+            bool ok = doc.Extension.SaveAs(
                 outPath,
                 (int)swSaveAsVersion_e.swSaveAsCurrentVersion,
                 (int)swSaveAsOptions_e.swSaveAsOptions_Silent,
                 null,
                 ref errors,
                 ref warnings);
+            return ok && errors == 0 && File.Exists(outPath);
         }
         // Export drawing — all sheets to one PDF.
         // Suppresses SOLIDWORKS' own "View PDF after publishing" auto-open: that
@@ -410,7 +424,8 @@ namespace PDMLite
         // (VaultManager, interactive release only). Falls back to the default
         // null export data if the PDF export data can't be obtained, so the
         // export itself never fails over this.
-        private static void ExportDrawingPdf(ModelDoc2 doc, string outPath)
+        // Returns true when the PDF landed on disk (see ExportFile).
+        private static bool ExportDrawingPdf(ModelDoc2 doc, string outPath)
         {
             int errors = 0;
             int warnings = 0;
@@ -436,13 +451,14 @@ namespace PDMLite
             }
             catch { exportData = null; }
 
-            doc.Extension.SaveAs(
+            bool ok = doc.Extension.SaveAs(
                 outPath,
                 (int)swSaveAsVersion_e.swSaveAsCurrentVersion,
                 (int)swSaveAsOptions_e.swSaveAsOptions_Silent,
                 exportData,
                 ref errors,
                 ref warnings);
+            return ok && errors == 0 && File.Exists(outPath);
         }
 
         // Open a PDF in the user's default viewer. Used after release so the

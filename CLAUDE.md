@@ -30,6 +30,8 @@ N:\\PDM-SolidWorks\\
 
 \- VAULT\\vault.xml        → XML database (System.Xml.Linq, no SQLite)
 
+\- VAULT\\vault.xml.bak    → one-generation backup, refreshed by every successful atomic Save (File.Replace's backup argument); LoadOrCreate auto-restores from it when vault.xml is missing or corrupt
+
 \- VAULT\\audit.csv        → append-only audit trail (AuditLogger), separate from vault.xml so the DB stays lean; opens in Excel
 
 \- WIP\\                   → work in progress files — THE single canonical home for every vault file. Engineers always save here. The DB tracks the WIP path.
@@ -158,11 +160,13 @@ Main entry point, ISwAddin implementation.
 
 \### PropertyForm.cs
 
-WinForms dialog for missing properties. Fixed sizes (not DPI-scaled, form is shown at system scale).
+WinForms dialog for missing properties. DPI-AWARE (house convention): _scale = g.DpiX / 96f (read once in the constructor via CreateGraphics), every size via S(v) = (int)(v * _scale), every font as pt × _scale, and AutoScaleMode.None so that explicit scaling is the ONLY scaling (no WinForms autoscale on top) — the dialog looks the same proportionally on a 1080p 100% machine and a 4K 250% machine. Single-line labels (header, subtitle, per-field section headers, row labels) use AutoSize / TextAlign so bold text can never clip at the bottom or right at any DPI; the subtitle wraps via MaximumSize. Fonts are stored as fields and disposed in Dispose(bool) (a Font assigned to a control is not owned by it). Enter=Save, Esc=Cancel (AcceptButton/CancelButton). Layout is laid out with a running y-cursor (label.Bottom + gap) rather than fixed offsets so it never overlaps regardless of wrap/scale.
 
-\- formWidth=1200, labelWidth=380, inputWidth=480, inputHeight=46
+TWO MODES via two constructors: (1) ACTIVE-CONFIG mode — PropertyForm(doc, List<string> emptyFields), one row per missing field, values written to the active configuration (save-time Rules 3/3.5); (2) MULTI-CONFIG mode — PropertyForm(doc, Dictionary<configName, List<missingFields>>), used by the RELEASE GATE: ONE dialog showing every configuration's missing fields, grouped BY FIELD with one row per config under each bold field header (rows labelled with the config name, indented), so the Master fills e.g. Material for every config in one pass with NO active-config switching; each row's value is written to ITS OWN config via SetProperty(doc, field, value, configName) and values may differ per config. Inputs are registered in a single _rows list (InputRow = Control + ConfigName + Field; ConfigName null = active config). Rows live in a SCROLLABLE panel capped to the screen working area (buttons stay fixed below), so any number of configs × fields fits.
 
-\- rowHeight=62, inputLeft=410, startY=210
+\- Baseline sizes (× _scale via S()) calibrated to the HOUSE UNIT SYSTEM (cf. ConfigRevisionPickerForm ~440-wide) so the dialog is the SAME physical size as the other BCore dialogs at any DPI — at 4K/250% (_scale=2.5) the form is ~1200px, not ~3000px: formWidthBase=480, labelWidth=126, inputWidth=314, inputHeight=24, rowHeight=32, leftMargin=16, inputLeft=150
+
+\- Fonts (× _scale, calibrated to house dialogs' 3.3–6f range): header 5.5f bold, subtitle 3.4f, section 4.1f bold, label/input 3.7f, button 3.9f bold
 
 \- DateTimePicker format: MM/dd/yyyy
 
@@ -184,7 +188,7 @@ WinForms dialog for missing properties. Fixed sizes (not DPI-scaled, form is sho
 
 XML vault database at N:\\PDM-SolidWorks\\VAULT\\vault.xml
 
-Concurrency (cross-machine): every DB critical section is `lock (_lock) using (AcquireProcessLock())` — the in-process `_lock` serialises threads in ONE SOLIDWORKS instance; AcquireProcessLock adds CROSS-MACHINE mutual exclusion via an exclusive lock file (N:\\PDM-SolidWorks\\VAULT\\vault.lock opened FileShare.None — SMB honours this across PCs; a named Mutex would NOT, it's machine-local). Without it the read-modify-write of vault.xml was last-writer-wins (A loads, B loads, A saves, B saves → A's changes lost) across 10+ machines. The lock is held for the FULL load→save so writes never interleave; reentrant per-thread (depth counter, ThreadStatic) since a process can't re-open its own FileShare.None handle and DB methods may nest. Retries 30×100ms ONLY on genuine sharing violations (HResult 32/33); any other error (path unreachable/access denied = network down) breaks immediately so a down network fails fast instead of spinning. If the lock can't be acquired it proceeds WITHOUT it (degrades to the old last-writer-wins, never worse) rather than blocking the user — non-fatal philosophy. Save(doc) is ATOMIC: serialise to a PER-PROCESS temp (vault.xml.{machine}.{pid}.tmp) then File.Replace (fallback: direct overwrite) so a crash/blip mid-write can't leave a truncated vault.xml; the per-process temp name means even in degraded mode (lock unavailable) two machines never share one .tmp and interleave into a corrupt file. Each DB call is quick (load/modify/save XML); the lock is NEVER held across long SOLIDWORKS operations (release/export call DB methods individually between SW work).
+Concurrency (cross-machine): every DB critical section is `lock (_lock) using (AcquireProcessLock())` — the in-process `_lock` serialises threads in ONE SOLIDWORKS instance; AcquireProcessLock adds CROSS-MACHINE mutual exclusion via an exclusive lock file (N:\\PDM-SolidWorks\\VAULT\\vault.lock opened FileShare.None — SMB honours this across PCs; a named Mutex would NOT, it's machine-local). Without it the read-modify-write of vault.xml was last-writer-wins (A loads, B loads, A saves, B saves → A's changes lost) across 10+ machines. The lock is held for the FULL load→save so writes never interleave; reentrant per-thread (depth counter, ThreadStatic) since a process can't re-open its own FileShare.None handle and DB methods may nest. Retries 100×300ms (30s budget — hold times grow with the vault, and a save blocked for seconds is cheaper than a silently lost write) ONLY on genuine sharing violations (HResult 32/33); any other error (path unreachable/access denied = network down) breaks immediately so a down network fails fast instead of spinning. If the lock can't be acquired it proceeds WITHOUT it (degrades to the old last-writer-wins, never worse) rather than blocking the user — non-fatal philosophy — but degraded mode is OBSERVABLE and CONTAINED: it is audit-logged as "LockDegraded" (user="system", throttled to one entry per event type per 5 min per process via LogDbEvent), and while degraded (LockDegraded flag, ThreadStatic alongside the depth counter) all JANITORIAL writes are suppressed — stale-session purge (GetOtherOpenSessions), orphan auto-purge (SearchFiles) and presence bookkeeping (RegisterOpenSession/ClearOpenSession/ClearMachineSessions) skip their Save, because a mere READ must never write its stale whole-vault snapshot back over other machines' committed changes; user-initiated mutations (UpsertFile, SetFileStatus, …) still proceed. Save(doc) is ATOMIC: serialise to a PER-PROCESS temp (vault.xml.{machine}.{pid}.tmp) then File.Replace with vault.xml.bak as the backup argument — every successful save leaves the PREVIOUS vault.xml as a one-generation recovery file (a rename, costs nothing). The replace is retried 5×200ms (a degraded-mode reader on another machine can briefly hold vault.xml open); if File.Replace is genuinely unavailable the fallback refreshes .bak then delete+moves the fully-written temp into place (audit-logged "VaultSaveFallback"; the old direct-overwrite doc.Save remains only as the absolute last resort) so a crash mid-write can't leave a truncated vault.xml; the per-process temp name means even in degraded mode (lock unavailable) two machines never share one .tmp and interleave into a corrupt file. LoadOrCreate RECOVERS from the backup: a missing vault.xml on an established vault (crash/accidental delete) or a corrupt vault.xml (XmlException) is restored from vault.xml.bak (audit-logged "VaultRestoredFromBackup") instead of silently bootstrapping an EMPTY database or failing every DB call; only a genuinely fresh vault (no backup either) creates the empty template. Each DB call is quick (load/modify/save XML); the lock is NEVER held across long SOLIDWORKS operations (release/export call DB methods individually between SW work).
 
 Classes: VaultFile, LockInfo, HistoryEntry, RevisionRequest
 
@@ -204,7 +208,7 @@ Methods:
 
 \- GetUserRole, AddUser
 
-\- SearchFiles(term) / SearchFiles(term, out truncated) → searches PartNumber + Description + FileName (all statuses); returns canonical WIP path; dedupes by filename; capped at MaxSearchResults=50 (truncated=true when more matched, so UI can prompt to refine — prevents rendering thousands of cards at 50k scale); AUTO-PURGES orphaned records whose file is missing on disk, but ONLY when the WIP root is reachable (network-down guard so a transient outage never deletes records); auto-purges are audit-logged as "AutoPurgeOrphan"
+\- SearchFiles(term) / SearchFiles(term, out truncated) → searches PartNumber + Description + FileName (all statuses); returns canonical WIP path; dedupes by filename; capped at MaxSearchResults=50 (truncated=true when more matched, so UI can prompt to refine — prevents rendering thousands of cards at 50k scale); AUTO-PURGES orphaned records whose file is missing on disk, but ONLY when the WIP root is reachable (network-down guard so a transient outage never deletes records) AND the cross-machine lock was actually acquired (a degraded-mode search is a READ and must never write a stale snapshot back); auto-purges are audit-logged as "AutoPurgeOrphan"
 
 \- FindPartNumberConflict(partNo, excludeFilePath) → returns filename of another file using same PartNo (case-insensitive, trimmed), or null. Excludes the file being saved so it never conflicts with itself.
 
@@ -244,9 +248,9 @@ Core vault operations.
 
 \- UnlockFile(path) → Master only, sets status=WIP, removes read-only
 
-\- ReleaseFile(doc, suppressPrompts=false) → validates → (assembly) parts Released + drawing-release gate → exports → copies to RELEASED → sets read-only. Releasing a Drawing whose model is still WIP offers ONE prompt to release both; on Yes the model is released via ReleaseFile(model, suppressPrompts:true) so the pair needs only a single confirm + single combined success. suppressPrompts skips the confirm + success dialogs only (blocker/validation dialogs still show). The release-success popup uses ShowAutoCloseInfo (same look as MessageBox) which AUTO-DISMISSES after 4s if the user doesn't click OK — so an unattended release doesn't leave a dialog blocking the file close. A WinForms Timer is used (its WM_TIMER is pumped by the modal MessageBox loop); on tick it FindWindow(s) the dialog by caption and PostMessage(WM_CLOSE) — for an OK-only box that resolves exactly like clicking OK
+\- ReleaseFile(doc, suppressPrompts=false) → validates → (assembly) parts Released + drawing-release gate → exports → copies to RELEASED → sets read-only. FAILURE-ATOMIC: every fallible step is verified and a failure ABORTS the release BEFORE the DB write, so the DB can never say Released while disk says otherwise — (1) the pre-export Save3 return is checked (a refused save would publish a snapshot missing the just-auto-filled CheckedBy/CheckedDate/PartWeight) — Save3's bool alone FALSE-NEGATIVES (it can return false when the save landed or nothing needed saving, which aborted good releases in testing), so on false the dirty flag is consulted as ground truth: !GetSaveFlag() (no unsaved changes) = save effectively succeeded; still-dirty = genuine failure → abort. The same Save3-then-GetSaveFlag verification is shared via the TrySaveVerified(doc) helper, used by ReleaseFile, StartNewRevision and StartDrawingRevisionWith — every internal Save3 call must go through it; (2) every PRIMARY export (PDF for drawings, STEP per config for models) is verified via ExportManager's bool returns and any failure aborts with a dialog listing the failed exports (the previous exports were already archived and are recoverable from ARCHIVE; flat-pattern DXF and BOM stay best-effort); (3) a failed copy to RELEASED aborts (previously it warned and FELL THROUGH to mark the file Released with a stale/no snapshot), re-clearing read-only so the file stays an editable WIP. Every abort is audit-logged as "ReleaseFailed" with the reason. Releasing a Drawing whose model is still WIP offers ONE prompt to release both; on Yes the model is released via ReleaseFile(model, suppressPrompts:true) so the pair needs only a single confirm + single combined success. suppressPrompts skips the confirm + success dialogs only (blocker/validation dialogs still show). The release-success popup uses ShowAutoCloseInfo (same look as MessageBox) which AUTO-DISMISSES after 4s if the user doesn't click OK — so an unattended release doesn't leave a dialog blocking the file close. A WinForms Timer is used (its WM_TIMER is pumped by the modal MessageBox loop); on tick it FindWindow(s) the dialog by caption and PostMessage(WM_CLOSE) — for an OK-only box that resolves exactly like clicking OK
 
-\- StartNewRevision(doc, suppressPrompts=false) → removes read-only → archives → bumps rev → saves → sets WIP → auto-starts associated drawing revision → warns about parent assemblies. suppressPrompts (bulk approve) skips the confirm + final summary dialogs only; blocker/failure dialogs still show
+\- StartNewRevision(doc, suppressPrompts=false) → removes read-only → archives → bumps rev → saves → sets WIP → auto-starts associated drawing revision → warns about parent assemblies. suppressPrompts (bulk approve) skips the confirm + final summary dialogs only; blocker/failure dialogs still show. The revision-bump Save3 return is CHECKED: on failure the in-memory Revision property is reverted, read-only restored, and the operation ABORTS before any DB write (audit-logged "NewRevisionFailed") — previously a refused save left disk at the OLD rev while the DB went WIP at the new rev and the drawing was bumped anyway
 
 \- OpenByPath(filePath) → opens a vault file choosing doc type from extension (returns already-open doc if SOLIDWORKS has it; null on failure). Used by the batch helpers
 
@@ -262,7 +266,7 @@ Core vault operations.
 
 \- GetParentAssemblies(filePath) → scans tracked .sldasm files via GetDocumentDependencies2 (reads refs without opening); returns filenames of assemblies that reference the file. Best-effort — depends on stored ref paths matching vault path format
 
-\- StartDrawingRevisionWith(modelPath, currentRev, nextRev, user) → archives the Released drawing at the old rev (matched pair), returns it to WIP, opens it silently to bump the Revision property to nextRev and save, then closes it. StartNewRevision reopens it if the user had it open. Drawing rev LETTER syncs to model immediately at New Revision time.
+\- StartDrawingRevisionWith(modelPath, currentRev, nextRev, user) → archives the Released drawing at the old rev (matched pair), returns it to WIP, opens it silently to bump the Revision property to nextRev and save, then closes it. StartNewRevision reopens it if the user had it open. Drawing rev LETTER syncs to model immediately at New Revision time. A failed open or a refused Save3 is surfaced as a WARNING in the returned summary line (open the drawing and set the rev manually) instead of silently reporting success with a stale rev on disk.
 
 \- EvaluateAssemblyDrawings(doc, out blockers, out warnings) → per component: Toolbox skipped; drawing exists+not Released → blocker; no drawing + Manufactured → warning; no drawing + Purchased → skipped. Dedupes repeated instances
 
@@ -308,9 +312,9 @@ Core vault operations.
 
 \### ExportManager.cs
 
-\- ExportAll(doc, exportRoot, stamp) → routes to correct export by file type (single-config path)
+\- ExportAll(doc, exportRoot, stamp) → routes to correct export by file type (single-config path). Returns BOOL: true when the PRIMARY export (PDF for drawings, STEP for parts/assemblies) succeeded — SaveAs return + errors==0 + file-on-disk all verified. ReleaseFile honours it and aborts on failure (previously the return was discarded and a failed export still produced a "Released" file with no current export). Flat-pattern DXF stays best-effort and never fails a release
 
-\- ExportStepOnly(doc, exportRoot, stamp) → exports STEP only; active config at call time = exported geometry. Called once per config in the multi-config release loop
+\- ExportStepOnly(doc, exportRoot, stamp) → exports STEP only; active config at call time = exported geometry. Called once per config in the multi-config release loop. Returns BOOL (same success contract as ExportAll); ReleaseFile collects per-config failures and aborts listing them all
 
 \- ExportFlatPatternOnly(doc, exportRoot, stamp) → exports flat-pattern DXF only; called once for the original active config after the multi-config STEP loop
 
@@ -550,7 +554,7 @@ Append-only CSV audit trail at N:\\PDM-SolidWorks\\VAULT\\audit.csv (separate fr
 
 \- Append-only (never rewrites the whole file) → stays fast at any size. Cross-process safe: opens with an exclusive write handle (FileShare.Read) and retries 5×100ms on a sharing violation (two machines writing at once). Non-fatal — every failure swallowed so logging never blocks a workflow. CSV fields RFC-4180 escaped.
 
-\- Actions logged: Create, Save (UpsertFile), Lock, Unlock, Release, NewRevision, Rollback, RemoveFromVault, AutoPurgeOrphan (user="system"), RequestRevision/Unlock/Release, ApproveRequest, RejectRequest
+\- Actions logged: Create, Save (UpsertFile), Lock, Unlock, Release, NewRevision, Rollback, RemoveFromVault, AutoPurgeOrphan (user="system"), RequestRevision/Unlock/Release, ApproveRequest, RejectRequest, ReleaseFailed / NewRevisionFailed (aborted operations, with reason), LockDegraded / VaultSaveFallback / VaultRestoredFromBackup (DB-layer health events, user="system", throttled to one per event type per 5 min per process)
 
 
 
@@ -684,7 +688,7 @@ auto-weight → (multi-config) unique PartNo per config (block) + combined per-c
 
 \### Master Release (Part/Assembly)
 
-validate ALL configs (ValidateAllConfigs) → offer PropertyForm for active config → check broken refs →
+validate ALL configs (ValidateAllConfigs) → offer ONE multi-config PropertyForm covering EVERY config's missing fields (grouped by field, one row per config — no per-config activate-and-retry loop) → check broken refs →
 
 (assembly) check child parts Released → (assembly) drawing-release gate →
 
