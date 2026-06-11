@@ -130,7 +130,7 @@ Main entry point, ISwAddin implementation.
 
 \- ActiveConfigChangePostNotify (parts + assemblies only — drawings have no configs): fires when the user switches the active configuration. Calls OnActiveConfigChanged() → TaskPaneHost.RefreshPanel() so the Active File card re-reads the now-active config's PartNo/Revision/Description. ActiveDocChangeNotify does NOT fire on a config switch (only a document switch), so this is the only signal that the active config changed. Hooked/detached per-doc alongside the save hooks in DocEventHandler
 
-\- OnFileSaveNotify: suppress-flag check → check lock → check released (blocks EVERYONE incl. Masters) → warn if outside WIP folder (Yes/No override) → validate properties → auto-weight → duplicate part number → broken refs
+\- OnFileSaveNotify: suppress-flag check → check lock → check released (blocks EVERYONE incl. Masters) → warn if outside WIP folder (Yes/No override) → duplicate FILE NAME hard block (Rule 2.6, all doc types incl. drawings, no override — FindFileNameConflict) → validate properties → auto-weight → duplicate part number → broken refs
 
 \- SuppressSaveValidation (static bool): VaultManager sets it around its own internal Save3 calls (Release, New Revision) so those programmatic saves bypass the released-file lock
 
@@ -196,7 +196,7 @@ RevisionRequest.RequestType = "Unlock" | "Revision" | "Release"
 
 Methods:
 
-\- Initialize, UpsertFile (audit-logs Create vs Save; rewrites the per-config <Configurations> block from the live doc on every save — but ONLY when the incoming list is non-empty: every real part/assembly has ≥1 config, so an empty list means GetConfigNames failed transiently and the existing block is PRESERVED rather than wiped, so a transient enumeration failure can't collapse a multi-config file to a single phantom config), GetFileStatus, SetFileStatus
+\- Initialize, UpsertFile (audit-logs Create vs Save; matches the existing record by FilePath CASE-INSENSITIVELY — a casing difference like n:\\ vs N:\\, which SOLIDWORKS can produce, used to miss the record, create a duplicate, and the wasCreate purge then wiped the file's whole history; rewrites the per-config <Configurations> block from the live doc on every save — but ONLY when the incoming list is non-empty: every real part/assembly has ≥1 config, so an empty list means GetConfigNames failed transiently and the existing block is PRESERVED rather than wiped, so a transient enumeration failure can't collapse a multi-config file to a single phantom config), GetFileStatus, SetFileStatus
 
 \- SetBrokenRefFlag, LockFile, UnlockFile, GetLockInfo
 
@@ -211,6 +211,8 @@ Methods:
 \- SearchFiles(term) / SearchFiles(term, out truncated) → searches PartNumber + Description + FileName (all statuses); returns canonical WIP path; dedupes by filename; capped at MaxSearchResults=50 (truncated=true when more matched, so UI can prompt to refine — prevents rendering thousands of cards at 50k scale); AUTO-PURGES orphaned records whose file is missing on disk, but ONLY when the WIP root is reachable (network-down guard so a transient outage never deletes records) AND the cross-machine lock was actually acquired (a degraded-mode search is a READ and must never write a stale snapshot back); auto-purges are audit-logged as "AutoPurgeOrphan"
 
 \- FindPartNumberConflict(partNo, excludeFilePath) → returns filename of another file using same PartNo (case-insensitive, trimmed), or null. Excludes the file being saved so it never conflicts with itself.
+
+\- FindFileNameConflict(fileName, excludeFilePath) → returns the FilePath of ANOTHER tracked vault file already using this file name (case-insensitive), or null. ValidateSave HARD-BLOCKS on a hit (Rule 2.6) — the vault keys on the file name everywhere (RELEASED/ARCHIVE/SCRAP are flat folders, search/dashboard dedupe by name, drawing↔model linkage is by basename, RemoveFileRecord/PurgeHistoryFor match by name), so a second same-named file in another division would overwrite the first one's released snapshot/archives and delete its history on first save. Only canonical records under WIP count as rivals: a same-name record OUTSIDE WIP is a legacy RELEASED-copy entry of the same file, and a WIP record whose file is gone from disk is an orphan awaiting purge — neither blocks a save.
 
 \- GetFileHistory(filePath) → returns List<HistoryEntry> reversed (most recent first)
 
@@ -274,9 +276,9 @@ Core vault operations.
 
 \- GetComponentPartType(comp) → reads PartType from the loaded component model ("" if unreadable). Reads the property from the config the ASSEMBLY references (comp.ReferencedConfiguration), NOT the component's active in-memory config — PartType is config-specific, so a shared child that is Manufactured in one config and Purchased in another is classified by the config actually used in the assembly; falls back to the active-config read when the referenced config is unknown
 
-\- RemoveFromVault(doc) → Master only; retires the active file — MOVES its WIP copy, RELEASED snapshot and exports (STEP + PDF) to SCRAP (timestamped) and deletes the vault record; BLOCKED while Released (Unlock/New Revision first); matching drawing is ALWAYS scrapped automatically (even if Released — a drawing without its model is blank and useless); confirmation dialog; audit-logged. Orphans are NOT handled here (can't open a deleted file) — SearchFiles auto-purges them instead
+\- RemoveFromVault(doc) → Master only; retires the active file — MOVES its WIP copy, RELEASED snapshot and exports (STEP + PDF + BOM) to SCRAP (timestamped) and deletes the vault record; BLOCKED while Released (Unlock/New Revision first); matching drawing is ALWAYS scrapped automatically (even if Released — a drawing without its model is blank and useless); confirmation dialog; audit-logged. Orphans are NOT handled here (can't open a deleted file) — SearchFiles auto-purges them instead
 
-\- MoveToScrap(filePath) → moves one file to SCRAP with a yyyyMMdd_HHmmss suffix (clears read-only first; no-op if missing). ScrapExports(partNo, drawingNo) → moves matching STEP (by dotless partNo) + PDF (by drawingNo) exports to SCRAP
+\- MoveToScrap(filePath) → moves one file to SCRAP with a yyyyMMdd_HHmmss suffix (clears read-only first; no-op if missing). ScrapExports(partNo, drawingNo) → moves matching STEP (by dotless partNo) + PDF (by drawingNo) + BOM CSV (by raw partNo) exports to SCRAP, each via anchored glob + ExportNameFilter so retiring TEST02 can never scrap TEST021's deliverables
 
 \- RequestRevision(doc), RequestUnlock(doc), RequestRelease(doc) → Engineer requests with note dialog
 
@@ -302,11 +304,13 @@ Core vault operations.
 
 \- SetReadOnly(path, bool) → sets/removes OS-level FileAttributes.ReadOnly
 
-\- ArchiveOldExports(archiveId, isDrawing, bomIdentifier=null) → moves old STEP (non-drawings), PDF (all), and BOM CSV (non-drawings, by raw PartNo) to archive before release. All three go through MoveMatching as INDEPENDENT operations — a failure archiving one type can never skip the others
+\- ArchiveOldExports(archiveId, isDrawing, bomIdentifier=null) → moves old STEP (non-drawings), PDF (all), and BOM CSV (non-drawings, by raw PartNo) to archive before release. All three go through MoveMatching as INDEPENDENT operations — a failure archiving one type can never skip the others. Globs are ANCHORED to the export naming conventions ({id}-R*.step, {id} REV *.pdf, {id}-R*_BOM.csv) and paired with an ExportNameFilter regex — a bare "{id}*.step" prefix glob silently archived OTHER parts' current exports whenever one part number started with another (releasing TEST02 swept TEST021's deliverables)
 
-\- CleanupExportsOnRollback(partNoClean, drawingNo, rawPartNo=null) → moves all exports (STEP/PDF/BOM) to archive on rollback
+\- CleanupExportsOnRollback(partNoClean, drawingNo, rawPartNo=null) → moves all exports (STEP/PDF/BOM) to archive on rollback; same anchored-glob + ExportNameFilter matching as ArchiveOldExports
 
-\- MoveMatching(srcDir, destDir, pattern) → private helper; moves every file in srcDir matching pattern to destDir. Each file moved in its OWN try/catch (clears read-only on a stale archive copy + on the source first), so one locked/failed file never blocks the rest; GetFiles wrapped in try; no-op if srcDir missing/empty. Used by ArchiveOldExports and CleanupExportsOnRollback
+\- ExportNameFilter(identifier, sep, suffix) → private helper; builds the exact-name regex "^{id}{sep}[A-Za-z0-9]+{suffix}$" (case-insensitive) paired with every export glob. Even an anchored glob is still a prefix match ("{id}-R*.step" matches part TEST02-R1's "TEST02-R1-RA.step"); pinning the revision token to letters/digits means exactly "{identifier}{sep}{rev}{suffix}" survives and nothing else. Also post-filters RollbackRevision's ARCHIVE scan ("{name} REV *{ext}") so a file named "Bracket" never lists "Bracket REV PLATE"'s archives
+
+\- MoveMatching(srcDir, destDir, pattern, exactName=null) → private helper; moves every file in srcDir matching pattern (post-filtered by the optional exactName regex — see ExportNameFilter) to destDir. Each file moved in its OWN try/catch (clears read-only on a stale archive copy + on the source first), so one locked/failed file never blocks the rest; GetFiles wrapped in try; no-op if srcDir missing/empty. Used by ArchiveOldExports and CleanupExportsOnRollback
 
 
 
@@ -680,7 +684,7 @@ There is ONE home for every vault file: N:\\PDM-SolidWorks\\WIP. Engineers save 
 
 FileSaveAsNotify2/FileSaveNotify → check lock → check released → 
 
-warn if outside WIP folder → validate properties (show PropertyForm if missing) → 
+warn if outside WIP folder → duplicate FILE NAME hard block (vault-wide, all doc types, no override) → validate properties (show PropertyForm if missing) → 
 
 auto-weight → (multi-config) unique PartNo per config (block) + combined per-config health warn (name==PartNo + completeness) → duplicate part number → check refs → allow save → post-save updates DB
 
@@ -909,6 +913,8 @@ GetNextRevision() in VaultManager.cs handles this
 \- ConfigRevisionPickerForm restyled to house convention (PR39): brand title bar, 3.7–6f ×\_scale fonts, flat coloured buttons (All=cBrand/fSmall, None=cDark/fSmall, OK=cGreen/fBtn, Cancel=cDark/fBtn), white bordered CheckedListBox with IntegralHeight=false so text never clips at any DPI. List height is dynamic (fills space between body label and button row). Fixes text and button label truncation visible at high DPI on the multi-config New Revision picker.
 
 \- Audit Report (ALL users, read-only): AuditReportForm — a sortable/filterable/paginated view of the WHOLE audit trail (audit.csv), companion to the Vault Dashboard (dashboard = current file state; audit report = event history over time). Reuses the dashboard's VirtualMode + 20-rows/page pager, Excel-style per-column filtering (Timestamp grouped to DAY for date-range filtering), global search, keyboard nav and CSV export. Columns Timestamp/User/Action/File Name/Part No/Rev/Note; default sort Timestamp DESC; Action colour-coded by category. Reads audit.csv with a proper RFC-4180 parser (handles quoted fields + embedded commas/newlines); the log is never written. Summary strip = clickable Total / Releases / Revisions / Removals quick filters + page range. "Export history to Excel" delivered as a CSV (opens directly in Excel — same no-NuGet/native-dep convention as audit.csv and the BOM export). Has NO separate task-pane button: reached by a single-window SWITCH from the Vault Dashboard (dashboard "Audit Report »" ↔ audit "« Vault Dashboard"), orchestrated by OpenDashboard's view-switch loop, so only one window is ever open and the task pane stays uncluttered.
+
+\- Exact-match export archiving + vault-wide filename uniqueness (audit C3 + H1): (a) every export glob (ArchiveOldExports, CleanupExportsOnRollback, ScrapExports, RollbackRevision's ARCHIVE scan) is anchored to the export naming convention AND post-filtered by ExportNameFilter's exact-name regex — a bare "{id}*.step" prefix glob silently archived/scrapped OTHER parts' current exports whenever one part number started with another (releasing TEST02 swept TEST021's deliverables); (b) save-time HARD BLOCK on a duplicate file name (ValidateSave Rule 2.6 → DatabaseManager.FindFileNameConflict, all doc types, no override) — RELEASED/ARCHIVE/SCRAP are flat folders keyed on file name and the DB dedupes/purges by it, so a second same-named file in another division would overwrite the first's released snapshot/archives and delete its history on first save (legacy RELEASED-copy records and on-disk-missing orphans don't count as rivals, so established files never false-block); (c) UpsertFile matches FilePath case-insensitively — a casing difference (n:\\ vs N:\\) used to create a duplicate record and wipe the file's history via the wasCreate purge; (d) ScrapExports now also scraps the BOM CSV (was leaked in EXPORTS forever when an assembly was retired).
 
 
 

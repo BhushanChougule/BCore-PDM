@@ -7,6 +7,7 @@ using System.IO;
 using System.Linq;
 using System.Runtime.InteropServices;
 using System.Text;
+using System.Text.RegularExpressions;
 using System.Windows.Forms;
 
 namespace PDMLite
@@ -318,28 +319,52 @@ namespace PDMLite
             catch { return null; }
         }
 
-        // Move a file's current exports to SCRAP. STEP files are named by the
-        // dotless part number; PDFs by the drawing number — match the same
-        // prefixes the exporter uses.
+        // Move a file's current exports to SCRAP. STEP files are named
+        // {partNoClean}-R{rev}.step, PDFs {drawingNo} REV {rev}.pdf, BOMs
+        // {rawPartNo}-R{rev}_BOM.csv — globs are anchored to those exact
+        // conventions and ExportNameFilter'd so retiring TEST02 can never
+        // scrap TEST021's deliverables (same C3 fix as ArchiveOldExports).
         private static void ScrapExports(string partNo, string drawingNo)
         {
             try
             {
                 string stepExport = Path.Combine(ExportRoot, "STEP");
                 string pdfExport = Path.Combine(ExportRoot, "PDF");
+                string bomExport = Path.Combine(ExportRoot, "BOM");
 
                 string partNoClean = (partNo ?? "").Replace(".", "");
                 if (!string.IsNullOrEmpty(partNoClean) &&
                     Directory.Exists(stepExport))
+                {
+                    var stepFilter = ExportNameFilter(partNoClean, "-R", ".step");
                     foreach (string f in Directory.GetFiles(
-                        stepExport, partNoClean + "*.step"))
-                        MoveToScrap(f);
+                        stepExport, partNoClean + "-R*.step"))
+                        if (stepFilter.IsMatch(Path.GetFileName(f)))
+                            MoveToScrap(f);
+                }
 
                 if (!string.IsNullOrEmpty(drawingNo) &&
                     Directory.Exists(pdfExport))
+                {
+                    var pdfFilter = ExportNameFilter(drawingNo, " REV ", ".pdf");
                     foreach (string f in Directory.GetFiles(
-                        pdfExport, drawingNo + "*.pdf"))
-                        MoveToScrap(f);
+                        pdfExport, drawingNo + " REV *.pdf"))
+                        if (pdfFilter.IsMatch(Path.GetFileName(f)))
+                            MoveToScrap(f);
+                }
+
+                // BOM CSV (assemblies) — uses the RAW PartNo (dots preserved).
+                // Previously not scrapped at all, leaving a retired assembly's
+                // current BOM in EXPORTS forever.
+                if (!string.IsNullOrEmpty(partNo) &&
+                    Directory.Exists(bomExport))
+                {
+                    var bomFilter = ExportNameFilter(partNo, "-R", "_BOM.csv");
+                    foreach (string f in Directory.GetFiles(
+                        bomExport, partNo + "-R*_BOM.csv"))
+                        if (bomFilter.IsMatch(Path.GetFileName(f)))
+                            MoveToScrap(f);
+                }
             }
             catch { }
         }
@@ -1730,14 +1755,32 @@ namespace PDMLite
             catch { }
         }
 
+        // Exact-name filter paired with each export glob. A glob alone is a
+        // PREFIX match: releasing TEST02 would also sweep TEST021's and
+        // TEST02A's current exports into ARCHIVE (they all start "TEST02").
+        // Even the anchored glob "{id}-R*.step" still matches a part whose
+        // number merely begins "{id}-R" (e.g. TEST02-R1 → "TEST02-R1-RA.step").
+        // The regex pins the revision token to letters/digits only, so exactly
+        // "{identifier}{sep}{rev}{suffix}" survives and nothing else.
+        private static Regex ExportNameFilter(string identifier, string sep,
+            string suffix)
+        {
+            return new Regex(
+                "^" + Regex.Escape(identifier) + Regex.Escape(sep) +
+                "[A-Za-z0-9]+" + Regex.Escape(suffix) + "$",
+                RegexOptions.IgnoreCase);
+        }
+
         // Move every file in srcDir matching pattern into destDir, overwriting
         // a stale same-named archive copy. No-op if srcDir is missing.
+        // exactName (when given) post-filters the glob's prefix matches down to
+        // exact export names — see ExportNameFilter.
         // Each file is moved independently: a single failure (e.g. one file open
         // in a viewer, or a read-only stale archive copy) is logged-and-skipped so
         // it can NEVER block the other files — moving the old BOM must not stop the
         // old STEP/PDF from archiving, and vice-versa.
         private static void MoveMatching(string srcDir, string destDir,
-            string pattern)
+            string pattern, Regex exactName = null)
         {
             if (!Directory.Exists(srcDir)) return;
             string[] files;
@@ -1748,6 +1791,9 @@ namespace PDMLite
             Directory.CreateDirectory(destDir);
             foreach (string file in files)
             {
+                if (exactName != null &&
+                    !exactName.IsMatch(Path.GetFileName(file)))
+                    continue;
                 try
                 {
                     string dest = Path.Combine(destDir, Path.GetFileName(file));
@@ -1774,27 +1820,36 @@ namespace PDMLite
             {
                 // Each MoveMatching is independent (its own per-file try/catch),
                 // so a failure in one type can't skip the others.
+                // Globs are anchored to the export naming convention and paired
+                // with an ExportNameFilter so ONLY this part's exports move —
+                // a bare "{id}*.step" prefix glob archived OTHER parts' current
+                // exports whenever one part number started with another (C3).
 
-                // STEP (parts/assemblies). fileIdentifier is the dot-stripped PartNo.
+                // STEP: {partNoClean}-R{rev}.step. fileIdentifier is the
+                // dot-stripped PartNo.
                 if (!isDrawing)
                     MoveMatching(Path.Combine(ExportRoot, "STEP"),
                         Path.Combine(ObsFolder, "STEP"),
-                        fileIdentifier + "*.step");
+                        fileIdentifier + "-R*.step",
+                        ExportNameFilter(fileIdentifier, "-R", ".step"));
 
-                // PDF (drawings, and any part/assembly PDF). fileIdentifier is the
-                // DrawingNo for drawings, dot-stripped PartNo otherwise.
+                // PDF: {drawingNo} REV {rev}.pdf. fileIdentifier is the
+                // DrawingNo for drawings, dot-stripped PartNo otherwise (a
+                // model's PDF only matches when its DrawingNo equals it).
                 MoveMatching(Path.Combine(ExportRoot, "PDF"),
                     Path.Combine(ObsFolder, "PDF"),
-                    fileIdentifier + "*.pdf");
+                    fileIdentifier + " REV *.pdf",
+                    ExportNameFilter(fileIdentifier, " REV ", ".pdf"));
 
-                // BOM CSV (assemblies only). Uses the RAW PartNo (dots preserved)
-                // because the BOM file is named {partNo}-R{rev}_BOM.csv.
+                // BOM CSV (assemblies only): {partNo}-R{rev}_BOM.csv with the
+                // RAW PartNo (dots preserved).
                 if (!isDrawing)
                 {
                     string bid = bomIdentifier ?? fileIdentifier;
                     MoveMatching(Path.Combine(ExportRoot, "BOM"),
                         Path.Combine(ObsFolder, "BOM"),
-                        bid + "*_BOM.csv");
+                        bid + "-R*_BOM.csv",
+                        ExportNameFilter(bid, "-R", "_BOM.csv"));
                 }
             }
             catch { }
@@ -1838,9 +1893,15 @@ namespace PDMLite
                 return;
             }
 
-            // Find all archived revisions matching this filename
+            // Find all archived revisions matching this filename. The glob is
+            // a prefix match, so post-filter to the exact "{name} REV {rev}"
+            // archive convention — without it a file named "Bracket" would
+            // also list (and could restore) "Bracket REV PLATE"'s archives.
+            var archiveFilter = ExportNameFilter(fileName, " REV ", ext);
             string[] archivedFiles = Directory.GetFiles(
-                archivePath, fileName + " REV *" + ext);
+                    archivePath, fileName + " REV *" + ext)
+                .Where(f => archiveFilter.IsMatch(Path.GetFileName(f)))
+                .ToArray();
 
             if (archivedFiles.Length == 0)
             {
@@ -2952,22 +3013,27 @@ namespace PDMLite
             try
             {
                 // Each MoveMatching is independent (its own per-file try/catch),
-                // so a failure in one type can't skip the others.
+                // so a failure in one type can't skip the others. Globs are
+                // anchored + ExportNameFilter'd so only THIS part's exports
+                // move (same C3 fix as ArchiveOldExports).
 
                 // BOM CSV (assemblies) — raw PartNo so the glob matches the
                 // {partNo}-R{rev}_BOM.csv filename correctly.
                 string bomId = rawPartNo ?? partNoClean;
                 MoveMatching(Path.Combine(ExportRoot, "BOM"),
-                    Path.Combine(ObsFolder, "BOM"), bomId + "*_BOM.csv");
+                    Path.Combine(ObsFolder, "BOM"), bomId + "-R*_BOM.csv",
+                    ExportNameFilter(bomId, "-R", "_BOM.csv"));
 
-                // STEP files matching part number.
+                // STEP files matching part number: {partNoClean}-R{rev}.step.
                 MoveMatching(Path.Combine(ExportRoot, "STEP"),
-                    Path.Combine(ObsFolder, "STEP"), partNoClean + "*.step");
+                    Path.Combine(ObsFolder, "STEP"), partNoClean + "-R*.step",
+                    ExportNameFilter(partNoClean, "-R", ".step"));
 
-                // PDFs matching drawing number.
+                // PDFs matching drawing number: {drawingNo} REV {rev}.pdf.
                 if (!string.IsNullOrEmpty(drawingNo))
                     MoveMatching(Path.Combine(ExportRoot, "PDF"),
-                        Path.Combine(ObsFolder, "PDF"), drawingNo + "*.pdf");
+                        Path.Combine(ObsFolder, "PDF"), drawingNo + " REV *.pdf",
+                        ExportNameFilter(drawingNo, " REV ", ".pdf"));
             }
             catch { }
         }
