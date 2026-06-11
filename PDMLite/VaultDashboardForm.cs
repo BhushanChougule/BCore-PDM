@@ -299,8 +299,8 @@ namespace PDMLite
             int hintY = summaryY + (int)_summaryFont.GetHeight() + S(4);
             _lblHint = new Label
             {
-                Text = "Double-click or right-click a row to open  ·  drag a column edge to "
-                     + "resize  ·  click a count to filter  ·  PgUp/PgDn to page",
+                Text = "Double-click or right-click a row to open  ·  Drag a column edge to "
+                     + "resize  ·  Click a count to filter  ·  PgUp/PgDn to page",
                 Font = new Font("Segoe UI", 3.1f * _scale),
                 ForeColor = Color.FromArgb(150, 158, 170),
                 AutoSize = true,
