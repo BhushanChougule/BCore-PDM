@@ -229,14 +229,15 @@ namespace PDMLite
                     {
                         Text = FieldLabels[field] + " *",
                         Font = sectionFont,
-                        AutoSize = false,
-                        Width = FormWidthPx - 60,
-                        Height = 36,
-                        Location = new Point(LeftMargin, y + 8),
+                        // AutoSize so the bold header is never clipped at the
+                        // bottom regardless of DPI (a fixed 36px height cut off
+                        // the descenders at higher scaling).
+                        AutoSize = true,
+                        Location = new Point(LeftMargin, y + 10),
                         ForeColor = Color.FromArgb(44, 85, 128)
                     };
                     rowsPanel.Controls.Add(fieldHdr);
-                    y += 46;
+                    y += 52;
 
                     foreach (string cfg in needy)
                         y = AddFieldRow(rowsPanel, field,
