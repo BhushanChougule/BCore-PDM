@@ -318,7 +318,16 @@ namespace PDMLite
             // Row right-click menu: Open, Open linked drawing/model, Copy path,
             // Open containing folder. Item text/enabled is set per-row in
             // Grid_MouseDown (the linked item flips Drawing↔Model by row type).
-            _rowMenu = new ContextMenuStrip { Font = fCtrl };
+            // Custom flat renderer (white background, brand-blue hover, no image
+            // gutter) + house font so it matches the app, not the dull grey OS menu.
+            _rowMenu = new ContextMenuStrip
+            {
+                Font = new Font("Segoe UI", 4f * _scale),
+                ShowImageMargin = false,
+                Renderer = new MenuRenderer(
+                    new MenuColors(cBrand, cBorder, Color.White),
+                    cTextDark, Color.FromArgb(160, 166, 176))
+            };
             _miOpen       = new ToolStripMenuItem("Open", null, (s, e) => MenuOpen());
             _miOpenLinked = new ToolStripMenuItem("Open Drawing", null, (s, e) => MenuOpenLinked());
             _miCopyPath   = new ToolStripMenuItem("Copy File Path", null, (s, e) => MenuCopyPath());
@@ -327,6 +336,8 @@ namespace PDMLite
             {
                 _miOpen, _miOpenLinked, new ToolStripSeparator(), _miCopyPath, _miOpenFolder
             });
+            foreach (ToolStripItem it in _rowMenu.Items)
+                it.Padding = new Padding(S(6), S(3), S(18), S(3));
             // VirtualMode providers — the grid pulls value / colour / tooltip for
             // ONLY the visible cells, so nothing is materialised for off-screen
             // rows (the key to handling tens of thousands of files).
@@ -1125,27 +1136,70 @@ namespace PDMLite
             _rowMenu.Show(_grid, e.Location);
         }
 
-        // The path of the file linked to f by the shared base-filename convention:
-        // wantDrawing → the {basename}.slddrw; else the {basename}.sldprt/.sldasm.
-        // Resolved from the in-memory _all list (no DB/disk hit). null if none.
+        // The path of the file linked to f, resolved from the in-memory _all list
+        // (no DB/disk hit). wantDrawing → f's drawing; else f's model.
+        //
+        // Drawing→model uses the drawing's ReferencedModel link FIRST (covers a
+        // config-specific {configName}.slddrw, whose basename differs from the
+        // model — e.g. DEMO.05.slddrw documents "FILE 1.sldprt" config DEMO.05),
+        // then falls back to the shared {basename} convention. Model→drawing
+        // prefers the shared {basename}.slddrw, else any drawing that references
+        // this model. null if none.
         private string FindLinkedPath(VaultFile f, bool wantDrawing)
         {
             if (f == null || string.IsNullOrEmpty(f.FileName)) return null;
             string baseName = Path.GetFileNameWithoutExtension(f.FileName);
+
+            if (!wantDrawing)
+            {
+                // f is a drawing → find its model.
+                string refModel = f.ReferencedModel;
+                string refName = string.IsNullOrEmpty(refModel)
+                    ? null : Path.GetFileName(refModel);
+                VaultFile byBase = null;
+                foreach (var o in _all)
+                {
+                    if (ReferenceEquals(o, f)) continue;
+                    if (!IsModel(o)) continue;
+                    // Explicit reference match (by full path or filename) wins.
+                    if (refName != null &&
+                        (PathEq(o.FilePath, refModel) || NameEq(o.FileName, refName)))
+                        return o.FilePath;
+                    if (byBase == null && BaseEq(o.FileName, baseName))
+                        byBase = o;
+                }
+                return byBase == null ? null : byBase.FilePath;
+            }
+
+            // f is a model → find its drawing.
+            VaultFile byRef = null;
             foreach (var o in _all)
             {
                 if (ReferenceEquals(o, f)) continue;
-                string ext = (Path.GetExtension(o.FileName ?? "") ?? "").ToLowerInvariant();
-                bool typeOk = wantDrawing
-                    ? ext == ".slddrw"
-                    : (ext == ".sldprt" || ext == ".sldasm");
-                if (typeOk && string.Equals(
-                        Path.GetFileNameWithoutExtension(o.FileName ?? ""), baseName,
+                if (!(o.FileName ?? "").EndsWith(".slddrw",
                         StringComparison.OrdinalIgnoreCase))
-                    return o.FilePath;
+                    continue;
+                if (BaseEq(o.FileName, baseName)) return o.FilePath; // shared drawing
+                if (byRef == null && !string.IsNullOrEmpty(o.ReferencedModel) &&
+                    PathEq(o.ReferencedModel, f.FilePath))
+                    byRef = o; // a config-specific drawing referencing this model
             }
-            return null;
+            return byRef == null ? null : byRef.FilePath;
         }
+
+        private static bool IsModel(VaultFile o)
+        {
+            string ext = (Path.GetExtension(o.FileName ?? "") ?? "").ToLowerInvariant();
+            return ext == ".sldprt" || ext == ".sldasm";
+        }
+        private static bool PathEq(string a, string b) =>
+            !string.IsNullOrEmpty(a) &&
+            string.Equals(a, b, StringComparison.OrdinalIgnoreCase);
+        private static bool NameEq(string a, string b) =>
+            string.Equals(a ?? "", b ?? "", StringComparison.OrdinalIgnoreCase);
+        private static bool BaseEq(string fileName, string baseName) =>
+            string.Equals(Path.GetFileNameWithoutExtension(fileName ?? ""),
+                baseName, StringComparison.OrdinalIgnoreCase);
 
         // The VaultFile the menu was opened on (null if the view changed under it).
         private VaultFile MenuRow()
@@ -1274,6 +1328,42 @@ namespace PDMLite
                 field.IndexOf('\n') >= 0 || field.IndexOf('\r') >= 0)
                 return "\"" + field.Replace("\"", "\"\"") + "\"";
             return field;
+        }
+
+        // ────────────────────────────────────────────────────────────────────
+        //  Flat, on-brand renderer for the row right-click menu: white drop-down,
+        //  brand-blue highlight on hover, subtle border. Replaces the dull grey
+        //  gradient of the default OS menu so it matches the rest of the app.
+        // ────────────────────────────────────────────────────────────────────
+        private sealed class MenuColors : ProfessionalColorTable
+        {
+            private readonly Color _sel, _border, _bg;
+            public MenuColors(Color sel, Color border, Color bg)
+            { _sel = sel; _border = border; _bg = bg; }
+            public override Color MenuItemSelected => _sel;
+            public override Color MenuItemSelectedGradientBegin => _sel;
+            public override Color MenuItemSelectedGradientEnd => _sel;
+            public override Color MenuItemBorder => _sel;
+            public override Color MenuBorder => _border;
+            public override Color ToolStripDropDownBackground => _bg;
+            public override Color ImageMarginGradientBegin => _bg;
+            public override Color ImageMarginGradientMiddle => _bg;
+            public override Color ImageMarginGradientEnd => _bg;
+            public override Color SeparatorDark => _border;
+            public override Color SeparatorLight => _bg;
+        }
+
+        private sealed class MenuRenderer : ToolStripProfessionalRenderer
+        {
+            private readonly Color _text, _textDisabled;
+            public MenuRenderer(ProfessionalColorTable t, Color text, Color textDisabled)
+                : base(t) { RoundedEdges = false; _text = text; _textDisabled = textDisabled; }
+            protected override void OnRenderItemText(ToolStripItemTextRenderEventArgs e)
+            {
+                e.TextColor = !e.Item.Enabled ? _textDisabled
+                            : e.Item.Selected ? Color.White : _text;
+                base.OnRenderItemText(e);
+            }
         }
 
         // ────────────────────────────────────────────────────────────────────
