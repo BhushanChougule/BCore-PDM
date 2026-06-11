@@ -1060,6 +1060,7 @@ namespace PDMLite
                         ReleasedBy  = relBy,
                         LockedBy    = (string)el.Element("LockedBy")    ?? "",
                         ReferencedModel = (string)el.Element("ReferencedModel") ?? "",
+                        ReferencedConfigs = (string)el.Element("ReferencedConfigs") ?? "",
                         HasBrokenRefs = string.Equals(
                             (string)el.Element("HasBrokenRefs"), "true",
                             StringComparison.OrdinalIgnoreCase)

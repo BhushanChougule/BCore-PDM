@@ -370,7 +370,10 @@ namespace PDMLite
             this.Controls.Add(_btnRequests);
             if (isMaster) y += S(30);
 
-            // ── Vault Dashboard (Master only) ─────────────────────────
+            // ── Vault Dashboard (all users) ───────────────────────────
+            // Read-only whole-vault view. Engineers get it too: it only opens
+            // files (OpenByPath, which respects every vault rule) — no Master
+            // actions — so self-service status visibility carries no risk.
             Button btnDashboard = new Button
             {
                 Text = "Vault Dashboard",
@@ -381,13 +384,12 @@ namespace PDMLite
                 BackColor = cBrand,
                 ForeColor = Color.White,
                 FlatStyle = FlatStyle.Flat,
-                Cursor = Cursors.Hand,
-                Visible = isMaster
+                Cursor = Cursors.Hand
             };
             btnDashboard.FlatAppearance.BorderSize = 0;
             btnDashboard.Click += (s, e) => OpenDashboard();
             this.Controls.Add(btnDashboard);
-            if (isMaster) y += S(28);
+            y += S(28);
 
             // ── Send Test Email (all users) ───────────────────────────
             Button btnTestEmail = new Button
@@ -459,7 +461,7 @@ namespace PDMLite
             RefreshRequests();
         }
 
-        // Open the full-screen Vault Dashboard (Master only). If the Master
+        // Open the full-screen Vault Dashboard (all users). If the user
         // double-clicked a row, open that file AFTER the modal dialog closes
         // (OpenByPath returns the already-open doc if SOLIDWORKS has it; opens
         // the canonical WIP copy, read-only when Released).
@@ -471,7 +473,19 @@ namespace PDMLite
                 if (result == DialogResult.OK &&
                     !string.IsNullOrEmpty(form.FileToOpen))
                 {
-                    try { VaultManager.OpenByPath(form.FileToOpen); }
+                    try
+                    {
+                        VaultManager.OpenByPath(form.FileToOpen);
+                        // "Open Model" on a config-specific drawing lands the model
+                        // on that drawing's configuration (best-effort).
+                        if (!string.IsNullOrEmpty(form.FileToOpenConfig))
+                        {
+                            ModelDoc2 doc = PDMLiteAddin.SwApp
+                                ?.GetOpenDocumentByName(form.FileToOpen) as ModelDoc2;
+                            if (doc != null)
+                                doc.ShowConfiguration2(form.FileToOpenConfig);
+                        }
+                    }
                     catch { }
                 }
             }

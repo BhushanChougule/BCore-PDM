@@ -10,9 +10,15 @@ using System.Windows.Forms;
 
 namespace PDMLite
 {
-    // Full-screen Vault Dashboard (Masters only). A sortable, filterable table of
-    // EVERY tracked file with its status, revision, owner and dates — gives a
-    // Master whole-vault visibility instead of searching file-by-file.
+    // Full-screen Vault Dashboard (all users). A sortable, filterable table of
+    // EVERY tracked file with its status, revision, owner and dates — gives
+    // whole-vault visibility instead of searching file-by-file. Read-only for
+    // everyone; engineers open it too (double-click only opens a file).
+    //
+    // Rows are PAGINATED 20 at a time (PageSize): the grid renders one page and
+    // a pager at the bottom (First · ‹ · numbered pages with ellipsis · › · Last)
+    // moves between them. The 20-row page size matches the fixed grid height, so
+    // a page never needs a vertical scrollbar.
     //
     // DPI-aware (S(v) = v * _scale, fonts = pt * _scale), matching the other
     // BCore PDM forms. Uses a DataGridView (the one tabular surface in the app):
@@ -48,7 +54,6 @@ namespace PDMLite
 
         private DataGridView _grid;
         private TextBox _search;
-        private Label _summary;
         private Label _title;
         private Button _btnRefresh;
         private Button _btnExport;
@@ -58,9 +63,42 @@ namespace PDMLite
         private System.Windows.Forms.Timer _searchTimer;
         private Font _cellBold; // shared bold font: Status cell + header text
 
+        // Summary strip: clickable count "links" (Total/WIP/Released/Locked/
+        // Broken Refs act as quick filters) + a plain showing/page label.
+        private FlowLayoutPanel _summaryPanel;
+        private Label _lblTotal, _lblWip, _lblReleased, _lblLocked, _lblBroken, _lblShowing;
+        private Font _summaryFont;       // base (bold)
+        private Font _summaryFontActive; // active quick-filter (bold + underline)
+        private ToolTip _summaryTip;     // shared tip for the clickable counts
+        // Special non-column filter: show only files with broken references
+        // (HasBrokenRefs is a flag, not a column, so it can't live in _colFilters).
+        private bool _brokenRefsOnly = false;
+        private Label _lblHint;       // faint discoverability footer in the top panel
+        private DateTime _loadedAt;   // snapshot time, shown in the summary as "as of HH:mm"
+        // Whole-vault counts — invariant under filtering, so cached once per load
+        // (UpdateSummary used to re-scan _all 4× on every keystroke / page click).
+        private int _cntWip, _cntRel, _cntLck, _cntBrk;
+        private const int ColWipDays = 9; // appended "WIP Days" column index
+
+        // Row right-click menu (Open / Open linked / Copy path / Open folder).
+        private ContextMenuStrip _rowMenu;
+        private ToolStripMenuItem _miOpen, _miOpenLinked, _miCopyPath, _miOpenFolder;
+        private int _menuRowIndex = -1;   // grid row the menu was opened on
+        private string _menuLinkedPath;   // drawing for a model row, model for a drawing row
+        private string _menuLinkedConfig; // config to land on when opening a drawing's model
+
         private const int VisibleRows = 20;     // fixed grid height = 20 rows
+        private const int PageSize = VisibleRows; // 20 rows per page (the "20 row rule")
         private const double MaxScreenFraction = 0.80; // popup ≤ 80% of screen
         private int GlyphZone => S(20);         // right-edge hit area for the arrow
+
+        // Current page (0-based) into _view, and the pager controls rebuilt for it.
+        private int _page = 0;
+        private readonly List<Control> _pagerControls = new List<Control>();
+        private Font _pagerFont;
+        private Button _btnClose;
+        private int PageCount => Math.Max(1, (_view.Count + PageSize - 1) / PageSize);
+        private int PageStart => _page * PageSize;
 
         private List<VaultFile> _all = new List<VaultFile>();
         // The current filtered + sorted rows. In VirtualMode the grid renders
@@ -80,15 +118,51 @@ namespace PDMLite
         private int _sortColumn = DefaultSortColumn;
         private ListSortDirection _sortDir = ListSortDirection.Descending;
 
-        // Set when the Master double-clicks a row; the caller opens it after the
-        // dialog closes. Null = nothing to open.
+        // Set when the user opens a row; the caller opens it after the dialog
+        // closes. Null = nothing to open.
         public string FileToOpen { get; private set; }
+        // Optional configuration to switch the opened file to (set when "Open
+        // Model" is used on a config-specific drawing). Null/empty = active config.
+        public string FileToOpenConfig { get; private set; }
 
         public VaultDashboardForm(float scale)
         {
             _scale = scale;
             BuildForm();
             LoadData();
+        }
+
+        // Keyboard navigation. ProcessCmdKey fires before any control handles the
+        // key, so this works wherever focus is. PageUp/Down + Ctrl+Home/End drive
+        // the pager; Enter opens the selected row (or applies the search); Ctrl+F
+        // jumps to the search box; Esc closes.
+        protected override bool ProcessCmdKey(ref Message msg, Keys keyData)
+        {
+            switch (keyData)
+            {
+                case Keys.Control | Keys.F:
+                    _search.Focus(); _search.SelectAll(); return true;
+                case Keys.PageDown: GoToPage(_page + 1); return true;
+                case Keys.PageUp:   GoToPage(_page - 1); return true;
+                case Keys.Control | Keys.Home: GoToPage(0); return true;
+                case Keys.Control | Keys.End:  GoToPage(PageCount - 1); return true;
+                case Keys.Escape:
+                    this.DialogResult = DialogResult.Cancel; Close(); return true;
+                case Keys.Enter:
+                    if (_search != null && _search.Focused)
+                    { _searchTimer.Stop(); ApplyFilter(); return true; }
+                    if (_grid != null && _grid.Focused) { OpenSelectedRow(); return true; }
+                    break; // let a focused button handle Enter
+            }
+            return base.ProcessCmdKey(ref msg, keyData);
+        }
+
+        private void OpenSelectedRow()
+        {
+            if (_grid.CurrentCell == null) return;
+            int idx = PageStart + _grid.CurrentCell.RowIndex;
+            if (idx < 0 || idx >= _view.Count) return;
+            OpenDeferred(_view[idx].FilePath);
         }
 
         // ── Win32 cue banner (placeholder text — not available on .NET 4.8) ──
@@ -121,10 +195,13 @@ namespace PDMLite
 
             Font fTitle  = new Font("Segoe UI", 7f * _scale, FontStyle.Bold);
             Font fCtrl   = new Font("Segoe UI", 4f * _scale);
-            Font fSummary = new Font("Segoe UI", 4f * _scale, FontStyle.Bold);
             Font fGrid   = new Font("Segoe UI", 3.3f * _scale);
             Font fBtn    = new Font("Segoe UI", 4f * _scale, FontStyle.Bold);
             _cellBold    = new Font("Segoe UI", 3.3f * _scale, FontStyle.Bold);
+            _pagerFont   = new Font("Segoe UI", 4f * _scale);
+            _summaryFont       = new Font("Segoe UI", 4f * _scale, FontStyle.Bold);
+            _summaryFontActive = new Font("Segoe UI", 4f * _scale,
+                FontStyle.Bold | FontStyle.Underline);
 
             // ── Top panel: title, search, Refresh, Export, Clear ──────────
             // CENTERED horizontally by LayoutTopControls (on load + resize).
@@ -182,18 +259,55 @@ namespace PDMLite
             _topPanel.Controls.Add(_btnClear);
 
             int summaryY = rowY + ctrlH + S(10);
-            _summary = new Label
+            // Summary strip = a row of count "links". Total/WIP/Released/Locked/
+            // Broken Refs are clickable quick filters; the trailing label shows the
+            // page range. A FlowLayoutPanel lays them out left-to-right and is
+            // centred as one unit by LayoutTopControls.
+            _summaryPanel = new FlowLayoutPanel
             {
-                Font = fSummary,
-                ForeColor = cTextGray,
                 AutoSize = true,
+                AutoSizeMode = AutoSizeMode.GrowAndShrink,
+                WrapContents = false,
+                FlowDirection = FlowDirection.LeftToRight,
+                BackColor = cBg,
+                Margin = Padding.Empty,
+                Padding = Padding.Empty,
                 Location = new Point(S(14), summaryY)
             };
-            _topPanel.Controls.Add(_summary);
+            _lblTotal    = MakeCountLabel("All files (clear filters)", () => ClearAllFilters());
+            _lblWip      = MakeCountLabel("Filter to WIP",      () => ToggleStatusFilter("WIP"));
+            _lblReleased = MakeCountLabel("Filter to Released", () => ToggleStatusFilter("Released"));
+            _lblLocked   = MakeCountLabel("Filter to Locked",   () => ToggleStatusFilter("Locked"));
+            _lblBroken   = MakeCountLabel("Show only broken references", () => ToggleBrokenFilter());
+            _lblShowing  = new Label
+            {
+                Font = _summaryFont,
+                ForeColor = cTextGray,
+                AutoSize = true,
+                Margin = new Padding(S(6), 0, 0, 0)
+            };
+            _summaryPanel.Controls.AddRange(new Control[]
+            {
+                _lblTotal, _lblWip, _lblReleased, _lblLocked, _lblBroken, _lblShowing
+            });
+            _topPanel.Controls.Add(_summaryPanel);
 
-            // Tighten the panel to the summary so the grid sits right below it
-            // (removes the dead space under the counts).
-            _topPanel.Height = summaryY + _summary.PreferredHeight + S(6);
+            // Faint discoverability footer below the counts — new users won't
+            // guess the right-click menu / column-resize / clickable counts.
+            int hintY = summaryY + (int)_summaryFont.GetHeight() + S(4);
+            _lblHint = new Label
+            {
+                Text = "Double-click or right-click a row to open  ·  drag a column edge to "
+                     + "resize  ·  click a count to filter  ·  PgUp/PgDn to page",
+                Font = new Font("Segoe UI", 3.1f * _scale),
+                ForeColor = Color.FromArgb(150, 158, 170),
+                AutoSize = true,
+                Location = new Point(S(14), hintY)
+            };
+            _topPanel.Controls.Add(_lblHint);
+
+            // Tighten the panel to the hint so the grid sits right below it.
+            _topPanel.Height = hintY + (int)_lblHint.Font.GetHeight() + S(8);
             _topPanel.Resize += (s, e) => LayoutTopControls();
 
             // ── Bottom panel: Close ───────────────────────────────────────
@@ -203,12 +317,14 @@ namespace PDMLite
                 Height = S(46),
                 BackColor = cBg
             };
-            Button btnClose = MakeButton("Close", cTextGray, fBtn,
+            _btnClose = MakeButton("Close", cTextGray, fBtn,
                 new Point(0, S(8)), S(110));
-            btnClose.Anchor = AnchorStyles.Top | AnchorStyles.Right;
-            btnClose.Location = new Point(this.ClientSize.Width - S(124), S(8));
-            btnClose.Click += (s, e) => { this.DialogResult = DialogResult.Cancel; Close(); };
-            _bottomPanel.Controls.Add(btnClose);
+            _btnClose.Anchor = AnchorStyles.Top | AnchorStyles.Right;
+            _btnClose.Location = new Point(this.ClientSize.Width - S(124), S(8));
+            _btnClose.Click += (s, e) => { this.DialogResult = DialogResult.Cancel; Close(); };
+            _bottomPanel.Controls.Add(_btnClose);
+            // Re-centre the pager when the form (and so the bottom panel) resizes.
+            _bottomPanel.Resize += (s, e) => BuildPager();
 
             // ── Grid ──────────────────────────────────────────────────────
             _grid = new DataGridView
@@ -248,10 +364,35 @@ namespace PDMLite
             _grid.DefaultCellStyle.Padding = new Padding(S(4), 0, 0, 0);
             _grid.AlternatingRowsDefaultCellStyle.BackColor = cRowAlt;
             _grid.CellDoubleClick += Grid_CellDoubleClick;
+            _grid.MouseDown += Grid_MouseDown; // right-click row menu
             // Excel-style header: paint the filter arrow + sort glyph; split the
             // header click between sort (text) and filter (arrow).
             _grid.CellPainting += Grid_CellPainting;
             _grid.ColumnHeaderMouseClick += Grid_ColumnHeaderMouseClick;
+
+            // Row right-click menu: Open, Open linked drawing/model, Copy path,
+            // Open containing folder. Item text/enabled is set per-row in
+            // Grid_MouseDown (the linked item flips Drawing↔Model by row type).
+            // Custom flat renderer (white background, brand-blue hover, no image
+            // gutter) + house font so it matches the app, not the dull grey OS menu.
+            _rowMenu = new ContextMenuStrip
+            {
+                Font = new Font("Segoe UI", 4f * _scale),
+                ShowImageMargin = false,
+                Renderer = new MenuRenderer(
+                    new MenuColors(cBrand, cBorder, Color.White),
+                    cTextDark, Color.FromArgb(160, 166, 176))
+            };
+            _miOpen       = new ToolStripMenuItem("Open", null, (s, e) => MenuOpen());
+            _miOpenLinked = new ToolStripMenuItem("Open Drawing", null, (s, e) => MenuOpenLinked());
+            _miCopyPath   = new ToolStripMenuItem("Copy File Path", null, (s, e) => MenuCopyPath());
+            _miOpenFolder = new ToolStripMenuItem("Open Containing Folder", null, (s, e) => MenuOpenFolder());
+            _rowMenu.Items.AddRange(new ToolStripItem[]
+            {
+                _miOpen, _miOpenLinked, new ToolStripSeparator(), _miCopyPath, _miOpenFolder
+            });
+            foreach (ToolStripItem it in _rowMenu.Items)
+                it.Padding = new Padding(S(6), S(3), S(18), S(3));
             // VirtualMode providers — the grid pulls value / colour / tooltip for
             // ONLY the visible cells, so nothing is materialised for off-screen
             // rows (the key to handling tens of thousands of files).
@@ -270,6 +411,14 @@ namespace PDMLite
             AddColumn("Modified Date", typeof(DateTime), "MM/dd/yyyy HH:mm");
             AddColumn("Released By");
             AddColumn("Released Date", typeof(DateTime), "MM/dd/yyyy HH:mm");
+            // Derived staleness metric: days since a WIP file was last modified
+            // (blank for non-WIP). Appended at the end (index 9) so the existing
+            // hard-coded column indices (Status=3, dates=6/8) are untouched.
+            AddColumn("WIP Days");
+            _grid.Columns[ColWipDays].DefaultCellStyle.Alignment =
+                DataGridViewContentAlignment.MiddleRight;
+            _grid.Columns[ColWipDays].HeaderCell.ToolTipText =
+                "Days since last modified (WIP files only) · click to sort by staleness";
 
             // Add Fill control FIRST, then the docked edge panels, so the grid
             // occupies the leftover space between them.
@@ -284,6 +433,11 @@ namespace PDMLite
                 _searchTimer.Stop();
                 _searchTimer.Dispose();
                 _cellBold?.Dispose();
+                _pagerFont?.Dispose();
+                _summaryFont?.Dispose();
+                _summaryFontActive?.Dispose();
+                _summaryTip?.Dispose();
+                _rowMenu?.Dispose();
             };
         }
 
@@ -339,6 +493,8 @@ namespace PDMLite
                     MessageBoxButtons.OK, MessageBoxIcon.Warning);
                 _all = new List<VaultFile>();
             }
+            _loadedAt = DateTime.Now;   // shown in the summary as "as of HH:mm"
+            ComputeVaultCounts();       // cache whole-vault counts for the summary
             // Populate the grid, then size columns to the full data ONCE and fit
             // the form to them — so columns/width stay stable while the user
             // types in the search box (no per-keystroke resizing).
@@ -372,16 +528,29 @@ namespace PDMLite
                 case 7: return f.ReleasedBy ?? "";
                 case 8: return f.ReleasedDate == DateTime.MinValue
                             ? "" : f.ReleasedDate.ToString("MM/dd/yyyy HH:mm");
+                case ColWipDays:
+                    int d = WipDays(f);
+                    return d < 0 ? "" : d.ToString(CultureInfo.InvariantCulture);
                 default: return "";
             }
         }
 
-        // Sort key: date columns sort by the real DateTime (chronological);
-        // everything else sorts by its lower-cased display text.
+        // Days a WIP file has sat since its last save (staleness). -1 = not a WIP
+        // file (or no modified date), shown as a blank cell and sorted as "oldest".
+        private int WipDays(VaultFile f)
+        {
+            if (!Eq(f.Status, "WIP") || f.ModifiedDate == DateTime.MinValue) return -1;
+            int d = (int)(DateTime.Now.Date - f.ModifiedDate.Date).TotalDays;
+            return d < 0 ? 0 : d;
+        }
+
+        // Sort key: date columns sort by the real DateTime (chronological); WIP
+        // Days sorts by the numeric age; everything else by lower-cased text.
         private Func<VaultFile, IComparable> KeySelector(int col)
         {
             if (col == 6) return f => f.ModifiedDate;
             if (col == 8) return f => f.ReleasedDate;
+            if (col == ColWipDays) return f => WipDays(f);
             return f => (CellText(f, col) ?? "").ToLowerInvariant();
         }
 
@@ -406,6 +575,7 @@ namespace PDMLite
             string term = (_search.Text ?? "").Trim().ToLowerInvariant();
             foreach (var f in _all)
             {
+                if (_brokenRefsOnly && !f.HasBrokenRefs) continue;
                 bool ok = true;
                 foreach (var kv in _colFilters)
                 {
@@ -434,6 +604,12 @@ namespace PDMLite
                         CultureInfo.InvariantCulture, DateTimeStyles.None, out d)
                         ? d : DateTime.MinValue; // blanks sort earliest
                 }).ToList();
+            if (col == ColWipDays) // numeric: "2" before "10"; blank first
+                return values.OrderBy(v =>
+                {
+                    int n;
+                    return int.TryParse(v, out n) ? n : -1;
+                }).ToList();
             return values.OrderBy(v => v, StringComparer.OrdinalIgnoreCase).ToList();
         }
 
@@ -443,6 +619,8 @@ namespace PDMLite
 
             var view = _all.Where(f =>
             {
+                // Broken-refs-only quick filter (from the summary strip).
+                if (_brokenRefsOnly && !f.HasBrokenRefs) return false;
                 // Per-column (Excel-style) value filters — ALL must pass.
                 // FilterKey (not CellText) so date columns match by DAY.
                 foreach (var kv in _colFilters)
@@ -463,26 +641,191 @@ namespace PDMLite
                     : view.OrderByDescending(key)).ToList();
             }
 
-            // VirtualMode: just swap the backing list and set RowCount — the grid
-            // pulls values for visible rows via CellValueNeeded. No per-row objects
-            // are created, so this stays instant at 50–100k rows and on every
-            // keystroke. CurrentCell is cleared first so a shrinking RowCount can't
-            // reference a now-invalid cell.
+            // VirtualMode + pagination: swap the backing list, jump back to page 1
+            // (a new filter/sort/search starts at the top), and render that page.
+            // No per-row objects are created, so this stays instant at 50–100k rows.
             _view = view;
-            _grid.CurrentCell = null;
-            _grid.RowCount = _view.Count;
-            _grid.Invalidate();
+            _page = 0;
+            ShowGridPage();
 
             UpdateSummary(_view.Count);
             LayoutTopControls(); // re-centre: the summary width changed
+        }
+
+        // Render the current page: clamp _page, set the grid's RowCount to just
+        // this page's rows (≤ PageSize, so no vertical scrollbar), repaint, and
+        // rebuild the pager. CurrentCell is cleared first so a shrinking RowCount
+        // can't reference a now-invalid cell.
+        private void ShowGridPage()
+        {
+            if (_page < 0) _page = 0;
+            if (_page >= PageCount) _page = PageCount - 1;
+            _grid.CurrentCell = null;
+            _grid.RowCount = Math.Max(0, Math.Min(PageSize, _view.Count - PageStart));
+            _grid.Invalidate();
+            BuildPager();
+        }
+
+        private void GoToPage(int page)
+        {
+            _page = page;
+            ShowGridPage();
+            UpdateSummary(_view.Count); // refresh "Page X of Y" in the summary
+            LayoutTopControls();
+        }
+
+        // ── Pager: First · ‹ · numbered pages (with ellipsis) · › · Last ────
+        // Rebuilt on every page move / filter / resize. The current page is a
+        // boxed button; First/Last/arrows grey out at the ends.
+        private void BuildPager()
+        {
+            if (_bottomPanel == null || _pagerFont == null) return;
+            foreach (var c in _pagerControls)
+            {
+                _bottomPanel.Controls.Remove(c);
+                c.Dispose();
+            }
+            _pagerControls.Clear();
+
+            int total = PageCount;
+            int current = _page + 1; // 1-based for display
+
+            var items = new List<Control>();
+            items.Add(PagerLink("First", _page > 0, 0));
+            items.Add(PagerLink("‹", _page > 0, _page - 1));
+            foreach (int t in PageTokens(current, total))
+                items.Add(t < 0 ? (Control)PagerEllipsis()
+                                : PagerNumber(t, t - 1 == _page));
+            items.Add(PagerLink("›", _page < total - 1, _page + 1));
+            items.Add(PagerLink("Last", _page < total - 1, total - 1));
+
+            int gap = S(3);
+            int totalW = -gap;
+            foreach (var c in items) totalW += c.Width + gap;
+
+            int closeZone = S(140); // keep the pager clear of the Close button
+            int avail = Math.Max(totalW, _bottomPanel.ClientSize.Width - closeZone);
+            int x = Math.Max(S(8), (avail - totalW) / 2);
+            int y = Math.Max(S(4), (_bottomPanel.ClientSize.Height - S(26)) / 2);
+            foreach (var c in items)
+            {
+                c.Left = x;
+                c.Top = y;
+                x += c.Width + gap;
+                _bottomPanel.Controls.Add(c);
+                _pagerControls.Add(c);
+            }
+        }
+
+        // The page numbers to show (1-based; -1 = ellipsis). ≤7 pages: all of
+        // them. Otherwise: 1 … window-around-current … last (classic pattern).
+        private static List<int> PageTokens(int current, int total)
+        {
+            var t = new List<int>();
+            if (total <= 7)
+            {
+                for (int i = 1; i <= total; i++) t.Add(i);
+                return t;
+            }
+            int start = Math.Max(2, current - 1);
+            int end = Math.Min(total - 1, current + 1);
+            if (current <= 3) { start = 2; end = 4; }
+            if (current >= total - 2) { start = total - 3; end = total - 1; }
+            t.Add(1);
+            if (start > 2) t.Add(-1);
+            for (int i = start; i <= end; i++) t.Add(i);
+            if (end < total - 1) t.Add(-1);
+            t.Add(total);
+            return t;
+        }
+
+        // First / Last / ‹ / › link button (greyed + inert when not applicable).
+        private Button PagerLink(string text, bool enabled, int targetPage)
+        {
+            int w = TextRenderer.MeasureText(text, _pagerFont).Width + S(12);
+            if (w < S(26)) w = S(26);
+            var b = new Button
+            {
+                Text = text,
+                Font = _pagerFont,
+                Width = w,
+                Height = S(26),
+                FlatStyle = FlatStyle.Flat,
+                BackColor = cBg,
+                ForeColor = enabled ? cBrand : Color.FromArgb(180, 186, 196),
+                Enabled = enabled,
+                Cursor = Cursors.Hand,
+                TabStop = false
+            };
+            b.FlatAppearance.BorderSize = 0;
+            b.FlatAppearance.MouseOverBackColor = cRowAlt;
+            if (enabled)
+            {
+                int tp = targetPage;
+                b.Click += (s, e) => GoToPage(tp);
+            }
+            return b;
+        }
+
+        // One numbered page button. The current page is boxed (white + border);
+        // the others are plain blue links.
+        private Button PagerNumber(int pageNum, bool current)
+        {
+            string text = pageNum.ToString(CultureInfo.InvariantCulture);
+            int w = TextRenderer.MeasureText(text, _pagerFont).Width + S(14);
+            if (w < S(28)) w = S(28);
+            var b = new Button
+            {
+                Text = text,
+                Font = _pagerFont,
+                Width = w,
+                Height = S(26),
+                FlatStyle = FlatStyle.Flat,
+                TabStop = false
+            };
+            if (current)
+            {
+                b.BackColor = Color.White;
+                b.ForeColor = cTextDark;
+                b.FlatAppearance.BorderSize = 1;
+                b.FlatAppearance.BorderColor = cBorder;
+                b.Cursor = Cursors.Default;
+            }
+            else
+            {
+                b.BackColor = cBg;
+                b.ForeColor = cBrand;
+                b.FlatAppearance.BorderSize = 0;
+                b.FlatAppearance.MouseOverBackColor = cRowAlt;
+                b.Cursor = Cursors.Hand;
+                int target = pageNum - 1;
+                b.Click += (s, e) => GoToPage(target);
+            }
+            return b;
+        }
+
+        private Label PagerEllipsis()
+        {
+            return new Label
+            {
+                Text = "…",
+                Font = _pagerFont,
+                AutoSize = false,
+                Width = S(18),
+                Height = S(26),
+                TextAlign = ContentAlignment.MiddleCenter,
+                ForeColor = Color.FromArgb(150, 156, 166),
+                BackColor = cBg
+            };
         }
 
         // ── VirtualMode providers (called for VISIBLE cells only) ───────────
         private void Grid_CellValueNeeded(object sender,
             DataGridViewCellValueEventArgs e)
         {
-            if (e.RowIndex < 0 || e.RowIndex >= _view.Count) return;
-            var f = _view[e.RowIndex];
+            int idx = PageStart + e.RowIndex;
+            if (e.RowIndex < 0 || idx >= _view.Count) return;
+            var f = _view[idx];
             switch (e.ColumnIndex)
             {
                 case 0: e.Value = f.FileName; break;
@@ -498,14 +841,16 @@ namespace PDMLite
                 case 7: e.Value = f.ReleasedBy; break;
                 case 8: e.Value = f.ReleasedDate == DateTime.MinValue
                             ? (object)DBNull.Value : f.ReleasedDate; break;
+                case ColWipDays: e.Value = CellText(f, ColWipDays); break;
             }
         }
 
         private void Grid_CellFormatting(object sender,
             DataGridViewCellFormattingEventArgs e)
         {
-            if (e.RowIndex < 0 || e.RowIndex >= _view.Count) return;
-            var f = _view[e.RowIndex];
+            int idx = PageStart + e.RowIndex;
+            if (e.RowIndex < 0 || idx >= _view.Count) return;
+            var f = _view[idx];
             if (e.ColumnIndex == 3) // Status — coloured + bold
             {
                 e.CellStyle.ForeColor = StatusColor(f.Status);
@@ -520,18 +865,25 @@ namespace PDMLite
         private void Grid_CellToolTipTextNeeded(object sender,
             DataGridViewCellToolTipTextNeededEventArgs e)
         {
-            if (e.RowIndex < 0 || e.RowIndex >= _view.Count) return; // keep header tooltips
-            if (e.ColumnIndex == 0 && _view[e.RowIndex].HasBrokenRefs)
+            int idx = PageStart + e.RowIndex;
+            if (e.RowIndex < 0 || idx >= _view.Count) return; // keep header tooltips
+            var f = _view[idx];
+            if (e.ColumnIndex == 0 && f.HasBrokenRefs)
                 e.ToolTipText = "Has broken references";
+            else if (e.ColumnIndex == 3 && Eq(f.Status, "Locked") &&
+                     !string.IsNullOrEmpty(f.LockedBy))
+                e.ToolTipText = "Locked by " + f.LockedBy;
         }
 
         private void ClearAllFilters()
         {
             _colFilters.Clear();
+            _brokenRefsOnly = false;                  // clear the broken-refs view
             _sortColumn = DefaultSortColumn;          // back to newest-first
             _sortDir = ListSortDirection.Descending;
-            _search.Text = "";       // triggers a debounced re-filter…
-            ApplyFilter();           // …and apply immediately too
+            _search.Text = "";       // raises TextChanged → starts the debounce timer…
+            _searchTimer.Stop();     // …cancel it; we apply once now instead of twice
+            ApplyFilter();
             _grid.Invalidate();      // repaint headers (clear funnel/sort glyphs)
         }
 
@@ -709,24 +1061,30 @@ namespace PDMLite
             int totalCols = 0;
             foreach (DataGridViewColumn c in _grid.Columns) totalCols += c.Width;
 
-            int chrome = S(4);
-            if (_all.Count > VisibleRows)
-                chrome += SystemInformation.VerticalScrollBarWidth;
+            var area = Screen.FromControl(this).WorkingArea;
+
+            // Height = a CONSTANT 20 grid rows + panels, capped at 80% of the
+            // screen. On a small screen / high DPI the cap can bite, which forces
+            // the grid to show a vertical scrollbar — detect that so the width can
+            // reserve room for it (otherwise the last column clips under it).
+            int gridH = _grid.ColumnHeadersHeight
+                      + _grid.RowTemplate.Height * VisibleRows + S(2);
+            int desiredH = _topPanel.Height + gridH + _bottomPanel.Height;
+            int borderH = this.Height - this.ClientSize.Height;
+            int maxClientH = (int)(area.Height * MaxScreenFraction) - borderH;
+            int clientH = Math.Min(desiredH, maxClientH);
+            bool needsVScroll = desiredH > maxClientH; // height got clamped
+
+            // Pages cap at PageSize (== VisibleRows) rows, so normally no vertical
+            // scrollbar — reserve its width ONLY when the height clamp forced one.
+            int chrome = S(4) + (needsVScroll ? SystemInformation.VerticalScrollBarWidth : 0);
             int clientW = totalCols + chrome;
 
-            var area = Screen.FromControl(this).WorkingArea;
             int borderW = this.Width - this.ClientSize.Width;   // 0 before shown
             int maxClientW = (int)(area.Width * MaxScreenFraction) - borderW;
             if (clientW > maxClientW) clientW = maxClientW;
             int minClientW = S(800);                            // keep top row visible
             if (clientW < minClientW) clientW = minClientW;
-
-            int gridH = _grid.ColumnHeadersHeight
-                      + _grid.RowTemplate.Height * VisibleRows + S(2);
-            int clientH = _topPanel.Height + gridH + _bottomPanel.Height;
-            int borderH = this.Height - this.ClientSize.Height;
-            int maxClientH = (int)(area.Height * MaxScreenFraction) - borderH;
-            if (clientH > maxClientH) clientH = maxClientH;
 
             this.ClientSize = new Size(clientW, clientH);
         }
@@ -751,21 +1109,95 @@ namespace PDMLite
             _btnExport.Left  = _btnRefresh.Right + gap;
             _btnClear.Left   = _btnExport.Right + gap;
 
-            if (_summary != null)
-                _summary.Left = Math.Max(S(14), (panelW - _summary.Width) / 2);
+            if (_summaryPanel != null)
+                _summaryPanel.Left = Math.Max(S(14),
+                    (panelW - _summaryPanel.Width) / 2);
+
+            if (_lblHint != null)
+                _lblHint.Left = Math.Max(S(14), (panelW - _lblHint.Width) / 2);
+        }
+
+        // Whole-vault counts are invariant under filtering, so compute them ONCE
+        // per load (Refresh) instead of re-scanning _all on every keystroke.
+        private void ComputeVaultCounts()
+        {
+            _cntWip = _cntRel = _cntLck = _cntBrk = 0;
+            foreach (var f in _all)
+            {
+                if (Eq(f.Status, "WIP"))           _cntWip++;
+                else if (Eq(f.Status, "Released")) _cntRel++;
+                else if (Eq(f.Status, "Locked"))   _cntLck++;
+                if (f.HasBrokenRefs)               _cntBrk++;
+            }
         }
 
         private void UpdateSummary(int showing)
         {
-            int wip = _all.Count(f => Eq(f.Status, "WIP"));
-            int rel = _all.Count(f => Eq(f.Status, "Released"));
-            int lck = _all.Count(f => Eq(f.Status, "Locked"));
-            int brk = _all.Count(f => f.HasBrokenRefs);
+            _lblTotal.Text    = $"Total: {_all.Count}";
+            _lblWip.Text      = $"WIP: {_cntWip}";
+            _lblReleased.Text = $"Released: {_cntRel}";
+            _lblLocked.Text   = $"Locked: {_cntLck}";
+            _lblBroken.Text   = $"Broken Refs: {_cntBrk}";
 
-            _summary.Text =
-                $"Total: {_all.Count}      WIP: {wip}      Released: {rel}" +
-                $"      Locked: {lck}      Broken Refs: {brk}" +
-                $"          (Showing {showing})";
+            int from = showing == 0 ? 0 : PageStart + 1;
+            int to = Math.Min(showing, PageStart + PageSize);
+            _lblShowing.Text =
+                $"     (Showing {from}–{to} of {showing}" +
+                $" · Page {_page + 1} of {PageCount}" +
+                $" · as of {_loadedAt:HH:mm})";
+
+            // Underline the active quick-filter so it's obvious what's applied.
+            SetActive(_lblWip,      IsStatusFilter("WIP"));
+            SetActive(_lblReleased, IsStatusFilter("Released"));
+            SetActive(_lblLocked,   IsStatusFilter("Locked"));
+            SetActive(_lblBroken,   _brokenRefsOnly);
+        }
+
+        private void SetActive(Label l, bool active) =>
+            l.Font = active ? _summaryFontActive : _summaryFont;
+
+        // ── Summary quick-filter helpers ────────────────────────────────────
+        // A clickable count "link": blue, hand cursor. Text is set in
+        // UpdateSummary; the tip explains the click action.
+        private Label MakeCountLabel(string tip, Action onClick)
+        {
+            var l = new Label
+            {
+                Font = _summaryFont,
+                ForeColor = cBrand,
+                AutoSize = true,
+                Margin = new Padding(0, 0, S(14), 0),
+                Cursor = Cursors.Hand
+            };
+            if (_summaryTip == null) _summaryTip = new ToolTip();
+            _summaryTip.SetToolTip(l, tip);
+            if (onClick != null) l.Click += (s, e) => onClick();
+            return l;
+        }
+
+        // Is the Status column filtered to EXACTLY this one value?
+        private bool IsStatusFilter(string status)
+        {
+            HashSet<string> set;
+            return _colFilters.TryGetValue(3, out set)
+                && set.Count == 1 && set.Contains(status);
+        }
+
+        // Click a status count → toggle the Status column filter to that value.
+        private void ToggleStatusFilter(string status)
+        {
+            if (IsStatusFilter(status)) _colFilters.Remove(3);
+            else _colFilters[3] = new HashSet<string>(
+                new[] { status }, StringComparer.OrdinalIgnoreCase);
+            ApplyFilter();
+            _grid.Invalidate(); // repaint the Status header funnel glyph
+        }
+
+        // Click "Broken Refs" → toggle the broken-references-only view.
+        private void ToggleBrokenFilter()
+        {
+            _brokenRefsOnly = !_brokenRefsOnly;
+            ApplyFilter();
         }
 
         private static bool Eq(string a, string b) =>
@@ -782,12 +1214,193 @@ namespace PDMLite
         // ── Row open (deferred to caller) ───────────────────────────────────
         private void Grid_CellDoubleClick(object sender, DataGridViewCellEventArgs e)
         {
-            if (e.RowIndex < 0 || e.RowIndex >= _view.Count) return;
-            string path = _view[e.RowIndex].FilePath;
+            int idx = PageStart + e.RowIndex;
+            if (e.RowIndex < 0 || idx >= _view.Count) return;
+            OpenDeferred(_view[idx].FilePath);
+        }
+
+        // ── Row right-click menu ────────────────────────────────────────────
+        private void Grid_MouseDown(object sender, MouseEventArgs e)
+        {
+            if (e.Button != MouseButtons.Right) return;
+            var hit = _grid.HitTest(e.X, e.Y);
+            if (hit.RowIndex < 0) return; // not on a data row (header / empty area)
+            int idx = PageStart + hit.RowIndex;
+            if (idx < 0 || idx >= _view.Count) return;
+
+            _menuRowIndex = hit.RowIndex;
+            // Select the row under the cursor for visual feedback (FullRowSelect).
+            _grid.CurrentCell = _grid[Math.Max(0, hit.ColumnIndex), hit.RowIndex];
+
+            // The linked item flips Drawing↔Model by row type; disabled if none.
+            // Resolved IN-MEMORY from _all (the dashboard never hits the DB per
+            // row — see GetAllFiles), by the shared {basename}.ext convention.
+            var f = _view[idx];
+            bool isDrawing = (f.FileName ?? "")
+                .EndsWith(".slddrw", StringComparison.OrdinalIgnoreCase);
+            _menuLinkedPath = FindLinkedPath(f, wantDrawing: !isDrawing);
+            // Opening a config-specific drawing's model → land on that config.
+            _menuLinkedConfig = isDrawing
+                ? DrawingConfigToOpen(f, _menuLinkedPath) : null;
+            _miOpenLinked.Text = isDrawing ? "Open Model" : "Open Drawing";
+            _miOpenLinked.Enabled = !string.IsNullOrEmpty(_menuLinkedPath);
+
+            _rowMenu.Show(_grid, e.Location);
+        }
+
+        // The path of the file linked to f, resolved from the in-memory _all list
+        // (no DB/disk hit). wantDrawing → f's drawing; else f's model.
+        //
+        // Drawing→model uses the drawing's ReferencedModel link FIRST (covers a
+        // config-specific {configName}.slddrw, whose basename differs from the
+        // model — e.g. DEMO.05.slddrw documents "FILE 1.sldprt" config DEMO.05),
+        // then falls back to the shared {basename} convention. Model→drawing
+        // prefers the shared {basename}.slddrw, else any drawing that references
+        // this model. null if none.
+        private string FindLinkedPath(VaultFile f, bool wantDrawing)
+        {
+            if (f == null || string.IsNullOrEmpty(f.FileName)) return null;
+            string baseName = Path.GetFileNameWithoutExtension(f.FileName);
+
+            if (!wantDrawing)
+            {
+                // f is a drawing → find its model.
+                string refModel = f.ReferencedModel;
+                string refName = string.IsNullOrEmpty(refModel)
+                    ? null : Path.GetFileName(refModel);
+                VaultFile byBase = null;
+                foreach (var o in _all)
+                {
+                    if (ReferenceEquals(o, f)) continue;
+                    if (!IsModel(o)) continue;
+                    // Explicit reference match (by full path or filename) wins.
+                    if (refName != null &&
+                        (PathEq(o.FilePath, refModel) || NameEq(o.FileName, refName)))
+                        return o.FilePath;
+                    if (byBase == null && BaseEq(o.FileName, baseName))
+                        byBase = o;
+                }
+                return byBase == null ? null : byBase.FilePath;
+            }
+
+            // f is a model → find its drawing.
+            VaultFile byRef = null;
+            foreach (var o in _all)
+            {
+                if (ReferenceEquals(o, f)) continue;
+                if (!(o.FileName ?? "").EndsWith(".slddrw",
+                        StringComparison.OrdinalIgnoreCase))
+                    continue;
+                if (BaseEq(o.FileName, baseName)) return o.FilePath; // shared drawing
+                if (byRef == null && !string.IsNullOrEmpty(o.ReferencedModel) &&
+                    PathEq(o.ReferencedModel, f.FilePath))
+                    byRef = o; // a config-specific drawing referencing this model
+            }
+            return byRef == null ? null : byRef.FilePath;
+        }
+
+        private static bool IsModel(VaultFile o)
+        {
+            string ext = (Path.GetExtension(o.FileName ?? "") ?? "").ToLowerInvariant();
+            return ext == ".sldprt" || ext == ".sldasm";
+        }
+        private static bool PathEq(string a, string b) =>
+            !string.IsNullOrEmpty(a) &&
+            string.Equals(a, b, StringComparison.OrdinalIgnoreCase);
+        private static bool NameEq(string a, string b) =>
+            string.Equals(a ?? "", b ?? "", StringComparison.OrdinalIgnoreCase);
+        private static bool BaseEq(string fileName, string baseName) =>
+            string.Equals(Path.GetFileNameWithoutExtension(fileName ?? ""),
+                baseName, StringComparison.OrdinalIgnoreCase);
+
+        // The VaultFile the menu was opened on (null if the view changed under it).
+        private VaultFile MenuRow()
+        {
+            int idx = PageStart + _menuRowIndex;
+            if (idx < 0 || idx >= _view.Count) return null;
+            return _view[idx];
+        }
+
+        // Defer the open to the caller (OpenByPath runs after this modal closes).
+        // config = optional configuration to switch the file to once open.
+        private void OpenDeferred(string path, string config = null)
+        {
             if (string.IsNullOrEmpty(path)) return;
             FileToOpen = path;
+            FileToOpenConfig = config;
             this.DialogResult = DialogResult.OK;
             Close();
+        }
+
+        private void MenuOpen()
+        {
+            var f = MenuRow();
+            if (f != null) OpenDeferred(f.FilePath);
+        }
+
+        private void MenuOpenLinked()
+        {
+            if (!string.IsNullOrEmpty(_menuLinkedPath))
+                OpenDeferred(_menuLinkedPath, _menuLinkedConfig);
+        }
+
+        // The configuration a drawing documents — used to land its model on the
+        // right config. Prefers the drawing's ReferencedConfigs when it names a
+        // SINGLE config; else falls back to a config-specific {configName}.slddrw
+        // filename (basename ≠ the model's). Null = open at the active config
+        // (shared / all-config drawing). The switch itself is best-effort.
+        private string DrawingConfigToOpen(VaultFile drawing, string modelPath)
+        {
+            if (drawing == null) return null;
+            var refs = (drawing.ReferencedConfigs ?? "")
+                .Split(',').Select(s => s.Trim())
+                .Where(s => s.Length > 0).ToList();
+            if (refs.Count == 1) return refs[0];
+            if (refs.Count > 1) return null; // documents several → don't force one
+
+            string drwBase = Path.GetFileNameWithoutExtension(drawing.FileName ?? "");
+            string modelBase = Path.GetFileNameWithoutExtension(
+                Path.GetFileName(modelPath ?? ""));
+            if (!string.IsNullOrEmpty(drwBase) &&
+                !string.Equals(drwBase, modelBase, StringComparison.OrdinalIgnoreCase))
+                return drwBase; // config-specific by filename convention
+            return null;        // shared drawing → active config
+        }
+
+        private void MenuCopyPath()
+        {
+            var f = MenuRow();
+            if (f == null || string.IsNullOrEmpty(f.FilePath)) return;
+            try { Clipboard.SetText(f.FilePath); } catch { /* clipboard busy — ignore */ }
+        }
+
+        // Open Explorer with the file selected (or its folder if the file is gone).
+        private void MenuOpenFolder()
+        {
+            var f = MenuRow();
+            if (f == null || string.IsNullOrEmpty(f.FilePath)) return;
+            try
+            {
+                if (File.Exists(f.FilePath))
+                {
+                    System.Diagnostics.Process.Start(
+                        "explorer.exe", "/select,\"" + f.FilePath + "\"");
+                    return;
+                }
+                string dir = Path.GetDirectoryName(f.FilePath);
+                if (!string.IsNullOrEmpty(dir) && Directory.Exists(dir))
+                    System.Diagnostics.Process.Start("explorer.exe", "\"" + dir + "\"");
+                else
+                    MessageBox.Show("Folder not found:\n" + dir,
+                        "BCore PDM — Vault Dashboard",
+                        MessageBoxButtons.OK, MessageBoxIcon.Information);
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show("Could not open the folder.\n\n" + ex.Message,
+                    "BCore PDM — Vault Dashboard",
+                    MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            }
         }
 
         // ── Export the CURRENT (filtered) view to CSV ───────────────────────
@@ -853,6 +1466,42 @@ namespace PDMLite
                 field.IndexOf('\n') >= 0 || field.IndexOf('\r') >= 0)
                 return "\"" + field.Replace("\"", "\"\"") + "\"";
             return field;
+        }
+
+        // ────────────────────────────────────────────────────────────────────
+        //  Flat, on-brand renderer for the row right-click menu: white drop-down,
+        //  brand-blue highlight on hover, subtle border. Replaces the dull grey
+        //  gradient of the default OS menu so it matches the rest of the app.
+        // ────────────────────────────────────────────────────────────────────
+        private sealed class MenuColors : ProfessionalColorTable
+        {
+            private readonly Color _sel, _border, _bg;
+            public MenuColors(Color sel, Color border, Color bg)
+            { _sel = sel; _border = border; _bg = bg; }
+            public override Color MenuItemSelected => _sel;
+            public override Color MenuItemSelectedGradientBegin => _sel;
+            public override Color MenuItemSelectedGradientEnd => _sel;
+            public override Color MenuItemBorder => _sel;
+            public override Color MenuBorder => _border;
+            public override Color ToolStripDropDownBackground => _bg;
+            public override Color ImageMarginGradientBegin => _bg;
+            public override Color ImageMarginGradientMiddle => _bg;
+            public override Color ImageMarginGradientEnd => _bg;
+            public override Color SeparatorDark => _border;
+            public override Color SeparatorLight => _bg;
+        }
+
+        private sealed class MenuRenderer : ToolStripProfessionalRenderer
+        {
+            private readonly Color _text, _textDisabled;
+            public MenuRenderer(ProfessionalColorTable t, Color text, Color textDisabled)
+                : base(t) { RoundedEdges = false; _text = text; _textDisabled = textDisabled; }
+            protected override void OnRenderItemText(ToolStripItemTextRenderEventArgs e)
+            {
+                e.TextColor = !e.Item.Enabled ? _textDisabled
+                            : e.Item.Selected ? Color.White : _text;
+                base.OnRenderItemText(e);
+            }
         }
 
         // ────────────────────────────────────────────────────────────────────
