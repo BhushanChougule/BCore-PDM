@@ -796,8 +796,9 @@ namespace PDMLite
             _brokenRefsOnly = false;                  // clear the broken-refs view
             _sortColumn = DefaultSortColumn;          // back to newest-first
             _sortDir = ListSortDirection.Descending;
-            _search.Text = "";       // triggers a debounced re-filter…
-            ApplyFilter();           // …and apply immediately too
+            _search.Text = "";       // raises TextChanged → starts the debounce timer…
+            _searchTimer.Stop();     // …cancel it; we apply once now instead of twice
+            ApplyFilter();
             _grid.Invalidate();      // repaint headers (clear funnel/sort glyphs)
         }
 
@@ -975,24 +976,30 @@ namespace PDMLite
             int totalCols = 0;
             foreach (DataGridViewColumn c in _grid.Columns) totalCols += c.Width;
 
-            // Pages cap at PageSize (== VisibleRows) rows, so a page never needs a
-            // vertical scrollbar — no width reserved for one.
-            int chrome = S(4);
+            var area = Screen.FromControl(this).WorkingArea;
+
+            // Height = a CONSTANT 20 grid rows + panels, capped at 80% of the
+            // screen. On a small screen / high DPI the cap can bite, which forces
+            // the grid to show a vertical scrollbar — detect that so the width can
+            // reserve room for it (otherwise the last column clips under it).
+            int gridH = _grid.ColumnHeadersHeight
+                      + _grid.RowTemplate.Height * VisibleRows + S(2);
+            int desiredH = _topPanel.Height + gridH + _bottomPanel.Height;
+            int borderH = this.Height - this.ClientSize.Height;
+            int maxClientH = (int)(area.Height * MaxScreenFraction) - borderH;
+            int clientH = Math.Min(desiredH, maxClientH);
+            bool needsVScroll = desiredH > maxClientH; // height got clamped
+
+            // Pages cap at PageSize (== VisibleRows) rows, so normally no vertical
+            // scrollbar — reserve its width ONLY when the height clamp forced one.
+            int chrome = S(4) + (needsVScroll ? SystemInformation.VerticalScrollBarWidth : 0);
             int clientW = totalCols + chrome;
 
-            var area = Screen.FromControl(this).WorkingArea;
             int borderW = this.Width - this.ClientSize.Width;   // 0 before shown
             int maxClientW = (int)(area.Width * MaxScreenFraction) - borderW;
             if (clientW > maxClientW) clientW = maxClientW;
             int minClientW = S(800);                            // keep top row visible
             if (clientW < minClientW) clientW = minClientW;
-
-            int gridH = _grid.ColumnHeadersHeight
-                      + _grid.RowTemplate.Height * VisibleRows + S(2);
-            int clientH = _topPanel.Height + gridH + _bottomPanel.Height;
-            int borderH = this.Height - this.ClientSize.Height;
-            int maxClientH = (int)(area.Height * MaxScreenFraction) - borderH;
-            if (clientH > maxClientH) clientH = maxClientH;
 
             this.ClientSize = new Size(clientW, clientH);
         }
