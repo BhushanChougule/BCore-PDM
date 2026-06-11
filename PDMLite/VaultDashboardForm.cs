@@ -83,7 +83,9 @@ namespace PDMLite
         // Row right-click menu (Open / Open linked / Copy path / Open folder).
         private ContextMenuStrip _rowMenu;
         private ToolStripMenuItem _miOpen, _miOpenLinked, _miCopyPath, _miOpenFolder;
-        private int _menuRowIndex = -1;   // grid row the menu was opened on
+        private int _menuViewIndex = -1;  // ABSOLUTE _view index the menu was opened
+                                          // on (not grid-relative): a page change
+                                          // while the menu is up can't retarget it
         private string _menuLinkedPath;   // drawing for a model row, model for a drawing row
         private string _menuLinkedConfig; // config to land on when opening a drawing's model
 
@@ -433,7 +435,11 @@ namespace PDMLite
                 _searchTimer.Stop();
                 _searchTimer.Dispose();
                 _cellBold?.Dispose();
+                // Null the pager font after disposing: _bottomPanel.Resize stays
+                // wired during teardown and would call BuildPager → MeasureText on
+                // a disposed font. BuildPager early-returns when _pagerFont == null.
                 _pagerFont?.Dispose();
+                _pagerFont = null;
                 _summaryFont?.Dispose();
                 _summaryFontActive?.Dispose();
                 _summaryTip?.Dispose();
@@ -536,7 +542,9 @@ namespace PDMLite
         }
 
         // Days a WIP file has sat since its last save (staleness). -1 = not a WIP
-        // file (or no modified date), shown as a blank cell and sorted as "oldest".
+        // file (or no modified date): shown as a blank cell. As the smallest value
+        // it sorts to the TOP ascending / the BOTTOM descending — so sorting the
+        // column descending surfaces the stalest real WIP files first, blanks last.
         private int WipDays(VaultFile f)
         {
             if (!Eq(f.Status, "WIP") || f.ModifiedDate == DateTime.MinValue) return -1;
@@ -646,10 +654,8 @@ namespace PDMLite
             // No per-row objects are created, so this stays instant at 50–100k rows.
             _view = view;
             _page = 0;
-            ShowGridPage();
-
-            UpdateSummary(_view.Count);
-            LayoutTopControls(); // re-centre: the summary width changed
+            ShowGridPage();          // also refreshes the summary (page indicator)
+            LayoutTopControls();     // re-centre: the summary width changed
         }
 
         // Render the current page: clamp _page, set the grid's RowCount to just
@@ -664,13 +670,19 @@ namespace PDMLite
             _grid.RowCount = Math.Max(0, Math.Min(PageSize, _view.Count - PageStart));
             _grid.Invalidate();
             BuildPager();
+            // Refresh the summary HERE so the "Showing X–Y · Page N of M" indicator
+            // can never desync from the rendered page — any future direct
+            // ShowGridPage() caller stays correct without remembering to follow up.
+            UpdateSummary(_view.Count);
         }
 
         private void GoToPage(int page)
         {
-            _page = page;
+            int target = Math.Max(0, Math.Min(page, PageCount - 1));
+            if (target == _page) return; // dead-end key press (PgUp at first / PgDn
+                                         // at last): skip the pager teardown+repaint
+            _page = target;
             ShowGridPage();
-            UpdateSummary(_view.Count); // refresh "Page X of Y" in the summary
             LayoutTopControls();
         }
 
@@ -1228,7 +1240,7 @@ namespace PDMLite
             int idx = PageStart + hit.RowIndex;
             if (idx < 0 || idx >= _view.Count) return;
 
-            _menuRowIndex = hit.RowIndex;
+            _menuViewIndex = idx; // store the ABSOLUTE _view index, not grid-relative
             // Select the row under the cursor for visual feedback (FullRowSelect).
             _grid.CurrentCell = _grid[Math.Max(0, hit.ColumnIndex), hit.RowIndex];
 
@@ -1316,7 +1328,7 @@ namespace PDMLite
         // The VaultFile the menu was opened on (null if the view changed under it).
         private VaultFile MenuRow()
         {
-            int idx = PageStart + _menuRowIndex;
+            int idx = _menuViewIndex; // absolute index captured at right-click time
             if (idx < 0 || idx >= _view.Count) return null;
             return _view[idx];
         }
