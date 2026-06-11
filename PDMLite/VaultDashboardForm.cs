@@ -73,6 +73,12 @@ namespace PDMLite
         // Special non-column filter: show only files with broken references
         // (HasBrokenRefs is a flag, not a column, so it can't live in _colFilters).
         private bool _brokenRefsOnly = false;
+        private Label _lblHint;       // faint discoverability footer in the top panel
+        private DateTime _loadedAt;   // snapshot time, shown in the summary as "as of HH:mm"
+        // Whole-vault counts — invariant under filtering, so cached once per load
+        // (UpdateSummary used to re-scan _all 4× on every keystroke / page click).
+        private int _cntWip, _cntRel, _cntLck, _cntBrk;
+        private const int ColWipDays = 9; // appended "WIP Days" column index
 
         // Row right-click menu (Open / Open linked / Copy path / Open folder).
         private ContextMenuStrip _rowMenu;
@@ -124,6 +130,39 @@ namespace PDMLite
             _scale = scale;
             BuildForm();
             LoadData();
+        }
+
+        // Keyboard navigation. ProcessCmdKey fires before any control handles the
+        // key, so this works wherever focus is. PageUp/Down + Ctrl+Home/End drive
+        // the pager; Enter opens the selected row (or applies the search); Ctrl+F
+        // jumps to the search box; Esc closes.
+        protected override bool ProcessCmdKey(ref Message msg, Keys keyData)
+        {
+            switch (keyData)
+            {
+                case Keys.Control | Keys.F:
+                    _search.Focus(); _search.SelectAll(); return true;
+                case Keys.PageDown: GoToPage(_page + 1); return true;
+                case Keys.PageUp:   GoToPage(_page - 1); return true;
+                case Keys.Control | Keys.Home: GoToPage(0); return true;
+                case Keys.Control | Keys.End:  GoToPage(PageCount - 1); return true;
+                case Keys.Escape:
+                    this.DialogResult = DialogResult.Cancel; Close(); return true;
+                case Keys.Enter:
+                    if (_search != null && _search.Focused)
+                    { _searchTimer.Stop(); ApplyFilter(); return true; }
+                    if (_grid != null && _grid.Focused) { OpenSelectedRow(); return true; }
+                    break; // let a focused button handle Enter
+            }
+            return base.ProcessCmdKey(ref msg, keyData);
+        }
+
+        private void OpenSelectedRow()
+        {
+            if (_grid.CurrentCell == null) return;
+            int idx = PageStart + _grid.CurrentCell.RowIndex;
+            if (idx < 0 || idx >= _view.Count) return;
+            OpenDeferred(_view[idx].FilePath);
         }
 
         // ── Win32 cue banner (placeholder text — not available on .NET 4.8) ──
@@ -253,10 +292,22 @@ namespace PDMLite
             });
             _topPanel.Controls.Add(_summaryPanel);
 
-            // Tighten the panel to the summary so the grid sits right below it
-            // (removes the dead space under the counts). Use the font line height
-            // (stable regardless of label text) so the panel never clips.
-            _topPanel.Height = summaryY + (int)_summaryFont.GetHeight() + S(10);
+            // Faint discoverability footer below the counts — new users won't
+            // guess the right-click menu / column-resize / clickable counts.
+            int hintY = summaryY + (int)_summaryFont.GetHeight() + S(4);
+            _lblHint = new Label
+            {
+                Text = "Double-click or right-click a row to open  ·  drag a column edge to "
+                     + "resize  ·  click a count to filter  ·  PgUp/PgDn to page",
+                Font = new Font("Segoe UI", 3.1f * _scale),
+                ForeColor = Color.FromArgb(150, 158, 170),
+                AutoSize = true,
+                Location = new Point(S(14), hintY)
+            };
+            _topPanel.Controls.Add(_lblHint);
+
+            // Tighten the panel to the hint so the grid sits right below it.
+            _topPanel.Height = hintY + (int)_lblHint.Font.GetHeight() + S(8);
             _topPanel.Resize += (s, e) => LayoutTopControls();
 
             // ── Bottom panel: Close ───────────────────────────────────────
@@ -360,6 +411,14 @@ namespace PDMLite
             AddColumn("Modified Date", typeof(DateTime), "MM/dd/yyyy HH:mm");
             AddColumn("Released By");
             AddColumn("Released Date", typeof(DateTime), "MM/dd/yyyy HH:mm");
+            // Derived staleness metric: days since a WIP file was last modified
+            // (blank for non-WIP). Appended at the end (index 9) so the existing
+            // hard-coded column indices (Status=3, dates=6/8) are untouched.
+            AddColumn("WIP Days");
+            _grid.Columns[ColWipDays].DefaultCellStyle.Alignment =
+                DataGridViewContentAlignment.MiddleRight;
+            _grid.Columns[ColWipDays].HeaderCell.ToolTipText =
+                "Days since last modified (WIP files only) · click to sort by staleness";
 
             // Add Fill control FIRST, then the docked edge panels, so the grid
             // occupies the leftover space between them.
@@ -434,6 +493,8 @@ namespace PDMLite
                     MessageBoxButtons.OK, MessageBoxIcon.Warning);
                 _all = new List<VaultFile>();
             }
+            _loadedAt = DateTime.Now;   // shown in the summary as "as of HH:mm"
+            ComputeVaultCounts();       // cache whole-vault counts for the summary
             // Populate the grid, then size columns to the full data ONCE and fit
             // the form to them — so columns/width stay stable while the user
             // types in the search box (no per-keystroke resizing).
@@ -467,16 +528,29 @@ namespace PDMLite
                 case 7: return f.ReleasedBy ?? "";
                 case 8: return f.ReleasedDate == DateTime.MinValue
                             ? "" : f.ReleasedDate.ToString("MM/dd/yyyy HH:mm");
+                case ColWipDays:
+                    int d = WipDays(f);
+                    return d < 0 ? "" : d.ToString(CultureInfo.InvariantCulture);
                 default: return "";
             }
         }
 
-        // Sort key: date columns sort by the real DateTime (chronological);
-        // everything else sorts by its lower-cased display text.
+        // Days a WIP file has sat since its last save (staleness). -1 = not a WIP
+        // file (or no modified date), shown as a blank cell and sorted as "oldest".
+        private int WipDays(VaultFile f)
+        {
+            if (!Eq(f.Status, "WIP") || f.ModifiedDate == DateTime.MinValue) return -1;
+            int d = (int)(DateTime.Now.Date - f.ModifiedDate.Date).TotalDays;
+            return d < 0 ? 0 : d;
+        }
+
+        // Sort key: date columns sort by the real DateTime (chronological); WIP
+        // Days sorts by the numeric age; everything else by lower-cased text.
         private Func<VaultFile, IComparable> KeySelector(int col)
         {
             if (col == 6) return f => f.ModifiedDate;
             if (col == 8) return f => f.ReleasedDate;
+            if (col == ColWipDays) return f => WipDays(f);
             return f => (CellText(f, col) ?? "").ToLowerInvariant();
         }
 
@@ -529,6 +603,12 @@ namespace PDMLite
                     return DateTime.TryParseExact(v, "MM/dd/yyyy",
                         CultureInfo.InvariantCulture, DateTimeStyles.None, out d)
                         ? d : DateTime.MinValue; // blanks sort earliest
+                }).ToList();
+            if (col == ColWipDays) // numeric: "2" before "10"; blank first
+                return values.OrderBy(v =>
+                {
+                    int n;
+                    return int.TryParse(v, out n) ? n : -1;
                 }).ToList();
             return values.OrderBy(v => v, StringComparer.OrdinalIgnoreCase).ToList();
         }
@@ -761,6 +841,7 @@ namespace PDMLite
                 case 7: e.Value = f.ReleasedBy; break;
                 case 8: e.Value = f.ReleasedDate == DateTime.MinValue
                             ? (object)DBNull.Value : f.ReleasedDate; break;
+                case ColWipDays: e.Value = CellText(f, ColWipDays); break;
             }
         }
 
@@ -786,8 +867,12 @@ namespace PDMLite
         {
             int idx = PageStart + e.RowIndex;
             if (e.RowIndex < 0 || idx >= _view.Count) return; // keep header tooltips
-            if (e.ColumnIndex == 0 && _view[idx].HasBrokenRefs)
+            var f = _view[idx];
+            if (e.ColumnIndex == 0 && f.HasBrokenRefs)
                 e.ToolTipText = "Has broken references";
+            else if (e.ColumnIndex == 3 && Eq(f.Status, "Locked") &&
+                     !string.IsNullOrEmpty(f.LockedBy))
+                e.ToolTipText = "Locked by " + f.LockedBy;
         }
 
         private void ClearAllFilters()
@@ -1027,26 +1112,39 @@ namespace PDMLite
             if (_summaryPanel != null)
                 _summaryPanel.Left = Math.Max(S(14),
                     (panelW - _summaryPanel.Width) / 2);
+
+            if (_lblHint != null)
+                _lblHint.Left = Math.Max(S(14), (panelW - _lblHint.Width) / 2);
+        }
+
+        // Whole-vault counts are invariant under filtering, so compute them ONCE
+        // per load (Refresh) instead of re-scanning _all on every keystroke.
+        private void ComputeVaultCounts()
+        {
+            _cntWip = _cntRel = _cntLck = _cntBrk = 0;
+            foreach (var f in _all)
+            {
+                if (Eq(f.Status, "WIP"))           _cntWip++;
+                else if (Eq(f.Status, "Released")) _cntRel++;
+                else if (Eq(f.Status, "Locked"))   _cntLck++;
+                if (f.HasBrokenRefs)               _cntBrk++;
+            }
         }
 
         private void UpdateSummary(int showing)
         {
-            int wip = _all.Count(f => Eq(f.Status, "WIP"));
-            int rel = _all.Count(f => Eq(f.Status, "Released"));
-            int lck = _all.Count(f => Eq(f.Status, "Locked"));
-            int brk = _all.Count(f => f.HasBrokenRefs);
-
             _lblTotal.Text    = $"Total: {_all.Count}";
-            _lblWip.Text      = $"WIP: {wip}";
-            _lblReleased.Text = $"Released: {rel}";
-            _lblLocked.Text   = $"Locked: {lck}";
-            _lblBroken.Text   = $"Broken Refs: {brk}";
+            _lblWip.Text      = $"WIP: {_cntWip}";
+            _lblReleased.Text = $"Released: {_cntRel}";
+            _lblLocked.Text   = $"Locked: {_cntLck}";
+            _lblBroken.Text   = $"Broken Refs: {_cntBrk}";
 
             int from = showing == 0 ? 0 : PageStart + 1;
             int to = Math.Min(showing, PageStart + PageSize);
             _lblShowing.Text =
                 $"     (Showing {from}–{to} of {showing}" +
-                $" · Page {_page + 1} of {PageCount})";
+                $" · Page {_page + 1} of {PageCount}" +
+                $" · as of {_loadedAt:HH:mm})";
 
             // Underline the active quick-filter so it's obvious what's applied.
             SetActive(_lblWip,      IsStatusFilter("WIP"));
