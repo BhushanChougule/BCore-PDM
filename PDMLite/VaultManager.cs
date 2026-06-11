@@ -213,19 +213,81 @@ namespace PDMLite
             string rev = PropertyValidator.GetProperty(doc, "Revision");
             string drawingNo = PropertyValidator.GetProperty(doc, "DrawingNo");
 
-            // Associated drawing (models only). Always scrapped together with
-            // the model — a drawing without its referenced model is blank and
-            // useless. Released drawings are NOT exempt: the Released status
-            // becomes meaningless without the model they document.
-            string drwPath = isDrawing ? null : FindDrawingPath(filePath);
-            bool removeDrawing = drwPath != null;
+            // Per-config identity (models only). Exports are named per config
+            // ({cfgPartNo}-R{rev}.step, {cfgDrawingNo} REV {rev}.pdf), so the
+            // active config's numbers alone would leave every OTHER config's
+            // deliverables behind in EXPORTS — stale "current" files for a
+            // part that no longer exists in the vault.
+            var cfgNames = isDrawing
+                ? new List<string>()
+                : PropertyValidator.GetConfigNames(doc);
+            var scrapPartNos = new List<string>();
+            var scrapDrawingNos = new List<string>();
+            foreach (string cfg in cfgNames)
+            {
+                string cp = PropertyValidator.GetProperty(doc, "PartNo", cfg);
+                string cd = PropertyValidator.GetProperty(doc, "DrawingNo", cfg);
+                if (!string.IsNullOrEmpty(cp) &&
+                    !scrapPartNos.Contains(cp, StringComparer.OrdinalIgnoreCase))
+                    scrapPartNos.Add(cp);
+                if (!string.IsNullOrEmpty(cd) &&
+                    !scrapDrawingNos.Contains(cd, StringComparer.OrdinalIgnoreCase))
+                    scrapDrawingNos.Add(cd);
+            }
+            // Config enumeration is best-effort — fall back to the active
+            // config's numbers so a transient failure never scraps NOTHING.
+            if (!isDrawing && scrapPartNos.Count == 0 &&
+                !string.IsNullOrEmpty(partNo))
+                scrapPartNos.Add(partNo);
+            if (!isDrawing && scrapDrawingNos.Count == 0 &&
+                !string.IsNullOrEmpty(drawingNo))
+                scrapDrawingNos.Add(drawingNo);
 
+            // Associated drawings (models only): the shared {basename}.slddrw
+            // plus every CONFIG-SPECIFIC drawing ({configName}.slddrw) — the
+            // shared search alone left config-specific drawings orphaned in
+            // WIP with live DB records pointing at a removed model. Always
+            // scrapped together with the model — a drawing without its
+            // referenced model is blank and useless. Released drawings are
+            // NOT exempt: the Released status becomes meaningless without the
+            // model they document. Deduped by FILENAME, preferring the
+            // canonical WIP path (a legacy RELEASED-copy record of the same
+            // drawing must not shadow the real working file).
+            var drwPaths = new List<string>();
+            if (!isDrawing)
+            {
+                string shared = FindDrawingPath(filePath);
+                if (shared != null) drwPaths.Add(shared);
+                foreach (string cfg in cfgNames)
+                    foreach (string dp in
+                        DatabaseManager.GetDrawingsForConfig(filePath, cfg))
+                    {
+                        string dpName = Path.GetFileName(dp);
+                        int dupAt = drwPaths.FindIndex(p =>
+                            Path.GetFileName(p).Equals(dpName,
+                                StringComparison.OrdinalIgnoreCase));
+                        if (dupAt < 0)
+                            drwPaths.Add(dp);
+                        else if (!drwPaths[dupAt].StartsWith(WipFolder,
+                                     StringComparison.OrdinalIgnoreCase) &&
+                                 dp.StartsWith(WipFolder,
+                                     StringComparison.OrdinalIgnoreCase))
+                            drwPaths[dupAt] = dp;
+                    }
+            }
+            bool removeDrawing = drwPaths.Count > 0;
+
+            string drwNames = string.Join(", ",
+                drwPaths.Select(Path.GetFileName));
             string confirmMsg =
                 "Remove " + fileName + " from the vault?\n\n" +
                 "Status : " + status + "\n\n" +
                 "The file" +
                 (removeDrawing
-                    ? " and its drawing (" + Path.GetFileName(drwPath) + "),"
+                    ? (drwPaths.Count == 1
+                        ? " and its drawing (" + drwNames + "),"
+                        : " and its " + drwPaths.Count + " drawings (" +
+                          drwNames + "),")
                     : "") +
                 " their released copies and exports will be MOVED to:\n" +
                 ScrapFolder + "\n\n" +
@@ -237,41 +299,54 @@ namespace PDMLite
                     != DialogResult.Yes) return;
 
             // Close open documents before moving files on disk (Windows holds a
-            // lock on an open file). Close the drawing first — it references the
-            // model, so the model can't close while the drawing is open.
-            if (drwPath != null)
+            // lock on an open file). Close the drawings first — they reference
+            // the model, so the model can't close while a drawing is open.
+            foreach (string dp in drwPaths)
             {
                 var openDrw = PDMLiteAddin.SwApp
-                    ?.GetOpenDocumentByName(drwPath) as ModelDoc2;
+                    ?.GetOpenDocumentByName(dp) as ModelDoc2;
                 if (openDrw != null)
-                    try { PDMLiteAddin.SwApp.CloseDoc(drwPath); } catch { }
+                    try { PDMLiteAddin.SwApp.CloseDoc(dp); } catch { }
             }
             try { PDMLiteAddin.SwApp.CloseDoc(filePath); } catch { }
 
             // Move the primary file's artifacts to SCRAP.
             MoveToScrap(filePath);
             MoveToScrap(Path.Combine(RelFolder, fileName));
-            if (isDrawing) ScrapExports(null, drawingNo);      // drawing → PDF only
-            else ScrapExports(partNo, drawingNo);             // model   → STEP + PDF
+            if (isDrawing)
+            {
+                ScrapExports(null, drawingNo);             // drawing → PDF only
+            }
+            else
+            {
+                // Model: STEP + BOM per config PartNo, PDF per config
+                // DrawingNo — covers the associated drawings' PDFs too.
+                foreach (string pn in scrapPartNos) ScrapExports(pn, null);
+                foreach (string dn in scrapDrawingNos) ScrapExports(null, dn);
+            }
             DatabaseManager.RemoveFileRecord(filePath);
             AuditLogger.Log("RemoveFromVault", user, fileName, partNo, rev,
                 "moved to SCRAP");
 
-            // Move the associated drawing's artifacts if the user opted in.
-            if (removeDrawing && drwPath != null)
+            // Move every associated drawing's artifacts (PDFs were already
+            // scrapped above via the per-config DrawingNos).
+            foreach (string dp in drwPaths)
             {
-                string drwName = Path.GetFileName(drwPath);
-                MoveToScrap(drwPath);
+                string drwName = Path.GetFileName(dp);
+                MoveToScrap(dp);
                 MoveToScrap(Path.Combine(RelFolder, drwName));
-                ScrapExports(null, drawingNo);
-                DatabaseManager.RemoveFileRecord(drwPath);
+                DatabaseManager.RemoveFileRecord(dp);
                 AuditLogger.Log("RemoveFromVault", user, drwName, partNo, rev,
                     "drawing of " + fileName + ", moved to SCRAP");
             }
 
             MessageBox.Show(
                 fileName + " removed from the vault." +
-                (removeDrawing ? "\nAssociated drawing also removed." : "") +
+                (removeDrawing
+                    ? "\n" + (drwPaths.Count == 1
+                        ? "Associated drawing also removed."
+                        : drwPaths.Count + " associated drawings also removed.")
+                    : "") +
                 "\n\nFiles moved to SCRAP:\n" + ScrapFolder,
                 "BCore PDM — Remove from Vault",
                 MessageBoxButtons.OK, MessageBoxIcon.Information);
