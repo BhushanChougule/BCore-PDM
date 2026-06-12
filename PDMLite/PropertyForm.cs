@@ -145,6 +145,12 @@ namespace PDMLite
         {
             _doc = doc;
             _fieldsToFill = emptyFields;
+            // askDrawingScope doubles as "new-config mode" (Rule 3.5): the
+            // Drawing scope row is appended, and the Revision dropdown is NOT
+            // prefilled with the value SOLIDWORKS copied from the source
+            // configuration — a new config is a NEW part number and must get
+            // an explicitly chosen revision (usually A), not inherit REV C.
+            _newConfigMode = askDrawingScope;
             if (askDrawingScope &&
                 !emptyFields.Contains("DrawingScope"))
             {
@@ -154,6 +160,8 @@ namespace PDMLite
             using (var g = CreateGraphics()) _scale = g.DpiX / 96f;
             BuildUI();
         }
+
+        private bool _newConfigMode;
 
         // Multi-config mode (release gate): ONE dialog showing every
         // configuration's missing fields, grouped BY FIELD with one row per
@@ -395,7 +403,11 @@ namespace PDMLite
                 };
                 combo.Items.AddRange(Dropdowns[field]);
                 combo.SelectedIndex = 0;
-                if (!string.IsNullOrEmpty(existing))
+                // New-config mode: leave Revision on "-- Select --" so the
+                // user must CHOOSE the new part number's revision instead of
+                // silently keeping the one copied from the source config.
+                bool suppressPrefill = _newConfigMode && field == "Revision";
+                if (!suppressPrefill && !string.IsNullOrEmpty(existing))
                 {
                     int idx = combo.FindStringExact(existing);
                     if (idx >= 0) combo.SelectedIndex = idx;
