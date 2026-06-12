@@ -609,9 +609,13 @@ namespace PDMLite
 
         // Filter keys of `col` over the rows that pass every OTHER active column
         // filter + the global search — so a column's dropdown NARROWS like Excel.
-        private IEnumerable<string> KeysPassingOtherFilters(int col)
+        // columnFiltersOnly: ignore the TRANSIENT global search and apply
+        // other COLUMN filters only — see VaultDashboardForm's twin.
+        private IEnumerable<string> KeysPassingOtherFilters(int col,
+            bool columnFiltersOnly = false)
         {
-            string term = (_search.Text ?? "").Trim().ToLowerInvariant();
+            string term = columnFiltersOnly ? ""
+                : (_search.Text ?? "").Trim().ToLowerInvariant();
             foreach (var e in _all)
             {
                 bool ok = true;
@@ -974,10 +978,20 @@ namespace PDMLite
             if (!_colFilters.TryGetValue(col, out current))
                 current = null; // null = currently unfiltered (all allowed)
 
-            var hiddenAllowed = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            // Values this column allows that are hidden by another COLUMN's
+            // filter — preserved on commit (removing that filter later must
+            // not silently drop them). Values hidden only by the TRANSIENT
+            // global search are NOT preserved: folding them back meant
+            // "search, Clear, tick one, OK" flooded the grid back the moment
+            // the search box cleared (the C5 symptom one level up).
+            var shownByColumns = new HashSet<string>(
+                KeysPassingOtherFilters(col, columnFiltersOnly: true),
+                StringComparer.OrdinalIgnoreCase);
+            var hiddenByColumns = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             foreach (var v in allKeys)
-                if (!shownSet.Contains(v) && (current == null || current.Contains(v)))
-                    hiddenAllowed.Add(v);
+                if (!shownByColumns.Contains(v) &&
+                    (current == null || current.Contains(v)))
+                    hiddenByColumns.Add(v);
 
             using (var dlg = new ColumnFilterDialog(_scale,
                 _grid.Columns[col].HeaderText, shown, current,
@@ -995,9 +1009,19 @@ namespace PDMLite
 
                 if (dlg.ShowDialog(this) == DialogResult.OK)
                 {
+                    // NO-CHANGE GUARD: OK without touching anything must stay
+                    // a no-op even while the global search narrows the list —
+                    // compare what the user ENDED UP ticking against what was
+                    // allowed-and-shown when the dialog opened.
+                    var beforeShown = new HashSet<string>(shownSet,
+                        StringComparer.OrdinalIgnoreCase);
+                    if (current != null) beforeShown.IntersectWith(current);
+                    if (dlg.SelectedValues.SetEquals(beforeShown)) return;
+
+                    // Ticked values + the column-hidden allowed ones.
                     var allowed = new HashSet<string>(dlg.SelectedValues,
                         StringComparer.OrdinalIgnoreCase);
-                    allowed.UnionWith(hiddenAllowed);
+                    allowed.UnionWith(hiddenByColumns);
 
                     if (allowed.Count >= allKeys.Count) _colFilters.Remove(col);
                     else _colFilters[col] = allowed;
@@ -1150,8 +1174,16 @@ namespace PDMLite
         private void ToggleActionFilter(string action)
         {
             if (IsActionFilter(action)) _colFilters.Remove(ColAction);
-            else _colFilters[ColAction] = new HashSet<string>(
-                new[] { action }, StringComparer.OrdinalIgnoreCase);
+            else
+            {
+                // Zero-count quick filters are inert (see dashboard twin).
+                int cnt = Eq(action, "Release") ? _cntRelease
+                        : Eq(action, "NewRevision") ? _cntRevision
+                        : Eq(action, "RemoveFromVault") ? _cntRemoval : -1;
+                if (cnt == 0) return;
+                _colFilters[ColAction] = new HashSet<string>(
+                    new[] { action }, StringComparer.OrdinalIgnoreCase);
+            }
             ApplyFilter();
             _grid.Invalidate(); // repaint the Action header funnel glyph
         }
@@ -1420,7 +1452,10 @@ namespace PDMLite
                 _list.ItemCheck += List_ItemCheck;
 
                 if (matched > _visibleRaw.Count)
-                    _count.Text = string.Format("{0:N0} of {1:N0} shown — type to narrow",
+                    _count.Text = string.Format(
+                        term.Length > 0
+                            ? "{0:N0} of {1:N0} matches — OK filters to ticked"
+                            : "{0:N0} of {1:N0} shown — type to narrow",
                         _visibleRaw.Count, matched);
                 else if (term.Length > 0)
                     _count.Text = matched == 0

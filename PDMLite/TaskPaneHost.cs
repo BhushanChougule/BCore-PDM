@@ -128,11 +128,12 @@ namespace PDMLite
                     // Background — brand blue
                     g.Clear(System.Drawing.Color.FromArgb(44, 85, 128));
 
-                    // White rounded rectangle feel
-                    g.FillRectangle(
-                        new System.Drawing.SolidBrush(
-                            System.Drawing.Color.FromArgb(255, 255, 255)),
-                        4, 4, 32, 32);
+                    // White rounded rectangle feel (using: this brush and
+                    // the StringFormat below leaked 2 GDI handles per add-in
+                    // load/reload cycle)
+                    using (var white = new System.Drawing.SolidBrush(
+                        System.Drawing.Color.FromArgb(255, 255, 255)))
+                        g.FillRectangle(white, 4, 4, 32, 32);
 
                     // Draw "BC" in brand color
                     using (System.Drawing.Font f = new System.Drawing.Font(
@@ -140,13 +141,13 @@ namespace PDMLite
                     using (System.Drawing.SolidBrush brush = new System.Drawing.SolidBrush(
                         System.Drawing.Color.FromArgb(44, 85, 128)))
                     {
-                        System.Drawing.StringFormat sf = new System.Drawing.StringFormat
+                        using (var sf = new System.Drawing.StringFormat
                         {
                             Alignment = System.Drawing.StringAlignment.Center,
                             LineAlignment = System.Drawing.StringAlignment.Center
-                        };
-                        g.DrawString("BC", f, brush,
-                            new System.Drawing.RectangleF(4, 4, 32, 32), sf);
+                        })
+                            g.DrawString("BC", f, brush,
+                                new System.Drawing.RectangleF(4, 4, 32, 32), sf);
                     }
 
                     bmp.Save(iconPath,

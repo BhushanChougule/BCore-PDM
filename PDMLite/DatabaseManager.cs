@@ -185,9 +185,22 @@ namespace PDMLite
                 return doc;
             }
 
+            // A degraded-mode writer on another machine can briefly hold
+            // vault.xml open (the direct-save last resort), and the reader
+            // had NO retry — the IOException propagated raw out of whatever
+            // UI path triggered the read. Retry genuine sharing violations
+            // briefly, mirroring the Save side.
+            for (int attempt = 0; ; attempt++)
+            {
             try
             {
                 return XDocument.Load(DataFile);
+            }
+            catch (IOException io) when (
+                (io.HResult & 0xFFFF) == 32 || (io.HResult & 0xFFFF) == 33)
+            {
+                if (attempt == 4) throw;
+                System.Threading.Thread.Sleep(200);
             }
             catch (System.Xml.XmlException)
             {
@@ -197,6 +210,7 @@ namespace PDMLite
                 var restored = TryRestoreFromBackup("vault.xml corrupt");
                 if (restored != null) return restored;
                 throw;
+            }
             }
         }
 
@@ -463,6 +477,28 @@ namespace PDMLite
         public static void Initialize()
         {
             lock (_lock) using (AcquireProcessLock()) { LoadOrCreate(); }
+
+            // Sweep stale per-process save temps (vault.xml.{machine}.{pid}
+            // .tmp): normally consumed by File.Replace/Move, but a crash or
+            // serialization failure strands them and nothing else ever
+            // deletes them — across 10+ machines they accumulate forever.
+            // Only temps older than a day are touched (a LIVE temp exists
+            // for milliseconds mid-save).
+            try
+            {
+                foreach (string tmp in Directory.GetFiles(
+                    VaultFolder, "vault.xml.*.tmp"))
+                {
+                    try
+                    {
+                        if (DateTime.UtcNow - File.GetLastWriteTimeUtc(tmp)
+                                > TimeSpan.FromDays(1))
+                            File.Delete(tmp);
+                    }
+                    catch { }
+                }
+            }
+            catch { }
 
             // Ensure WIP division subfolders exist so engineers can
             // navigate to them from the first day without manual setup.
@@ -1186,8 +1222,22 @@ namespace PDMLite
                     // Orphan check: file gone on disk → never show it, and purge
                     // its record when we can prove the share is online.
                     string filePath = (string)el.Element("FilePath") ?? "";
-                    bool missing = string.IsNullOrEmpty(filePath) ||
-                                   !File.Exists(filePath);
+                    // File.Exists returns false on ACCESS errors too (a broken
+                    // ACL on one division folder, AV interference) — purging on
+                    // that would delete records (and later their histories, via
+                    // the re-create purge) for files that still exist. Only
+                    // treat the file as gone when its PARENT FOLDER is provably
+                    // reachable.
+                    bool missing = string.IsNullOrEmpty(filePath);
+                    if (!missing && !File.Exists(filePath))
+                    {
+                        try
+                        {
+                            missing = Directory.Exists(
+                                Path.GetDirectoryName(filePath));
+                        }
+                        catch { }
+                    }
                     if (missing)
                     {
                         if (canPurge)

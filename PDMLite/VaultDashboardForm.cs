@@ -592,12 +592,20 @@ namespace PDMLite
         // Filter keys of `col` over the rows that pass every OTHER active column
         // filter + the global search — so a column's dropdown NARROWS to what's
         // relevant given the other filters, like Excel.
-        private IEnumerable<string> KeysPassingOtherFilters(int col)
+        // columnFiltersOnly: ignore the TRANSIENT view narrowing (global
+        // search box + Broken Refs toggle) and apply other COLUMN filters
+        // only — used by ShowColumnFilter to compute which allowed values are
+        // hidden by another column's filter (those are preserved on commit;
+        // search-hidden ones are not).
+        private IEnumerable<string> KeysPassingOtherFilters(int col,
+            bool columnFiltersOnly = false)
         {
-            string term = (_search.Text ?? "").Trim().ToLowerInvariant();
+            string term = columnFiltersOnly ? ""
+                : (_search.Text ?? "").Trim().ToLowerInvariant();
             foreach (var f in _all)
             {
-                if (_brokenRefsOnly && !f.HasBrokenRefs) continue;
+                if (!columnFiltersOnly && _brokenRefsOnly && !f.HasBrokenRefs)
+                    continue;
                 bool ok = true;
                 foreach (var kv in _colFilters)
                 {
@@ -1021,10 +1029,20 @@ namespace PDMLite
             // Values this column currently ALLOWS but that are hidden by another
             // filter (not in `shown`). Kept so removing the other filter later
             // doesn't silently drop them — they just aren't shown right now.
-            var hiddenAllowed = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            // Values this column allows that are hidden by another COLUMN's
+            // filter — preserved on commit (removing that filter later must
+            // not silently drop them). Values hidden only by the TRANSIENT
+            // global search are NOT preserved: folding them back meant
+            // "search, Clear, tick one, OK" flooded the grid back the moment
+            // the search box cleared (the C5 symptom one level up).
+            var shownByColumns = new HashSet<string>(
+                KeysPassingOtherFilters(col, columnFiltersOnly: true),
+                StringComparer.OrdinalIgnoreCase);
+            var hiddenByColumns = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             foreach (var v in allKeys)
-                if (!shownSet.Contains(v) && (current == null || current.Contains(v)))
-                    hiddenAllowed.Add(v);
+                if (!shownByColumns.Contains(v) &&
+                    (current == null || current.Contains(v)))
+                    hiddenByColumns.Add(v);
 
             using (var dlg = new ColumnFilterDialog(_scale,
                 _grid.Columns[col].HeaderText, shown, current,
@@ -1042,10 +1060,19 @@ namespace PDMLite
 
                 if (dlg.ShowDialog(this) == DialogResult.OK)
                 {
-                    // Ticked (visible) values + the allowed-but-hidden ones.
+                    // NO-CHANGE GUARD: OK without touching anything must stay
+                    // a no-op even while the global search narrows the list —
+                    // compare what the user ENDED UP ticking against what was
+                    // allowed-and-shown when the dialog opened.
+                    var beforeShown = new HashSet<string>(shownSet,
+                        StringComparer.OrdinalIgnoreCase);
+                    if (current != null) beforeShown.IntersectWith(current);
+                    if (dlg.SelectedValues.SetEquals(beforeShown)) return;
+
+                    // Ticked values + the column-hidden allowed ones.
                     var allowed = new HashSet<string>(dlg.SelectedValues,
                         StringComparer.OrdinalIgnoreCase);
-                    allowed.UnionWith(hiddenAllowed);
+                    allowed.UnionWith(hiddenByColumns);
 
                     if (allowed.Count >= allKeys.Count) _colFilters.Remove(col);
                     else _colFilters[col] = allowed;
@@ -1215,8 +1242,18 @@ namespace PDMLite
         private void ToggleStatusFilter(string status)
         {
             if (IsStatusFilter(status)) _colFilters.Remove(3);
-            else _colFilters[3] = new HashSet<string>(
-                new[] { status }, StringComparer.OrdinalIgnoreCase);
+            else
+            {
+                // A zero-count quick filter would blank the whole grid and
+                // dead-end every other column's popup (empty list, OK
+                // disabled) — make a "0" link inert instead.
+                int cnt = Eq(status, "WIP") ? _cntWip
+                        : Eq(status, "Released") ? _cntRel
+                        : Eq(status, "Locked") ? _cntLck : -1;
+                if (cnt == 0) return;
+                _colFilters[3] = new HashSet<string>(
+                    new[] { status }, StringComparer.OrdinalIgnoreCase);
+            }
             ApplyFilter();
             _grid.Invalidate(); // repaint the Status header funnel glyph
         }
@@ -1736,7 +1773,10 @@ namespace PDMLite
                 _list.ItemCheck += List_ItemCheck;
 
                 if (matched > _visibleRaw.Count)
-                    _count.Text = string.Format("{0:N0} of {1:N0} shown — type to narrow",
+                    _count.Text = string.Format(
+                        term.Length > 0
+                            ? "{0:N0} of {1:N0} matches — OK filters to ticked"
+                            : "{0:N0} of {1:N0} shown — type to narrow",
                         _visibleRaw.Count, matched);
                 else if (term.Length > 0)
                     _count.Text = matched == 0

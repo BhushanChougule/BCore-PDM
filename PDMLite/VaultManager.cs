@@ -212,6 +212,20 @@ namespace PDMLite
             string partNo = PropertyValidator.GetProperty(doc, "PartNo");
             string rev = PropertyValidator.GetProperty(doc, "Revision");
             string drawingNo = PropertyValidator.GetProperty(doc, "DrawingNo");
+            if (isDrawing)
+            {
+                // A drawing's own properties are typically EMPTY (they live
+                // on the model; the title block reads them via the template).
+                // Without this, the retired drawing's released PDF stayed in
+                // EXPORTS forever — ScrapExports received an empty DrawingNo
+                // and no-op'd. Same read the release export naming uses.
+                string dn = GetDrawingNo(doc);
+                if (!string.IsNullOrEmpty(dn)) drawingNo = dn;
+                if (string.IsNullOrEmpty(drawingNo))
+                    drawingNo = Path.GetFileNameWithoutExtension(filePath);
+                if (string.IsNullOrEmpty(partNo))
+                    partNo = GetDrawingPartNo(doc);
+            }
 
             // Per-config identity (models only). Exports are named per config
             // ({cfgPartNo}-R{rev}.step, {cfgDrawingNo} REV {rev}.pdf), so the
@@ -2215,8 +2229,43 @@ namespace PDMLite
 
             // Read everything still needed from the document BEFORE closing
             // it below — after CloseDoc the COM reference is dead.
-            string partNo = PropertyValidator.GetProperty(doc, "PartNo");
-            string drawingNo = PropertyValidator.GetProperty(doc, "DrawingNo");
+            // DRAWING: its own PartNo/DrawingNo properties are typically
+            // EMPTY (the props live on the model; the title block reads them
+            // through the template) — read them the way the release export
+            // naming does: from the referenced model. MODEL: exports are
+            // named PER CONFIG, so collect every config's numbers — the
+            // active config's alone left other configs' stale "current"
+            // exports in EXPORTS (the same gap RemoveFromVault had).
+            string partNo, drawingNo;
+            var rbPartNos = new List<string>();
+            var rbDrawingNos = new List<string>();
+            if (ext == ".slddrw")
+            {
+                partNo = GetDrawingPartNo(doc);
+                drawingNo = GetDrawingNo(doc);
+                if (string.IsNullOrEmpty(drawingNo))
+                    drawingNo = Path.GetFileNameWithoutExtension(filePath);
+            }
+            else
+            {
+                partNo = PropertyValidator.GetProperty(doc, "PartNo");
+                drawingNo = PropertyValidator.GetProperty(doc, "DrawingNo");
+                foreach (string cfg in PropertyValidator.GetConfigNames(doc))
+                {
+                    string cp = PropertyValidator.GetProperty(doc, "PartNo", cfg);
+                    string cd = PropertyValidator.GetProperty(doc, "DrawingNo", cfg);
+                    if (!string.IsNullOrEmpty(cp) &&
+                        !rbPartNos.Contains(cp, StringComparer.OrdinalIgnoreCase))
+                        rbPartNos.Add(cp);
+                    if (!string.IsNullOrEmpty(cd) &&
+                        !rbDrawingNos.Contains(cd, StringComparer.OrdinalIgnoreCase))
+                        rbDrawingNos.Add(cd);
+                }
+                if (rbPartNos.Count == 0 && !string.IsNullOrEmpty(partNo))
+                    rbPartNos.Add(partNo);
+                if (rbDrawingNos.Count == 0 && !string.IsNullOrEmpty(drawingNo))
+                    rbDrawingNos.Add(drawingNo);
+            }
 
             try
             {
@@ -2280,11 +2329,24 @@ namespace PDMLite
                 SetReadOnly(filePath, true);
                 SetReadOnly(releasedCopy, true);
 
-                // ── Step 7: Archive old exports ───────────────────────────────
-                // Uses the PartNo/DrawingNo captured BEFORE the close above
-                // (actual PartNo, not filename, to match STEP/PDF naming).
-                string partNoClean = partNo.Replace(".", "");
-                CleanupExportsOnRollback(partNoClean, drawingNo, partNo);
+                // ── Step 7: Archive old exports ───────────────────────────
+                // Identity captured BEFORE the close above. A DRAWING rollback
+                // cleans only its PDF (the model wasn't rolled back — its
+                // STEP/BOM stay current); a MODEL rollback cleans EVERY
+                // config's exports (rollback reverts ALL configurations, so
+                // the active config's numbers alone left the other configs'
+                // stale "current" deliverables in EXPORTS).
+                if (ext == ".slddrw")
+                {
+                    CleanupExportsOnRollback("", drawingNo);
+                }
+                else
+                {
+                    foreach (string pn in rbPartNos)
+                        CleanupExportsOnRollback(pn.Replace(".", ""), null, pn);
+                    foreach (string dn in rbDrawingNos)
+                        CleanupExportsOnRollback("", dn);
+                }
 
                 // ── Step 8: Update database ───────────────────────────────
                 DatabaseManager.LockFile(filePath, user);
@@ -3447,14 +3509,16 @@ namespace PDMLite
                 // BOM CSV (assemblies) — raw PartNo so the glob matches the
                 // {partNo}-R{rev}_BOM.csv filename correctly.
                 string bomId = rawPartNo ?? partNoClean;
-                MoveMatching(Path.Combine(ExportRoot, "BOM"),
-                    Path.Combine(ObsFolder, "BOM"), bomId + "-R*_BOM.csv",
-                    ExportNameFilter(bomId, "-R", "_BOM.csv"));
+                if (!string.IsNullOrEmpty(bomId))
+                    MoveMatching(Path.Combine(ExportRoot, "BOM"),
+                        Path.Combine(ObsFolder, "BOM"), bomId + "-R*_BOM.csv",
+                        ExportNameFilter(bomId, "-R", "_BOM.csv"));
 
                 // STEP files matching part number: {partNoClean}-R{rev}.step.
-                MoveMatching(Path.Combine(ExportRoot, "STEP"),
-                    Path.Combine(ObsFolder, "STEP"), partNoClean + "-R*.step",
-                    ExportNameFilter(partNoClean, "-R", ".step"));
+                if (!string.IsNullOrEmpty(partNoClean))
+                    MoveMatching(Path.Combine(ExportRoot, "STEP"),
+                        Path.Combine(ObsFolder, "STEP"), partNoClean + "-R*.step",
+                        ExportNameFilter(partNoClean, "-R", ".step"));
 
                 // PDFs matching drawing number: {drawingNo} REV {rev}.pdf.
                 if (!string.IsNullOrEmpty(drawingNo))
