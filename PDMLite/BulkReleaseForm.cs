@@ -57,11 +57,38 @@ namespace PDMLite
         // Guards the two-way sync between "Select all" and the card checkboxes.
         private bool _syncing;
 
+        // Card fonts, created once: LoadFiles reruns on every 600ms search
+        // debounce tick, and a Font assigned to a control is not owned by it —
+        // per-call fonts leaked a GDI handle each (audit C4). Disposed on
+        // FormClosed (with the search timer).
+        private readonly Font _fCardBold, _fCardSub, _fCardSubBold,
+            _fCardTag, _fCardMeta;
+
         public BulkReleaseForm(float scale)
         {
             _scale = scale;
+
+            _fCardBold    = new Font("Segoe UI", 3.7f * _scale, FontStyle.Bold);
+            _fCardSub     = new Font("Segoe UI", 3.2f * _scale);
+            _fCardSubBold = new Font("Segoe UI", 3.2f * _scale, FontStyle.Bold);
+            _fCardTag     = new Font("Segoe UI", 2.9f * _scale, FontStyle.Bold);
+            _fCardMeta    = new Font("Segoe UI", 3.0f * _scale);
+
             BuildForm();
             LoadFiles();
+        }
+
+        // Controls.Clear() does NOT dispose the removed controls — they get
+        // re-parented to the hidden WinForms parking window and keep their
+        // USER/GDI handles until the process dies. The list rebuilds on every
+        // search tick, so dispose every child, THEN clear (audit C4).
+        private static void ClearAndDispose(Control container)
+        {
+            var children = new Control[container.Controls.Count];
+            container.Controls.CopyTo(children, 0);
+            container.Controls.Clear();
+            foreach (Control c in children)
+                try { c.Dispose(); } catch { }
         }
 
         private void BuildForm()
@@ -124,6 +151,11 @@ namespace PDMLite
             {
                 _searchTimer.Stop();
                 _searchTimer.Dispose();
+                _fCardBold.Dispose();
+                _fCardSub.Dispose();
+                _fCardSubBold.Dispose();
+                _fCardTag.Dispose();
+                _fCardMeta.Dispose();
             };
 
             _filter.TextChanged += (s, e) =>
@@ -270,17 +302,11 @@ namespace PDMLite
         {
             _checks.Clear();
             _selectAll.Checked = false;
-            _listPanel.Controls.Clear();
+            ClearAndDispose(_listPanel);
 
             bool truncated;
             List<VaultFile> files =
                 DatabaseManager.GetReleasableFiles(_filter.Text, out truncated);
-
-            Font fBold    = new Font("Segoe UI", 3.7f * _scale, FontStyle.Bold);
-            Font fSub     = new Font("Segoe UI", 3.2f * _scale);
-            Font fSubBold = new Font("Segoe UI", 3.2f * _scale, FontStyle.Bold);
-            Font fTag     = new Font("Segoe UI", 2.9f * _scale, FontStyle.Bold);
-            Font fMeta    = new Font("Segoe UI", 3.0f * _scale);
 
             _countLabel.Text = files.Count + " WIP file" +
                 (files.Count == 1 ? "" : "s") + (truncated ? " (first 50)" : "");
@@ -292,7 +318,7 @@ namespace PDMLite
                     Text = string.IsNullOrWhiteSpace(_filter.Text)
                         ? "No WIP files to release."
                         : "No WIP files match \"" + _filter.Text + "\".",
-                    Font = fSub,
+                    Font = _fCardSub,
                     ForeColor = cTextLight,
                     Location = new Point(S(8), S(10)),
                     AutoSize = true
@@ -336,7 +362,7 @@ namespace PDMLite
                 card.Controls.Add(new Label
                 {
                     Text = System.IO.Path.GetFileNameWithoutExtension(f.FileName),
-                    Font = fBold,
+                    Font = _fCardBold,
                     ForeColor = cTextDark,
                     Location = new Point(S(28), S(5)),
                     AutoSize = false,
@@ -351,7 +377,7 @@ namespace PDMLite
                 card.Controls.Add(new Label
                 {
                     Text = tag,
-                    Font = fTag,
+                    Font = _fCardTag,
                     ForeColor = Color.White,
                     BackColor = tagColor,
                     Location = new Point(card.Width - tagW - S(6), S(6)),
@@ -391,7 +417,7 @@ namespace PDMLite
                     card.Controls.Add(new Label
                     {
                         Text = "(no part number)",
-                        Font = fSub,
+                        Font = _fCardSub,
                         ForeColor = cAmber,
                         Location = new Point(subX, subY),
                         AutoSize = true
@@ -400,12 +426,12 @@ namespace PDMLite
                 else
                 {
                     subX = AddInlinePair(card, "PN:", pn,
-                        fSubBold, fSub, subX, subY, subRight, false);
+                        _fCardSubBold, _fCardSub, subX, subY, subRight, false);
                     if (hasDesc)
                     {
                         subX += S(10); // gap between the PN and DESC pairs
                         AddInlinePair(card, "DESC:", desc,
-                            fSubBold, fSub, subX, subY, subRight, true);
+                            _fCardSubBold, _fCardSub, subX, subY, subRight, true);
                     }
                 }
 
@@ -420,7 +446,7 @@ namespace PDMLite
                     card.Controls.Add(new Label
                     {
                         Text = meta,
-                        Font = fMeta,
+                        Font = _fCardMeta,
                         ForeColor = cTextLight,
                         Location = new Point(S(28), S(40)),
                         AutoSize = false,

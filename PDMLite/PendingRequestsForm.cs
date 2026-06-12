@@ -44,11 +44,43 @@ namespace PDMLite
         // programmatic checks don't recurse.
         private bool _syncing;
 
+        // Card fonts, created once: PopulateSection runs 3× per LoadRequests
+        // (and LoadRequests after every approve/reject), and a Font assigned
+        // to a control is not owned by it — per-call fonts leaked a GDI
+        // handle each (audit C4). Disposed on FormClosed.
+        private readonly Font _fCardBold, _fCardSub, _fCardPn, _fCardBtn;
+
         public PendingRequestsForm(float scale)
         {
             _scale = scale;
+
+            _fCardBold = new Font("Segoe UI", 3.8f * _scale, FontStyle.Bold);
+            _fCardSub  = new Font("Segoe UI", 3.3f * _scale);
+            _fCardPn   = new Font("Segoe UI", 3.3f * _scale, FontStyle.Bold);
+            _fCardBtn  = new Font("Segoe UI", 3.5f * _scale, FontStyle.Bold);
+            this.FormClosed += (s, e) =>
+            {
+                _fCardBold.Dispose();
+                _fCardSub.Dispose();
+                _fCardPn.Dispose();
+                _fCardBtn.Dispose();
+            };
+
             BuildForm();
             LoadRequests();
+        }
+
+        // Controls.Clear() does NOT dispose the removed controls — they get
+        // re-parented to the hidden WinForms parking window and keep their
+        // USER/GDI handles until the process dies. The columns rebuild after
+        // every approve/reject, so dispose every child, THEN clear (audit C4).
+        private static void ClearAndDispose(Control container)
+        {
+            var children = new Control[container.Controls.Count];
+            container.Controls.CopyTo(children, 0);
+            container.Controls.Clear();
+            foreach (Control c in children)
+                try { c.Dispose(); } catch { }
         }
 
         private void BuildForm()
@@ -270,17 +302,13 @@ namespace PDMLite
                                      Label header, string type, List<CheckBox> checks,
                                      CheckBox allBox)
         {
-            panel.Controls.Clear();
+            ClearAndDispose(panel);
             string display = type == "UNLOCK"   ? "Unlock"
                            : type == "REVISION" ? "Revision"
                            : "Release";
             header.Text = display + " Requests" +
                 (requests.Count > 0 ? $"  ({requests.Count})" : "");
 
-            Font fBold  = new Font("Segoe UI", 3.8f * _scale, FontStyle.Bold);
-            Font fSub   = new Font("Segoe UI", 3.3f * _scale);
-            Font fPnBold = new Font("Segoe UI", 3.3f * _scale, FontStyle.Bold);
-            Font fBtn   = new Font("Segoe UI", 3.5f * _scale, FontStyle.Bold);
             Color barColor = type == "UNLOCK"   ? cPurple
                            : type == "REVISION" ? cDark
                            : cGreen;
@@ -290,7 +318,7 @@ namespace PDMLite
                 panel.Controls.Add(new Label
                 {
                     Text = "No pending requests",
-                    Font = fSub,
+                    Font = _fCardSub,
                     ForeColor = cTextLight,
                     Location = new Point(S(6), S(8)),
                     AutoSize = true
@@ -363,7 +391,7 @@ namespace PDMLite
                 card.Controls.Add(new Label
                 {
                     Text = req.FileName,
-                    Font = fBold,
+                    Font = _fCardBold,
                     ForeColor = cTextDark,
                     Location = new Point(S(8), yFile),
                     AutoSize = false,
@@ -381,7 +409,7 @@ namespace PDMLite
                     card.Controls.Add(new Label
                     {
                         Text = pnRev,
-                        Font = fPnBold,
+                        Font = _fCardPn,
                         ForeColor = cBrandDark,
                         Location = new Point(S(8), yPn),
                         AutoSize = false,
@@ -394,7 +422,7 @@ namespace PDMLite
                 card.Controls.Add(new Label
                 {
                     Text = "By: " + req.RequestedBy,
-                    Font = fSub,
+                    Font = _fCardSub,
                     ForeColor = cTextGray,
                     Location = new Point(S(8), yBy),
                     AutoSize = true
@@ -406,7 +434,7 @@ namespace PDMLite
                 card.Controls.Add(new Label
                 {
                     Text = dateStr,
-                    Font = fSub,
+                    Font = _fCardSub,
                     ForeColor = cTextLight,
                     Location = new Point(S(8), yDate),
                     AutoSize = true
@@ -417,7 +445,7 @@ namespace PDMLite
                     card.Controls.Add(new Label
                     {
                         Text = "Note: " + req.Note,
-                        Font = fSub,
+                        Font = _fCardSub,
                         ForeColor = cTextGray,
                         Location = new Point(S(8), yNote),
                         AutoSize = false,
@@ -432,7 +460,7 @@ namespace PDMLite
                 Button btnApprove = new Button
                 {
                     Text = type == "UNLOCK" ? "Approve Unlock" : "Approve",
-                    Font = fBtn,
+                    Font = _fCardBtn,
                     Width = S(90),
                     Height = S(22),
                     Location = new Point(S(8), btnY),
@@ -452,7 +480,7 @@ namespace PDMLite
                 Button btnReject = new Button
                 {
                     Text = "Reject",
-                    Font = fBtn,
+                    Font = _fCardBtn,
                     Width = S(58),
                     Height = S(22),
                     Location = new Point(S(102), btnY),
