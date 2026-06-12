@@ -704,6 +704,51 @@ namespace PDMLite
                 string currentStatus = DatabaseManager.GetFileStatus(filePath);
                 _taskPane?.RefreshPanel();
 
+                // POST-SAVE QUARANTINE (Rule 2.6's last line of defence): on
+                // the FIRST save of a brand-new document SOLIDWORKS fires the
+                // pre-save notify BEFORE the Save As dialog has resolved a
+                // target — ValidateSave had no name to check, so that one
+                // save physically cannot be blocked (verified in PR-A
+                // testing: PropertyForm ran, Rule 2.6 never saw a name). The
+                // name IS knowable now. If this just-saved file is UNTRACKED
+                // and its name collides with a tracked vault file, do NOT
+                // create a record — a second same-named record corrupts
+                // every name-keyed lookup (status, history, search,
+                // RELEASED/ARCHIVE) — and tell the user to rename. Every
+                // further save of this doc IS blocked pre-save (its path is
+                // known from now on). The tracked original is exempt
+                // (currentStatus non-empty), so it keeps saving normally
+                // even while a quarantined twin exists on disk.
+                if (string.IsNullOrEmpty(currentStatus) &&
+                    !string.IsNullOrEmpty(filePath))
+                {
+                    string dupPath = DatabaseManager.FindFileNameConflict(
+                        System.IO.Path.GetFileName(filePath), filePath);
+                    if (dupPath != null)
+                    {
+                        AuditLogger.Log("DuplicateNameDetected", CurrentUser,
+                            System.IO.Path.GetFileName(filePath),
+                            PropertyValidator.GetProperty(doc, "PartNo"), "",
+                            "first save under a taken name — saved to disk " +
+                            "but NOT tracked; rename or delete it. Original: "
+                            + dupPath);
+                        SwApp.SendMsgToUser2(
+                            "DUPLICATE FILE NAME — BCore PDM\n\n" +
+                            "'" + System.IO.Path.GetFileName(filePath) +
+                            "' already exists in the vault at:\n" +
+                            dupPath + "\n\n" +
+                            "The first save of a new file happens before the " +
+                            "chosen name can be checked, so this file is on " +
+                            "disk but is NOT TRACKED by the vault — and every " +
+                            "further save of it will be blocked.\n\n" +
+                            "Save it under a different name now (File → Save " +
+                            "As), then delete the duplicate:\n" + filePath,
+                            (int)swMessageBoxIcon_e.swMbWarning,
+                            (int)swMessageBoxBtn_e.swMbOk);
+                        return 0;
+                    }
+                }
+
                 int docType    = doc.GetType();
                 bool isDrawing = docType == (int)SolidWorks.Interop.swconst
                                     .swDocumentTypes_e.swDocDRAWING;

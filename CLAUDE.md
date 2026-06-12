@@ -138,7 +138,7 @@ Main entry point, ISwAddin implementation.
 
 \- SuppressSaveValidation (static bool): VaultManager sets it around its own internal Save3 calls (Release, New Revision) so those programmatic saves bypass the released-file lock
 
-\- OnFileSavePost: upsert file to database, update description
+\- OnFileSavePost: POST-SAVE QUARANTINE first (Rule 2.6's last line of defence — the FIRST save of a brand-new doc fires the pre-save notify BEFORE the Save As dialog resolves a target, so ValidateSave has no name to check and that one save cannot be blocked; found in PR-A testing). If the just-saved file is UNTRACKED and its name collides with a tracked vault file: NO record is created (a second same-named record corrupts every name-keyed lookup), a warning dialog tells the user to rename via Save As and delete the duplicate, and "DuplicateNameDetected" is audit-logged. The tracked ORIGINAL is exempt (it keeps saving normally even while a quarantined twin exists). Every later save of the quarantined file is blocked pre-save (its path is known from then on). Otherwise: upsert file to database, update description
 
 \- CurrentUser = System.Environment.UserName
 
