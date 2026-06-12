@@ -861,11 +861,34 @@ namespace PDMLite
                 if (confirm != DialogResult.Yes) return;
             }
 
+            // Bulk/chained releases hand us a doc that may not be the ACTIVE
+            // document (OpenByPath returns already-open docs without
+            // activating; the chained flow runs the model's release while the
+            // DRAWING is active). ShowConfiguration2 — now verified — and
+            // mass-property reads are unreliable on background docs, so the
+            // new abort below could false-fire on healthy files. Best-effort
+            // activate; if it fails, the verified switches still abort rather
+            // than publish wrong geometry.
+            try
+            {
+                var activeNow = PDMLiteAddin.SwApp.ActiveDoc as ModelDoc2;
+                if (activeNow == null || !string.Equals(activeNow.GetPathName(),
+                        filePath, StringComparison.OrdinalIgnoreCase))
+                {
+                    int actErr = 0;
+                    PDMLiteAddin.SwApp.ActivateDoc3(filePath, false,
+                        (int)swRebuildOnActivation_e.swDontRebuildActiveDoc,
+                        ref actErr);
+                }
+            }
+            catch { }
+
             // ── Auto-fill fields (all configurations for parts/assemblies) ─
             string checkedByVal = user.Length >= 2
                 ? user.Substring(0, 2).ToUpper() : user.ToUpper();
             string checkedDateVal = DateTime.Now.ToString("MM/dd/yyyy");
 
+            var cfgSwitchFailures = new List<string>();
             if (!isDrawing)
             {
                 var relCfgsAF = PropertyValidator.GetConfigNames(doc);
@@ -875,6 +898,11 @@ namespace PDMLite
                     // so switch to each one before reading mass properties.
                     // try/finally guarantees we restore the original config even
                     // if a mass-property read throws mid-loop.
+                    // ShowConfiguration2's return IS CHECKED: a failed switch
+                    // means AutoFillWeight would stamp the PREVIOUS config's
+                    // mass — and the STEP loop below would export the previous
+                    // config's GEOMETRY under this config's part number. Such
+                    // a config can't be released safely, so collect and abort.
                     string origCfgAF = (doc.GetActiveConfiguration()
                         as SolidWorks.Interop.sldworks.Configuration)?.Name;
                     try
@@ -885,8 +913,10 @@ namespace PDMLite
                                 checkedByVal, c);
                             PropertyValidator.SetProperty(doc, "CheckedDate",
                                 checkedDateVal, c);
-                            doc.ShowConfiguration2(c);
-                            PropertyValidator.AutoFillWeight(doc);
+                            if (doc.ShowConfiguration2(c))
+                                PropertyValidator.AutoFillWeight(doc);
+                            else
+                                cfgSwitchFailures.Add(c);
                         }
                     }
                     finally
@@ -906,6 +936,31 @@ namespace PDMLite
             {
                 PropertyValidator.SetProperty(doc, "CheckedBy", checkedByVal);
                 PropertyValidator.SetProperty(doc, "CheckedDate", checkedDateVal);
+            }
+
+            // A configuration SOLIDWORKS refused to activate cannot be
+            // released: its PartWeight was not refreshed and its STEP export
+            // would carry another configuration's geometry. Abort before any
+            // archive/export/DB step — disk and vault are untouched.
+            if (cfgSwitchFailures.Count > 0)
+            {
+                AuditLogger.Log("ReleaseFailed", user,
+                    Path.GetFileName(filePath), partNo, rev,
+                    "config switch failed: " +
+                    string.Join(", ", cfgSwitchFailures));
+                MessageBox.Show(
+                    "Release ABORTED — SOLIDWORKS could not activate these " +
+                    "configurations:\n\n  • " +
+                    string.Join("\n  • ", cfgSwitchFailures) + "\n\n" +
+                    "A failed switch would publish the previous " +
+                    "configuration's geometry and weight under this " +
+                    "configuration's part number.\n\n" +
+                    "Nothing was exported and the vault was NOT changed. " +
+                    "Open the file, check the configurations rebuild without " +
+                    "errors, and release again.",
+                    "BCore PDM — Release Failed",
+                    MessageBoxButtons.OK, MessageBoxIcon.Error);
+                return;
             }
 
             // A refused save here would publish a snapshot MISSING the just
@@ -1000,7 +1055,17 @@ namespace PDMLite
                                 collidedStamps.Add(cfgStamp);
                                 continue;
                             }
-                            doc.ShowConfiguration2(c);
+                            if (!doc.ShowConfiguration2(c))
+                            {
+                                // Exporting now would write the PREVIOUS
+                                // config's geometry under THIS config's part
+                                // number — treat exactly like a failed export
+                                // (the failedExports abort below lists it).
+                                failedExports.Add(cfgStamp +
+                                    ".step (config '" + c +
+                                    "' failed to activate)");
+                                continue;
+                            }
                             if (!ExportManager.ExportStepOnly(doc, ExportRoot,
                                     cfgStamp))
                                 failedExports.Add(cfgStamp + ".step");
@@ -2064,6 +2129,11 @@ namespace PDMLite
 
             if (confirm != DialogResult.Yes) return;
 
+            // Read everything still needed from the document BEFORE closing
+            // it below — after CloseDoc the COM reference is dead.
+            string partNo = PropertyValidator.GetProperty(doc, "PartNo");
+            string drawingNo = PropertyValidator.GetProperty(doc, "DrawingNo");
+
             try
             {
                 // ── Step 1: Remove read-only from current files ───────────
@@ -2084,8 +2154,39 @@ namespace PDMLite
                 // ── Step 3: Remove read-only from archived file ───────────
                 SetReadOnly(selectedFile, false);
 
+                // ── Step 3.5: CLOSE the document ──────────────────────────
+                // SOLIDWORKS holds the open file's handle, so restoring over
+                // it fails with a sharing violation ("being used by another
+                // process") — rollback is always run on the ACTIVE file, so
+                // without this close the restore could never succeed. An open
+                // drawing holds a reference to the model and would make
+                // CloseDoc a silent no-op, so close it first. The confirm
+                // dialog already told the Master the file must be reopened.
+                if (ext != ".slddrw")
+                {
+                    string rbDrw = FindDrawingPath(filePath);
+                    if (rbDrw != null &&
+                        PDMLiteAddin.SwApp.GetOpenDocumentByName(rbDrw) != null)
+                        try { PDMLiteAddin.SwApp.CloseDoc(rbDrw); } catch { }
+                }
+                try { PDMLiteAddin.SwApp.CloseDoc(filePath); } catch { }
+
                 // ── Step 4: Restore selected revision to active location ──
-                File.Copy(selectedFile, filePath, overwrite: true);
+                // SOLIDWORKS may not release the handle the instant CloseDoc
+                // returns — retry briefly (same pattern as MoveToScrap).
+                for (int attempt = 0; ; attempt++)
+                {
+                    try
+                    {
+                        File.Copy(selectedFile, filePath, overwrite: true);
+                        break;
+                    }
+                    catch (IOException)
+                    {
+                        if (attempt == 4) throw;
+                        System.Threading.Thread.Sleep(300);
+                    }
+                }
 
                 // ── Step 5: Restore to RELEASED folder ───────────────────
                 if (File.Exists(releasedCopy))
@@ -2096,10 +2197,9 @@ namespace PDMLite
                 SetReadOnly(releasedCopy, true);
 
                 // ── Step 7: Archive old exports ───────────────────────────────
-                // Use actual PartNo (not filename) to match STEP/PDF naming
-                string partNo = PropertyValidator.GetProperty(doc, "PartNo");
+                // Uses the PartNo/DrawingNo captured BEFORE the close above
+                // (actual PartNo, not filename, to match STEP/PDF naming).
                 string partNoClean = partNo.Replace(".", "");
-                string drawingNo = PropertyValidator.GetProperty(doc, "DrawingNo");
                 CleanupExportsOnRollback(partNoClean, drawingNo, partNo);
 
                 // ── Step 8: Update database ───────────────────────────────
@@ -2108,6 +2208,63 @@ namespace PDMLite
                     "Rolled back to " + targetRev);
                 AuditLogger.Log("Rollback", user, Path.GetFileName(filePath),
                     partNo, targetRev);
+
+                // ── Step 8.5: Sync the record with the RESTORED file ──────
+                // The record's PartNo/Description/Revision/configs are
+                // written at SAVE time — and a rolled-back file is Released
+                // (saves blocked), so without this sync the search cards and
+                // dashboard would show the PRE-rollback identity forever
+                // (found in PR-A testing after an overwrite was rolled back).
+                // Reopen the restored file briefly (read-only — it was just
+                // locked; the Released/lock popups only fire for non-Masters
+                // and rollback is Master-only), read its real properties,
+                // update the record, close it again. Best-effort: the
+                // rollback itself has already fully succeeded.
+                try
+                {
+                    ModelDoc2 restored = OpenByPath(filePath);
+                    if (restored != null)
+                    {
+                        var sync = new VaultFile
+                        {
+                            FilePath    = filePath,
+                            FileName    = Path.GetFileName(filePath),
+                            PartNumber  = PropertyValidator.GetProperty(
+                                              restored, "PartNo"),
+                            Description = PropertyValidator.GetProperty(
+                                              restored, "Description"),
+                            Revision    = PropertyValidator.GetProperty(
+                                              restored, "Revision"),
+                            Status      = "",   // empty = preserve Released
+                            ModifiedBy  = user,
+                            ModifiedDate = DateTime.Now
+                        };
+                        if (ext != ".slddrw")
+                        {
+                            var cfgs = new List<ConfigEntry>();
+                            foreach (string c in
+                                PropertyValidator.GetConfigNames(restored))
+                            {
+                                cfgs.Add(new ConfigEntry
+                                {
+                                    Name        = c,
+                                    PartNo      = PropertyValidator.GetProperty(
+                                                      restored, "PartNo", c),
+                                    Description = PropertyValidator.GetProperty(
+                                                      restored, "Description", c),
+                                    DrawingNo   = PropertyValidator.GetProperty(
+                                                      restored, "DrawingNo", c),
+                                    Revision    = PropertyValidator.GetProperty(
+                                                      restored, "Revision", c)
+                                });
+                            }
+                            sync.Configurations = cfgs;
+                        }
+                        DatabaseManager.UpsertFile(sync);
+                        try { PDMLiteAddin.SwApp.CloseDoc(filePath); } catch { }
+                    }
+                }
+                catch { }
 
                 // ── Step 9: Offer to roll back the matching drawing ───────
                 // Drawings are archived as a matched pair with the model, so a

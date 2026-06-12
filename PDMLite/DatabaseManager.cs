@@ -94,7 +94,19 @@ namespace PDMLite
         // not deleted). LoadOrCreate restores from it when vault.xml is missing
         // or corrupt, so a crash mid-write can never cost more than one save.
         private const string BackupFile = @"N:\PDM-SolidWorks\VAULT\vault.xml.bak";
-        private const string WipRoot = @"N:\PDM-SolidWorks\WIP";
+        // Shared with SwAddin's Rule 2.5 so the save rules and the DB-side
+        // rival checks can never disagree about what is "inside the vault".
+        internal const string WipRoot = @"N:\PDM-SolidWorks\WIP";
+
+        // Canonical-WIP test: the WIP root itself or paths under it — NOT
+        // prefix-siblings like N:\PDM-SolidWorks\WIP_OLD\… (the prefix-match
+        // class audit C3 fixed for export globs).
+        private static bool IsUnderWip(string path)
+        {
+            string p = (path ?? "").Trim();
+            return p.StartsWith(WipRoot + "\\", StringComparison.OrdinalIgnoreCase)
+                || p.Equals(WipRoot, StringComparison.OrdinalIgnoreCase);
+        }
         private const string ScrapRoot = @"N:\PDM-SolidWorks\SCRAP";
 
         // Cap search results so a broad term at full scale (~50k files) can
@@ -132,6 +144,22 @@ namespace PDMLite
                 var restored = TryRestoreFromBackup("vault.xml missing");
                 if (restored != null) return restored;
 
+                // An EXISTING backup that failed to restore (corrupt .bak,
+                // transient IO) means this is an ESTABLISHED vault in trouble
+                // — bootstrapping an empty DB here would hand every caller a
+                // blank vault, and the next Save would overwrite the .bak,
+                // destroying the last (possibly hand-repairable) copy of years
+                // of records. Fail the operation loudly instead; only a
+                // genuinely fresh vault (no backup either) bootstraps.
+                bool backupExists = false;
+                try { backupExists = File.Exists(BackupFile); } catch { }
+                if (backupExists)
+                    throw new InvalidOperationException(
+                        "vault.xml is missing and vault.xml.bak could not be " +
+                        "restored. Refusing to create an empty vault over an " +
+                        "established one — restore " + DataFile +
+                        " manually from the backup or an archive copy.");
+
                 var doc = new XDocument(
                     new XElement("BCorePDMVault",
                         new XElement("Files"),
@@ -149,7 +177,11 @@ namespace PDMLite
                         new XElement("RevisionRequests")
                     )
                 );
-                Save(doc); // atomic-path write, not a direct overwrite
+                // Persist the fresh template — except in degraded mode, where
+                // a READ path must never write (the in-memory doc serves this
+                // call; the first real mutation persists it under the lock).
+                if (!LockDegraded)
+                    Save(doc); // atomic-path write, not a direct overwrite
                 return doc;
             }
 
@@ -177,7 +209,42 @@ namespace PDMLite
             {
                 if (!File.Exists(BackupFile)) return null;
                 var doc = XDocument.Load(BackupFile); // proves the backup parses
-                File.Copy(BackupFile, DataFile, overwrite: true);
+
+                // Preserve a corrupt-but-present vault.xml once (it holds
+                // exactly ONE save more than the backup — hand-repairable),
+                // then DELETE it. Leaving the corrupt file in place poisons
+                // the NEXT Save: File.Replace banks the on-disk vault.xml
+                // into vault.xml.bak — overwriting the good backup we just
+                // parsed (the degraded-mode skip below leaves the corrupt
+                // file behind, and user MUTATIONS still save in degraded
+                // mode). Deleting unparseable poison is not a "write over
+                // other machines' data" — readers then take the missing-file
+                // branch and restore from .bak; with the file gone, repeated
+                // degraded reads write nothing (no .corrupt litter loop).
+                // The delete only runs AFTER the preservation copy succeeded.
+                try
+                {
+                    if (File.Exists(DataFile))
+                    {
+                        File.Copy(DataFile, DataFile + ".corrupt." +
+                            DateTime.Now.ToString("yyyyMMdd_HHmmss"),
+                            overwrite: true);
+                        File.Delete(DataFile);
+                    }
+                }
+                catch { }
+
+                // Write the restored copy back — best-effort, and SKIPPED in
+                // degraded mode: a restore is triggered from READ paths, and a
+                // degraded reader must never write over other machines' files
+                // (the same rule as the janitorial writes). The parsed doc
+                // still serves this call either way, and the next healthy
+                // Save rewrites vault.xml via the atomic path anyway.
+                if (!LockDegraded)
+                {
+                    try { File.Copy(BackupFile, DataFile, overwrite: true); }
+                    catch { }
+                }
                 LogDbEvent("VaultRestoredFromBackup", reason);
                 return doc;
             }
@@ -479,6 +546,7 @@ namespace PDMLite
         public static void UpsertFile(VaultFile f)
         {
             bool wasCreate;
+            string rivalPath = null;
             lock (_lock) using (AcquireProcessLock())
             {
                 var doc = LoadOrCreate();
@@ -506,10 +574,29 @@ namespace PDMLite
                 // before the remove-purge fix shipped). Wipe any stale entries
                 // so the new file starts with a clean timeline. The Save at the
                 // end of this method persists the purge.
+                // LAST-LINE GUARD: Rule 2.6's pre-save check and this post-save
+                // insert run in SEPARATE lock acquisitions (the lock is never
+                // held across SOLIDWORKS work), so two machines first-saving
+                // the same name within seconds can both get here — and
+                // PurgeHistoryFor matches by FILENAME, so purging now would
+                // wipe the LIVING rival's whole timeline, not stale leftovers.
+                // When a same-named rival record exists, do NOT create a
+                // record at all (matching the OnSavePost quarantine: a second
+                // same-named record corrupts every name-keyed lookup) and do
+                // NOT purge; audit the collision instead. The file stays
+                // untracked on disk and Rule 2.6 blocks its next save.
                 if (wasCreate)
-                    PurgeHistoryFor(doc, f.FilePath, f.FileName);
+                {
+                    rivalPath = FindNameRival(doc, f.FileName, targetPath);
+                    if (rivalPath == null)
+                        PurgeHistoryFor(doc, f.FilePath, f.FileName);
+                }
 
-                if (existing != null)
+                if (rivalPath != null)
+                {
+                    // No record, no save — fall through to the audit row only.
+                }
+                else if (existing != null)
                 {
                     existing.Element("FileName").Value    = f.FileName;
                     existing.Element("PartNumber").Value  = f.PartNumber  ?? "";
@@ -563,10 +650,22 @@ namespace PDMLite
                     files.Add(fileEl);
                 }
 
-                Save(doc);
+                if (rivalPath == null)
+                    Save(doc);
             }
 
             // Log outside the DB lock — AuditLogger holds its own file lock.
+            // NOTE: never advise "Remove from Vault" for a duplicate — record
+            // removal matches by FILENAME and would take the ORIGINAL's record
+            // and history with it; the duplicate FILE is deleted in Explorer.
+            if (rivalPath != null)
+            {
+                AuditLogger.Log("DuplicateNameDetected", f.ModifiedBy ?? "",
+                    f.FileName, f.PartNumber ?? "", "",
+                    "rival at " + rivalPath + " — record NOT created; delete " +
+                    "the duplicate file in Explorer or Save As a unique name");
+                return;
+            }
             AuditLogger.Log(wasCreate ? "Create" : "Save",
                 f.ModifiedBy ?? "", f.FileName, f.PartNumber ?? "");
         }
@@ -1410,30 +1509,39 @@ namespace PDMLite
         public static string FindFileNameConflict(string fileName,
             string excludeFilePath)
         {
+            lock (_lock) using (AcquireProcessLock())
+            {
+                return FindNameRival(LoadOrCreate(), fileName, excludeFilePath);
+            }
+        }
+
+        // Core rival scan against an already-loaded document — callers hold
+        // the lock. Shared by FindFileNameConflict (the Rule 2.6 save-time
+        // check) and UpsertFile (the create-time last-line guard), so the two
+        // can never disagree about what counts as a rival.
+        private static string FindNameRival(XDocument doc, string fileName,
+            string excludeFilePath)
+        {
             if (string.IsNullOrWhiteSpace(fileName)) return null;
 
             string target = fileName.Trim();
             string exclude = (excludeFilePath ?? "").Trim();
 
-            lock (_lock) using (AcquireProcessLock())
+            foreach (var el in doc.Root.Element("Files").Elements("File"))
             {
-                var doc = LoadOrCreate();
-                foreach (var el in doc.Root.Element("Files").Elements("File"))
-                {
-                    string elPath = ((string)el.Element("FilePath") ?? "").Trim();
-                    if (elPath.Equals(exclude, StringComparison.OrdinalIgnoreCase))
-                        continue;
-                    if (!elPath.StartsWith(WipRoot, StringComparison.OrdinalIgnoreCase))
-                        continue;
+                string elPath = ((string)el.Element("FilePath") ?? "").Trim();
+                if (elPath.Equals(exclude, StringComparison.OrdinalIgnoreCase))
+                    continue;
+                if (!IsUnderWip(elPath))
+                    continue;
 
-                    string elFileName = ((string)el.Element("FileName") ?? "").Trim();
-                    if (!elFileName.Equals(target, StringComparison.OrdinalIgnoreCase))
-                        continue;
+                string elFileName = ((string)el.Element("FileName") ?? "").Trim();
+                if (!elFileName.Equals(target, StringComparison.OrdinalIgnoreCase))
+                    continue;
 
-                    bool onDisk = true;
-                    try { onDisk = File.Exists(elPath); } catch { }
-                    if (onDisk) return elPath;
-                }
+                bool onDisk = true;
+                try { onDisk = File.Exists(elPath); } catch { }
+                if (onDisk) return elPath;
             }
 
             return null;
@@ -1545,19 +1653,26 @@ namespace PDMLite
             lock (_lock) using (AcquireProcessLock())
             {
                 var doc = LoadOrCreate();
+                // A living rival WIP file owning this name means the query
+                // path is a same-named duplicate — exact-path entries only
+                // (it must not display the original's timeline). Same
+                // predicate as Rule 2.6 / the quarantine / GetFileStatusByName.
+                bool dupQuery = FindNameRival(doc, fileName, filePath) != null;
+
                 foreach (var el in doc.Root
                     .Element("RevisionHistory")
                     .Elements("Entry"))
                 {
                     string entryPath = (string)el.Element("FilePath") ?? "";
-                    // Match by exact path first; fall back to filename so RELEASED
-                    // folder copies share history with their original WIP path
+                    // Match by exact path first; fall back to filename so
+                    // RELEASED folder copies share history with their
+                    // original WIP path.
                     bool match = string.Equals(entryPath, filePath,
                                      StringComparison.OrdinalIgnoreCase)
-                              || string.Equals(
+                              || (!dupQuery && string.Equals(
                                      System.IO.Path.GetFileName(entryPath),
                                      fileName,
-                                     StringComparison.OrdinalIgnoreCase);
+                                     StringComparison.OrdinalIgnoreCase));
                     if (!match) continue;
 
                     entries.Add(new HistoryEntry
@@ -1594,7 +1709,14 @@ namespace PDMLite
         }
 
         // Returns the canonical (WIP/source) status for a file.
-        // Falls back to filename match so RELEASED folder copies reflect correct status.
+        // Falls back to filename match so RELEASED folder copies and legacy
+        // records reflect correct status — but NEVER when a LIVING rival WIP
+        // file owns this name: then the query path is a same-named duplicate
+        // and must not wear the original's status (PR-A testing — the
+        // quarantined twin showed the original's Released state). FindNameRival
+        // is the same predicate Rule 2.6 and the quarantine use, so all three
+        // agree; an orphaned/moved record (file gone from disk) is NOT a rival,
+        // preserving the graceful fallback for Explorer-moved files.
         public static string GetFileStatusByName(string filePath)
         {
             string fileName = System.IO.Path.GetFileName(filePath);
@@ -1608,7 +1730,11 @@ namespace PDMLite
                             StringComparison.OrdinalIgnoreCase))
                         return (string)el.Element("Status") ?? "";
                 }
-                // Fallback: same filename, any path
+                // A living rival owns this name → the query is a duplicate.
+                if (FindNameRival(doc, fileName, filePath) != null)
+                    return "";
+                // Fallback: same filename, any path (RELEASED copies, legacy
+                // records, orphaned records of a moved file)
                 foreach (var el in doc.Root.Element("Files").Elements("File"))
                 {
                     if (string.Equals((string)el.Element("FileName"), fileName,
