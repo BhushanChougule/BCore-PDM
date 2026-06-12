@@ -1,5 +1,17 @@
 Windows Registry Editor Version 5.00
 
+; BCore PDM - manual registration fallback (machine-wide, requires admin).
+; Prefer InstallPDMLite.bat (RegAsm reads the real assembly metadata);
+; import this file only when RegAsm is unavailable.
+;
+; CodeBase points at the DEPLOYED copy: N:\PDM-SolidWorks\ADDIN\PDMLite.dll
+; (never a dev machine's bin\Debug path - that path exists only there).
+;
+; INVARIANT: the Assembly version below must match AssemblyVersion in
+; PDMLite\Properties\AssemblyInfo.cs (pinned at 1.0.0.0). If that version
+; is ever bumped, update the three version references in this file
+; (or just rerun InstallPDMLite.bat, which derives them automatically).
+
 [HKEY_LOCAL_MACHINE\SOFTWARE\SolidWorks\AddIns\{A1B2C3D4-E5F6-7890-ABCD-EF1234567890}]
 @=dword:00000001
 "Title"="BCore PDM"
@@ -20,13 +32,13 @@ Windows Registry Editor Version 5.00
 "Class"="PDMLite.PDMLiteAddin"
 "Assembly"="PDMLite, Version=1.0.0.0, Culture=neutral, PublicKeyToken=null"
 "RuntimeVersion"="v4.0.30319"
-"CodeBase"="file:///D:/06 SOLIDWORKS_Automation/08_Documentation/PDMLite_CL/PDMLite/PDMLite/bin/Debug/PDMLite.dll"
+"CodeBase"="file:///N:/PDM-SolidWorks/ADDIN/PDMLite.dll"
 
 [HKEY_CLASSES_ROOT\CLSID\{A1B2C3D4-E5F6-7890-ABCD-EF1234567890}\InprocServer32\1.0.0.0]
 "Class"="PDMLite.PDMLiteAddin"
 "Assembly"="PDMLite, Version=1.0.0.0, Culture=neutral, PublicKeyToken=null"
 "RuntimeVersion"="v4.0.30319"
-"CodeBase"="file:///D:/06 SOLIDWORKS_Automation/08_Documentation/PDMLite_CL/PDMLite/PDMLite/bin/Debug/PDMLite.dll"
+"CodeBase"="file:///N:/PDM-SolidWorks/ADDIN/PDMLite.dll"
 
 [HKEY_CLASSES_ROOT\CLSID\{A1B2C3D4-E5F6-7890-ABCD-EF1234567890}\ProgId]
 @="PDMLite.PDMLiteAddin"

@@ -1,5 +1,13 @@
 Windows Registry Editor Version 5.00
 
+; BCore PDM - PER-USER registration variant (HKCU, NO admin rights needed).
+; Kept as a fallback for machines where IT cannot run the machine-wide
+; installer; the standard path is InstallPDMLite.bat as Administrator.
+;
+; CodeBase points at the DEPLOYED copy: N:\PDM-SolidWorks\ADDIN\PDMLite.dll
+; Same version invariant as RegisterPDMLite.reg: the Assembly version below
+; must match AssemblyVersion in PDMLite\Properties\AssemblyInfo.cs (1.0.0.0).
+
 ; ── COM Registration (per-user, no admin needed) ────────────────────
 
 [HKEY_CURRENT_USER\Software\Classes\CLSID\{A1B2C3D4-E5F6-7890-ABCD-EF1234567890}]
@@ -11,13 +19,13 @@ Windows Registry Editor Version 5.00
 "Class"="PDMLite.PDMLiteAddin"
 "Assembly"="PDMLite, Version=1.0.0.0, Culture=neutral, PublicKeyToken=null"
 "RuntimeVersion"="v4.0.30319"
-"CodeBase"="file:///D:/06 SOLIDWORKS_Automation/08_Documentation/PDMLite_CL/PDMLite/PDMLite/bin/Debug/PDMLite.dll"
+"CodeBase"="file:///N:/PDM-SolidWorks/ADDIN/PDMLite.dll"
 
 [HKEY_CURRENT_USER\Software\Classes\CLSID\{A1B2C3D4-E5F6-7890-ABCD-EF1234567890}\InprocServer32\1.0.0.0]
 "Class"="PDMLite.PDMLiteAddin"
 "Assembly"="PDMLite, Version=1.0.0.0, Culture=neutral, PublicKeyToken=null"
 "RuntimeVersion"="v4.0.30319"
-"CodeBase"="file:///D:/06 SOLIDWORKS_Automation/08_Documentation/PDMLite_CL/PDMLite/PDMLite/bin/Debug/PDMLite.dll"
+"CodeBase"="file:///N:/PDM-SolidWorks/ADDIN/PDMLite.dll"
 
 [HKEY_CURRENT_USER\Software\Classes\PDMLite.PDMLiteAddin]
 @="PDMLite.PDMLiteAddin Class"
