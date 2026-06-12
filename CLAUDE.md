@@ -218,7 +218,7 @@ Methods:
 
 \- FindFileNameConflict(fileName, excludeFilePath) → returns the FilePath of ANOTHER tracked vault file already using this file name (case-insensitive), or null. ValidateSave HARD-BLOCKS on a hit (Rule 2.6) — the vault keys on the file name everywhere (RELEASED/ARCHIVE/SCRAP are flat folders, search/dashboard dedupe by name, drawing↔model linkage is by basename, RemoveFileRecord/PurgeHistoryFor match by name), so a second same-named file in another division would overwrite the first one's released snapshot/archives and delete its history on first save. Only canonical records under WIP count as rivals: a same-name record OUTSIDE WIP is a legacy RELEASED-copy entry of the same file, and a WIP record whose file is gone from disk is an orphan awaiting purge — neither blocks a save.
 
-\- GetFileHistory(filePath) → returns List<HistoryEntry> reversed (most recent first)
+\- GetFileHistory(filePath) → returns List<HistoryEntry> reversed (most recent first). Name-fallback matching (so RELEASED-folder copies share history with the WIP original) is GATED: it never matches across two DIFFERENT WIP paths — a quarantined same-named duplicate must not display the original's timeline. GetFileStatusByName has the same gate for the same reason.
 
 \- GetFileRecord(filePath) → returns the full VaultFile for an exact path (PartNumber, Revision, Status, etc.), or null if untracked. Used by the Pending Requests cards to show a request's PN + Revision (which live on the File record, not the RevisionRequest).
 
@@ -364,7 +364,7 @@ Sections (top to bottom):
 
 2\. Search (auto-search 600ms timer, ≥2 chars, Enter key via ProcessCmdKey)
 
-3\. Active File card (filename, status, partNo, revision, lockedBy). Multi-config: the filename shows a "(N configs)" suffix when the part/assembly has more than one configuration; partNo + revision reflect the ACTIVE config (config name = Part No), refreshed live on every config switch via the ActiveConfigChangePostNotify hook. configCount comes from PropertyValidator.GetConfigNames(doc)
+3\. Active File card (filename, status, partNo, revision, lockedBy). Status is HONEST about untracked files: a saved file with NO vault record shows "Not Tracked" (grey) — or "DUPLICATE NAME" (cSwRed) when a tracked file already owns that name (the post-save quarantine case) — instead of borrowing the same-named original's status; an unsaved brand-new doc still shows WIP. Multi-config: the filename shows a "(N configs)" suffix when the part/assembly has more than one configuration; partNo + revision reflect the ACTIVE config (config name = Part No), refreshed live on every config switch via the ActiveConfigChangePostNotify hook. configCount comes from PropertyValidator.GetConfigNames(doc)
 
 4\. Master Actions (Open Drawing/Unlock/Release/New Revision/Rollback) — Masters only
 

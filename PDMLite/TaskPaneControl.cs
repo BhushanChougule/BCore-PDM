@@ -1079,8 +1079,28 @@ namespace PDMLite
                 : (configCount > 1 ? fileName + "  (" + configCount + " configs)"
                                    : fileName);
 
-            _statusVal.Text = string.IsNullOrEmpty(status) ? "WIP" : status;
-            _statusVal.ForeColor = StatusColor(status);
+            if (!string.IsNullOrEmpty(status))
+            {
+                _statusVal.Text = status;
+                _statusVal.ForeColor = StatusColor(status);
+            }
+            else if (string.IsNullOrEmpty(filePath))
+            {
+                // Brand-new doc, never saved — becomes WIP on first save.
+                _statusVal.Text = "WIP";
+                _statusVal.ForeColor = StatusColor("");
+            }
+            else
+            {
+                // On disk but no vault record: saved outside the vault, or
+                // QUARANTINED — first save under a taken name (the post-save
+                // guard refuses to track a duplicate). Say so instead of
+                // implying the file is a tracked WIP.
+                string dup = DatabaseManager.FindFileNameConflict(
+                    fileName, filePath);
+                _statusVal.Text = dup != null ? "DUPLICATE NAME" : "Not Tracked";
+                _statusVal.ForeColor = dup != null ? cSwRed : cDark;
+            }
             // Drawings share the PartNo of the part/assembly they document —
             // pull it from the referenced model so the card matches the part.
             if (isDrawing)

@@ -1612,6 +1612,8 @@ namespace PDMLite
         {
             var entries = new List<HistoryEntry>();
             string fileName = System.IO.Path.GetFileName(filePath);
+            bool queryUnderWip = (filePath ?? "").Trim()
+                .StartsWith(WipRoot, StringComparison.OrdinalIgnoreCase);
 
             lock (_lock) using (AcquireProcessLock())
             {
@@ -1622,13 +1624,18 @@ namespace PDMLite
                 {
                     string entryPath = (string)el.Element("FilePath") ?? "";
                     // Match by exact path first; fall back to filename so RELEASED
-                    // folder copies share history with their original WIP path
+                    // folder copies share history with their original WIP path —
+                    // but NEVER across two DIFFERENT WIP paths (a same-named
+                    // duplicate must not display the original's timeline).
+                    bool entryUnderWip = entryPath.Trim().StartsWith(WipRoot,
+                        StringComparison.OrdinalIgnoreCase);
                     bool match = string.Equals(entryPath, filePath,
                                      StringComparison.OrdinalIgnoreCase)
-                              || string.Equals(
+                              || (string.Equals(
                                      System.IO.Path.GetFileName(entryPath),
                                      fileName,
-                                     StringComparison.OrdinalIgnoreCase);
+                                     StringComparison.OrdinalIgnoreCase)
+                                  && !(queryUnderWip && entryUnderWip));
                     if (!match) continue;
 
                     entries.Add(new HistoryEntry
@@ -1665,10 +1672,16 @@ namespace PDMLite
         }
 
         // Returns the canonical (WIP/source) status for a file.
-        // Falls back to filename match so RELEASED folder copies reflect correct status.
+        // Falls back to filename match so RELEASED folder copies reflect correct
+        // status — but NEVER across two DIFFERENT WIP paths: same name on two
+        // WIP paths is a duplicate (post-save quarantine), not a copy of this
+        // file, and borrowing its status showed the ORIGINAL's state under the
+        // duplicate (PR-A testing).
         public static string GetFileStatusByName(string filePath)
         {
             string fileName = System.IO.Path.GetFileName(filePath);
+            bool queryUnderWip = (filePath ?? "").Trim()
+                .StartsWith(WipRoot, StringComparison.OrdinalIgnoreCase);
             lock (_lock) using (AcquireProcessLock())
             {
                 var doc = LoadOrCreate();
@@ -1679,12 +1692,18 @@ namespace PDMLite
                             StringComparison.OrdinalIgnoreCase))
                         return (string)el.Element("Status") ?? "";
                 }
-                // Fallback: same filename, any path
+                // Fallback: same filename — only when one side is a
+                // RELEASED-copy path (query or record outside WIP)
                 foreach (var el in doc.Root.Element("Files").Elements("File"))
                 {
-                    if (string.Equals((string)el.Element("FileName"), fileName,
+                    if (!string.Equals((string)el.Element("FileName"), fileName,
                             StringComparison.OrdinalIgnoreCase))
-                        return (string)el.Element("Status") ?? "";
+                        continue;
+                    string elPath = ((string)el.Element("FilePath") ?? "").Trim();
+                    bool recordUnderWip = elPath.StartsWith(WipRoot,
+                        StringComparison.OrdinalIgnoreCase);
+                    if (queryUnderWip && recordUnderWip) continue;
+                    return (string)el.Element("Status") ?? "";
                 }
             }
             return "";
