@@ -2747,12 +2747,19 @@ namespace PDMLite
 
             // ShowDialog does not dispose; this dialog opens on every request
             // submit/reject, so free the form + its fonts deterministically (a
-            // control does not own its Font — dispose them separately).
-            bool submitted = noteForm.ShowDialog() == DialogResult.OK;
-            noteForm.Dispose();
-            fDlgLabel.Dispose();
-            fDlgBtn.Dispose();
-            return submitted ? note : null;
+            // control does not own its Font — dispose them separately). The
+            // finally keeps the cleanup unconditional even if an exception
+            // escapes the modal loop.
+            try
+            {
+                return noteForm.ShowDialog() == DialogResult.OK ? note : null;
+            }
+            finally
+            {
+                noteForm.Dispose();
+                fDlgLabel.Dispose();
+                fDlgBtn.Dispose();
+            }
         }
 
         // ── Batch helpers (bulk release / bulk approve) ───────────────────

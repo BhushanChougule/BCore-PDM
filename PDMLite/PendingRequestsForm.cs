@@ -47,7 +47,7 @@ namespace PDMLite
         // Card fonts, created once: PopulateSection runs 3× per LoadRequests
         // (and LoadRequests after every approve/reject), and a Font assigned
         // to a control is not owned by it — per-call fonts leaked a GDI
-        // handle each (audit C4). Disposed on FormClosed.
+        // handle each (audit C4). Disposed in Dispose(bool).
         private readonly Font _fCardBold, _fCardSub, _fCardPn, _fCardBtn;
 
         public PendingRequestsForm(float scale)
@@ -58,16 +58,25 @@ namespace PDMLite
             _fCardSub  = new Font("Segoe UI", 3.3f * _scale);
             _fCardPn   = new Font("Segoe UI", 3.3f * _scale, FontStyle.Bold);
             _fCardBtn  = new Font("Segoe UI", 3.5f * _scale, FontStyle.Bold);
-            this.FormClosed += (s, e) =>
-            {
-                _fCardBold.Dispose();
-                _fCardSub.Dispose();
-                _fCardPn.Dispose();
-                _fCardBtn.Dispose();
-            };
 
             BuildForm();
             LoadRequests();
+        }
+
+        // Fonts are released here rather than on FormClosed: FormClosed never
+        // fires for a form that is disposed without having been shown (e.g.
+        // an exception out of ShowDialog), while the caller's using disposes
+        // unconditionally. Controls go first (base), then their fonts.
+        protected override void Dispose(bool disposing)
+        {
+            base.Dispose(disposing);
+            if (disposing)
+            {
+                _fCardBold?.Dispose();
+                _fCardSub?.Dispose();
+                _fCardPn?.Dispose();
+                _fCardBtn?.Dispose();
+            }
         }
 
         // Controls.Clear() does NOT dispose the removed controls — they get

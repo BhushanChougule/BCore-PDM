@@ -59,8 +59,8 @@ namespace PDMLite
 
         // Card fonts, created once: LoadFiles reruns on every 600ms search
         // debounce tick, and a Font assigned to a control is not owned by it —
-        // per-call fonts leaked a GDI handle each (audit C4). Disposed on
-        // FormClosed (with the search timer).
+        // per-call fonts leaked a GDI handle each (audit C4). Disposed in
+        // Dispose(bool) (with the search timer).
         private readonly Font _fCardBold, _fCardSub, _fCardSubBold,
             _fCardTag, _fCardMeta;
 
@@ -76,6 +76,27 @@ namespace PDMLite
 
             BuildForm();
             LoadFiles();
+        }
+
+        // Timer + fonts are released here rather than on FormClosed:
+        // FormClosed never fires for a form that is disposed without having
+        // been shown (e.g. an exception out of ShowDialog) — which would have
+        // left a LIVE timer ticking LoadFiles against a disposed form — while
+        // the caller's using disposes unconditionally. Controls go first
+        // (base), then the timer and their fonts.
+        protected override void Dispose(bool disposing)
+        {
+            base.Dispose(disposing);
+            if (disposing)
+            {
+                _searchTimer?.Stop();
+                _searchTimer?.Dispose();
+                _fCardBold?.Dispose();
+                _fCardSub?.Dispose();
+                _fCardSubBold?.Dispose();
+                _fCardTag?.Dispose();
+                _fCardMeta?.Dispose();
+            }
         }
 
         // Controls.Clear() does NOT dispose the removed controls — they get
@@ -147,17 +168,6 @@ namespace PDMLite
 
             _searchTimer = new Timer { Interval = 600 };
             _searchTimer.Tick += (s, e) => { _searchTimer.Stop(); LoadFiles(); };
-            this.FormClosed += (s, e) =>
-            {
-                _searchTimer.Stop();
-                _searchTimer.Dispose();
-                _fCardBold.Dispose();
-                _fCardSub.Dispose();
-                _fCardSubBold.Dispose();
-                _fCardTag.Dispose();
-                _fCardMeta.Dispose();
-            };
-
             _filter.TextChanged += (s, e) =>
             {
                 _searchTimer.Stop();

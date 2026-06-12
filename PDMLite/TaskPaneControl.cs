@@ -60,6 +60,9 @@ namespace PDMLite
         // ceiling over a multi-day session (audit C4).
         private Font _fBold38, _fBold35, _fBold34, _fBold31;
         private Font _fReg35, _fReg33, _fItalic33;
+        // Paint-invariant StringFormat for the cards' rotated status bar —
+        // shared like the fonts (was allocated on every WM_PAINT).
+        private StringFormat _sfBarCenter;
 
         public TaskPaneControl()
         {
@@ -74,16 +77,26 @@ namespace PDMLite
             _fReg35 = new Font("Segoe UI", 3.5f * _scale);
             _fReg33 = new Font("Segoe UI", 3.3f * _scale);
             _fItalic33 = new Font("Segoe UI", 3.3f * _scale, FontStyle.Italic);
+            _sfBarCenter = new StringFormat
+            {
+                Alignment = StringAlignment.Center,
+                LineAlignment = StringAlignment.Center
+            };
 
             BuildUI();
         }
 
         // base.Dispose disposes child CONTROLS, but not fonts (a control does
         // not own its Font) and not the timer (created without a container).
+        // Order matters: tear the children down FIRST, then release the fonts
+        // they were painting with — the reverse leaves a window where a
+        // re-entrant repaint could draw with a disposed Font.
         protected override void Dispose(bool disposing)
         {
+            base.Dispose(disposing);
             if (disposing)
             {
+                _searchTimer?.Stop();
                 _searchTimer?.Dispose();
                 _fBold38?.Dispose();
                 _fBold35?.Dispose();
@@ -92,8 +105,8 @@ namespace PDMLite
                 _fReg35?.Dispose();
                 _fReg33?.Dispose();
                 _fItalic33?.Dispose();
+                _sfBarCenter?.Dispose();
             }
-            base.Dispose(disposing);
         }
 
         // Controls.Clear() does NOT dispose the removed controls — WinForms
@@ -678,17 +691,12 @@ namespace PDMLite
                         System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
                     gr.TextRenderingHint =
                         System.Drawing.Text.TextRenderingHint.AntiAliasGridFit;
-                    using (var br = new SolidBrush(Color.White))
-                    using (var sf = new StringFormat
-                    {
-                        Alignment = StringAlignment.Center,
-                        LineAlignment = StringAlignment.Center
-                    })
-                    {
-                        gr.TranslateTransform(barW / 2f, cardH / 2f);
-                        gr.RotateTransform(-90f);
-                        gr.DrawString(statusText, _fBold31, br, 0, 0, sf);
-                    }
+                    gr.TranslateTransform(barW / 2f, cardH / 2f);
+                    gr.RotateTransform(-90f);
+                    // Brushes.White is the framework's cached brush (never
+                    // dispose it); font + format are the shared fields.
+                    gr.DrawString(statusText, _fBold31, Brushes.White,
+                        0, 0, _sfBarCenter);
                 };
                 card.Controls.Add(bar);
 
@@ -1115,15 +1123,13 @@ namespace PDMLite
         private void PopulateHistoryPanel(List<HistoryEntry> history)
         {
             ClearAndDispose(_historyPanel);
-            Font fHistBold = _fBold38;
-            Font fHistSub  = _fReg33;
 
             if (history == null || history.Count == 0)
             {
                 _historyPanel.Controls.Add(new Label
                 {
                     Text = "No history yet",
-                    Font = fHistSub,
+                    Font = _fReg33,
                     ForeColor = cTextGray,
                     Location = new Point(S(4), S(6)),
                     AutoSize = false,
@@ -1143,7 +1149,7 @@ namespace PDMLite
                 _historyPanel.Controls.Add(new Label
                 {
                     Text = "● " + entry.Status,
-                    Font = fHistBold,
+                    Font = _fBold38,
                     ForeColor = StatusColor(entry.Status),
                     Location = new Point(S(4), hy),
                     AutoSize = false,
@@ -1155,7 +1161,7 @@ namespace PDMLite
                 _historyPanel.Controls.Add(new Label
                 {
                     Text = dateStr + "  " + entry.ChangedBy,
-                    Font = fHistSub,
+                    Font = _fReg33,
                     ForeColor = cTextGray,
                     Location = new Point(S(4), hy),
                     AutoSize = false,
@@ -1169,7 +1175,7 @@ namespace PDMLite
                     _historyPanel.Controls.Add(new Label
                     {
                         Text = entry.ChangeNote,
-                        Font = fHistSub,
+                        Font = _fReg33,
                         ForeColor = cTextLight,
                         Location = new Point(S(4), hy),
                         AutoSize = false,
