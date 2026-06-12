@@ -940,6 +940,8 @@ GetNextRevision() in VaultManager.cs handles this
 
 9\. Engineer PC rollout
 
+10\. Licensing / super-access / installer — DEFERRED until development is declared done. Full design pinned in LICENSING.md (offline signed license file with expiry + owner password hash, Owner role above Master via license not vault.xml, graduated expiry: governance features off but files still open/save, ConfuserEx obfuscation, single Inno Setup installer, commercialization addendum incl. the IP-ownership gate). During development only two habits apply: keep conventions centralized when touched anyway, and build nothing that fights that design.
+
 
 
 \## Development Workflow
