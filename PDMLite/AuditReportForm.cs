@@ -1242,6 +1242,8 @@ namespace PDMLite
             private CheckedListBox _list;
             private TextBox _search;
             private Label _count;
+            private Button _ok;
+            private Color _okBack;
 
             public HashSet<string> SelectedValues { get; private set; }
 
@@ -1318,16 +1320,17 @@ namespace PDMLite
                 _list.ItemCheck += List_ItemCheck;
                 Controls.Add(_list);
 
-                var ok = MakeBtn("OK", cBrand, fBtn,
+                _okBack = cBrand;
+                _ok = MakeBtn("OK", cBrand, fBtn,
                     new Point(S(8), okY), S(108), rowH);
-                ok.Click += (s, e) => { Commit(); DialogResult = DialogResult.OK; Close(); };
-                Controls.Add(ok);
+                _ok.Click += (s, e) => { Commit(); DialogResult = DialogResult.OK; Close(); };
+                Controls.Add(_ok);
                 var cancel = MakeBtn("Cancel", Color.FromArgb(120, 128, 140), fBtn,
                     new Point(S(120), okY), S(108), rowH);
                 cancel.Click += (s, e) => { DialogResult = DialogResult.Cancel; Close(); };
                 Controls.Add(cancel);
 
-                AcceptButton = ok;
+                AcceptButton = _ok;
                 CancelButton = cancel;
 
                 RebuildList();
@@ -1356,6 +1359,22 @@ namespace PDMLite
             {
                 if (e.Index < 0 || e.Index >= _visibleRaw.Count) return;
                 _state[_visibleRaw[e.Index]] = (e.NewValue == CheckState.Checked);
+                UpdateOkEnabled();
+            }
+
+            // OK commits the checked matches; with NONE ticked it would commit
+            // an empty filter and blank the whole grid (a typo'd search term +
+            // Enter — OK is the AcceptButton — or Clear + OK). Greyed out until
+            // at least one match is ticked, like Excel.
+            private void UpdateOkEnabled()
+            {
+                if (_ok == null) return;
+                string term = (_search.Text ?? "").Trim();
+                bool any = false;
+                foreach (var kv in _state)
+                    if (kv.Value && MatchesTerm(kv.Key, term)) { any = true; break; }
+                _ok.Enabled = any;
+                _ok.BackColor = any ? _okBack : Color.FromArgb(170, 175, 182);
             }
 
             // True when the value (or its "(Blanks)" display form) matches the
@@ -1404,11 +1423,15 @@ namespace PDMLite
                     _count.Text = string.Format("{0:N0} of {1:N0} shown — type to narrow",
                         _visibleRaw.Count, matched);
                 else if (term.Length > 0)
-                    _count.Text = string.Format("{0:N0} match{1} — OK filters to ticked",
-                        matched, matched == 1 ? "" : "es");
+                    _count.Text = matched == 0
+                        ? "No matches"
+                        : string.Format("{0:N0} match{1} — OK filters to ticked",
+                            matched, matched == 1 ? "" : "es");
                 else
                     _count.Text = string.Format("{0:N0} value{1}",
                         matched, matched == 1 ? "" : "s");
+
+                UpdateOkEnabled();
             }
 
             // OK while a search term is active commits the CHECKED MATCHES ONLY
