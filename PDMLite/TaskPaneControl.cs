@@ -127,6 +127,44 @@ namespace PDMLite
 
         private int S(float v) => (int)(v * _scale);
 
+        // TEMPORARY DIAGNOSTIC — see the DoubleClick hookup on _fileNameLbl.
+        private void ShowNameDiagnostics()
+        {
+            try
+            {
+                var doc = PDMLiteAddin.SwApp?.ActiveDoc as ModelDoc2;
+                string path, title;
+                try { path = doc == null ? "(no active doc)"
+                                         : "[" + (doc.GetPathName() ?? "(null)") + "]"; }
+                catch (Exception ex) { path = "THROWS: " + ex.Message; }
+                try { title = doc == null ? "(no active doc)"
+                                          : "[" + (doc.GetTitle() ?? "(null)") + "]"; }
+                catch (Exception ex) { title = "THROWS: " + ex.Message; }
+
+                string lblText = _fileNameLbl.Text ?? "(null)";
+                var codes = new System.Text.StringBuilder();
+                string sample = lblText.Length <= 60
+                    ? lblText : lblText.Substring(0, 60);
+                foreach (char c in sample)
+                    codes.Append(((int)c).ToString("X4")).Append(' ');
+
+                MessageBox.Show(
+                    "GetPathName: " + path + "\n" +
+                    "GetTitle:    " + title + "\n" +
+                    "Label.Text:  [" + lblText + "]   (length " +
+                        lblText.Length + ")\n" +
+                    "Char codes:  " + codes + "\n" +
+                    "Bounds: " + _fileNameLbl.Bounds +
+                    "   Visible: " + _fileNameLbl.Visible + "\n" +
+                    "Font: " + _fileNameLbl.Font,
+                    "BCore PDM — Name Diagnostics");
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show(ex.ToString(), "BCore PDM — Name Diagnostics");
+            }
+        }
+
         protected override bool ProcessCmdKey(ref Message msg, Keys keyData)
         {
             if (keyData == Keys.Enter && _searchBox != null && _searchBox.Focused)
@@ -316,6 +354,12 @@ namespace PDMLite
                 Height = S(16),
                 AutoEllipsis = true
             };
+            // TEMPORARY DIAGNOSTIC (blank-name hunt): double-click the name
+            // box to dump exactly what the panel resolved for the active doc
+            // — path/title as raw strings, the label's actual Text with char
+            // codes (invisible characters become visible as hex), and the
+            // label's bounds/visibility/font. Remove once the cause is found.
+            _fileNameLbl.DoubleClick += (s2, e2) => ShowNameDiagnostics();
             fileCard.Controls.Add(_fileNameLbl);
             this.Controls.Add(fileCard);
             y += S(30);
