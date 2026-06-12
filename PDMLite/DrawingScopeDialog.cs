@@ -51,7 +51,9 @@ namespace PDMLite
             MaximizeBox     = false;
             MinimizeBox     = false;
             BackColor       = cBg;
-            ClientSize      = new Size(S(380), S(232));
+            // The sharedExists variant carries longer option labels — give
+            // it a wider client area so nothing clips (found in PR testing).
+            ClientSize      = new Size(S(sharedExists ? 436 : 380), S(232));
 
             int cW = ClientSize.Width;
 
@@ -100,7 +102,7 @@ namespace PDMLite
             var rbCommon = new RadioButton
             {
                 Text      = sharedExists
-                    ? "Open the common drawing  (covers ALL configurations)"
+                    ? "Open the common drawing  (covers ALL configs)"
                     : "Common drawing  (one for ALL configurations)",
                 Font      = fOpt,
                 ForeColor = cTextDark,
