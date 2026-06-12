@@ -1799,6 +1799,46 @@ namespace PDMLite
         // the path is not tracked. Used by the Pending Requests cards to show
         // the file's PartNumber + Revision (which live on the File record, not
         // on the RevisionRequest).
+        // Rename a tracked file's record IN PLACE (FilePath + FileName) and
+        // re-point its RevisionHistory entries, so the timeline follows the
+        // file. Used by Rule 3.6's config+drawing rename ({oldCfg}.slddrw →
+        // {newCfg}.slddrw); the file on disk is renamed by the caller.
+        public static void RenameFileRecord(string oldPath, string newPath,
+            string user)
+        {
+            string oldName = System.IO.Path.GetFileName(oldPath);
+            string newName = System.IO.Path.GetFileName(newPath);
+            lock (_lock) using (AcquireProcessLock())
+            {
+                var doc = LoadOrCreate();
+                bool changed = false;
+                foreach (var el in doc.Root.Element("Files").Elements("File"))
+                {
+                    if (!string.Equals((string)el.Element("FilePath"), oldPath,
+                            StringComparison.OrdinalIgnoreCase)) continue;
+                    el.Element("FilePath").Value = newPath;
+                    el.Element("FileName").Value = newName;
+                    changed = true;
+                }
+                foreach (var en in doc.Root.Element("RevisionHistory")
+                                          .Elements("Entry"))
+                {
+                    string ep = (string)en.Element("FilePath") ?? "";
+                    if (string.Equals(ep, oldPath,
+                            StringComparison.OrdinalIgnoreCase) ||
+                        string.Equals(System.IO.Path.GetFileName(ep), oldName,
+                            StringComparison.OrdinalIgnoreCase))
+                    {
+                        en.Element("FilePath").Value = newPath;
+                        changed = true;
+                    }
+                }
+                if (changed) Save(doc);
+            }
+            AuditLogger.Log("FileRenamed", user, newName, "", "",
+                "renamed from " + oldName + " (config rename)");
+        }
+
         public static VaultFile GetFileRecord(string filePath)
         {
             if (string.IsNullOrEmpty(filePath)) return null;

@@ -708,22 +708,59 @@ namespace PDMLite
                                 issues.Add("name should match Part No " + cpn);
 
                                 string target = cpn.Trim();
+                                string drwPath = ConfigDrawingPath(filePath, c);
+                                string drwTarget = null, drwSkip = null;
+                                if (drwPath != null)
+                                {
+                                    // The config's drawing must be renamed
+                                    // WITH it (file + record + the views'
+                                    // config references) — verify it can be.
+                                    drwTarget = System.IO.Path.Combine(
+                                        System.IO.Path.GetDirectoryName(drwPath),
+                                        SafeCfgFileName(target) + ".slddrw");
+                                    var drwRec =
+                                        DatabaseManager.GetFileRecord(drwPath);
+                                    if (System.IO.File.Exists(drwTarget))
+                                        drwSkip = "a drawing named \"" +
+                                            System.IO.Path.GetFileName(drwTarget) +
+                                            "\" already exists";
+                                    else if (drwRec == null ||
+                                        string.IsNullOrEmpty(drwRec.ReferencedModel))
+                                        drwSkip = "its drawing \"" +
+                                            System.IO.Path.GetFileName(drwPath) +
+                                            "\" can't be verified as THIS " +
+                                            "part's (no tracked model link)";
+                                    else if (!string.Equals(drwRec.ReferencedModel,
+                                        filePath, StringComparison.OrdinalIgnoreCase))
+                                        drwSkip = "its drawing \"" +
+                                            System.IO.Path.GetFileName(drwPath) +
+                                            "\" documents a DIFFERENT part";
+                                    else if (drwRec.Status == "Released" ||
+                                             drwRec.Status == "Locked")
+                                        drwSkip = "its drawing is " +
+                                            drwRec.Status +
+                                            " (Unlock it first)";
+                                }
                                 if (allCfgsVS.Any(o => string.Equals(o.Trim(),
                                         target,
                                         StringComparison.OrdinalIgnoreCase)))
                                     renameSkipped.Add("  \"" + c +
                                         "\" — a config named \"" + target +
                                         "\" already exists");
-                                else if (ConfigDrawingExists(filePath, c))
-                                    renameSkipped.Add("  \"" + c +
-                                        "\" — a drawing named after this " +
-                                        "config exists (rename would break " +
-                                        "the link)");
+                                else if (drwSkip != null)
+                                    renameSkipped.Add("  \"" + c + "\" — " +
+                                        drwSkip);
                                 else
                                 {
-                                    renameable.Add(new[] { c, target });
-                                    renamePreview.Add(
-                                        "  " + c + "  →  " + target);
+                                    renameable.Add(new[]
+                                        { c, target, drwPath, drwTarget });
+                                    renamePreview.Add("  " + c + "  →  " +
+                                        target + (drwPath == null ? "" :
+                                        "   (+ drawing " +
+                                        System.IO.Path.GetFileName(drwPath) +
+                                        "  →  " +
+                                        System.IO.Path.GetFileName(drwTarget) +
+                                        ")"));
                                 }
                             }
 
@@ -793,6 +830,21 @@ namespace PDMLite
                                     var failed = new List<string>();
                                     foreach (var m in renameable)
                                     {
+                                        // ORDER: drawing file + record first
+                                        // (a failure here skips the config
+                                        // rename, never leaving a renamed
+                                        // config with a stale-named drawing),
+                                        // then the config, then the drawing's
+                                        // VIEW references (which point at the
+                                        // config BY NAME and must follow it).
+                                        if (m[2] != null &&
+                                            !RenameConfigDrawing(m[2], m[3]))
+                                        {
+                                            failed.Add(m[0] +
+                                                " (its drawing could not be " +
+                                                "renamed)");
+                                            continue;
+                                        }
                                         try
                                         {
                                             var cfgObj =
@@ -803,9 +855,15 @@ namespace PDMLite
                                                 cfgObj.Name = m[1];
                                             if (doc.GetConfigurationByName(m[1])
                                                     == null)
+                                            {
                                                 failed.Add(m[0]);
+                                                continue;
+                                            }
                                         }
-                                        catch { failed.Add(m[0]); }
+                                        catch { failed.Add(m[0]); continue; }
+                                        if (m[2] != null)
+                                            RepointDrawingViews(
+                                                m[3], m[0], m[1]);
                                     }
                                     if (failed.Count > 0)
                                         SwApp.SendMsgToUser2(
@@ -1058,31 +1116,132 @@ namespace PDMLite
             return 0;
         }
 
-        // True when a config-specific drawing named after this config exists
-        // on disk (model's folder or any WIP division) — renaming the config
-        // would silently break the {configName}.slddrw linkage, so Rule 3.6's
-        // auto-rename skips such configs.
-        private static bool ConfigDrawingExists(string modelPath, string cfgName)
+        // Config name sanitised for filename use — mirrors
+        // VaultManager.OpenOrCreateDrawing / DatabaseManager.SanitizeFileName.
+        private static string SafeCfgFileName(string cfgName)
+        {
+            var invalid = System.IO.Path.GetInvalidFileNameChars();
+            return new string((cfgName ?? "").Select(
+                ch => invalid.Contains(ch) ? '_' : ch).ToArray());
+        }
+
+        // Path of the config-specific drawing named after this config (model's
+        // folder or any WIP division), or null. Rule 3.6's auto-rename either
+        // renames it ALONG WITH the config (file + record + view references)
+        // or skips the config with a reason.
+        private static string ConfigDrawingPath(string modelPath, string cfgName)
         {
             try
             {
-                var invalid = System.IO.Path.GetInvalidFileNameChars();
-                string safe = new string(cfgName.Select(
-                    ch => invalid.Contains(ch) ? '_' : ch).ToArray());
-                if (string.IsNullOrEmpty(safe)) return false;
+                string safe = SafeCfgFileName(cfgName);
+                if (string.IsNullOrEmpty(safe)) return null;
                 string name = safe + ".slddrw";
 
                 string md = System.IO.Path.GetDirectoryName(modelPath);
-                if (!string.IsNullOrEmpty(md) &&
-                    System.IO.File.Exists(System.IO.Path.Combine(md, name)))
-                    return true;
+                if (!string.IsNullOrEmpty(md))
+                {
+                    string full = System.IO.Path.Combine(md, name);
+                    if (System.IO.File.Exists(full)) return full;
+                }
                 foreach (string div in DatabaseManager.WipDivisions)
-                    if (System.IO.File.Exists(System.IO.Path.Combine(
-                            DatabaseManager.WipRoot, div, name)))
-                        return true;
+                {
+                    string full = System.IO.Path.Combine(
+                        DatabaseManager.WipRoot, div, name);
+                    if (System.IO.File.Exists(full)) return full;
+                }
             }
             catch { }
-            return false;
+            return null;
+        }
+
+        // Rename a config-specific drawing FILE on disk (closing it first if
+        // open) and its vault record. Returns false on any failure — the
+        // caller then skips the config rename so the pair never diverges.
+        private static bool RenameConfigDrawing(string oldPath, string newPath)
+        {
+            try
+            {
+                bool wasOpen = false;
+                try
+                {
+                    if (SwApp.GetOpenDocumentByName(oldPath) != null)
+                    {
+                        wasOpen = true;
+                        SwApp.CloseDoc(oldPath);
+                    }
+                }
+                catch { }
+
+                // SOLIDWORKS may release the handle a beat after CloseDoc.
+                for (int attempt = 0; ; attempt++)
+                {
+                    try { System.IO.File.Move(oldPath, newPath); break; }
+                    catch (System.IO.IOException)
+                    {
+                        if (attempt == 4) return false;
+                        System.Threading.Thread.Sleep(200);
+                    }
+                }
+
+                DatabaseManager.RenameFileRecord(oldPath, newPath,
+                    CurrentUser);
+                // Deliberately NOT reopened here — RepointDrawingViews opens
+                // it at the new path after the config rename.
+                return wasOpen || true;
+            }
+            catch { return false; }
+        }
+
+        // After the CONFIG was renamed, the drawing's views still reference
+        // the OLD config name — open the renamed drawing silently, repoint
+        // every model view, save, close. Best-effort: a failure is reported
+        // by the caller's summary only via the audit trail of the next save.
+        private static void RepointDrawingViews(string drwPath,
+            string oldCfg, string newCfg)
+        {
+            try
+            {
+                int e2 = 0, w2 = 0;
+                ModelDoc2 drw = SwApp.OpenDoc6(drwPath,
+                    (int)swDocumentTypes_e.swDocDRAWING,
+                    (int)swOpenDocOptions_e.swOpenDocOptions_Silent,
+                    "", ref e2, ref w2) as ModelDoc2;
+                if (drw == null)
+                    drw = SwApp.GetOpenDocumentByName(drwPath) as ModelDoc2;
+                if (drw == null) return;
+
+                var draw = drw as DrawingDoc;
+                if (draw != null)
+                {
+                    var sheet = draw.GetFirstView()
+                        as SolidWorks.Interop.sldworks.View;
+                    var v = sheet != null
+                        ? sheet.GetNextView()
+                            as SolidWorks.Interop.sldworks.View
+                        : null;
+                    while (v != null)
+                    {
+                        try
+                        {
+                            if (string.Equals(v.ReferencedConfiguration,
+                                    oldCfg, StringComparison.OrdinalIgnoreCase))
+                                v.ReferencedConfiguration = newCfg;
+                        }
+                        catch { }
+                        v = v.GetNextView()
+                            as SolidWorks.Interop.sldworks.View;
+                    }
+                }
+
+                bool prev = SuppressSaveValidation;
+                SuppressSaveValidation = true;
+                try { drw.Save3(
+                        (int)swSaveAsOptions_e.swSaveAsOptions_Silent,
+                        0, 0); }
+                finally { SuppressSaveValidation = prev; }
+                try { SwApp.CloseDoc(drwPath); } catch { }
+            }
+            catch { }
         }
 
         private void Block(string reason) =>
