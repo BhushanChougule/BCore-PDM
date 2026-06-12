@@ -246,7 +246,25 @@ namespace PDMLite
                     return 1;
                 }
 
-                string filePath = doc.GetPathName();
+                // FileSaveAsNotify2 is a PRE-save notify: fileName carries the
+                // TARGET path while doc.GetPathName() still returns the OLD
+                // path ("" for a never-saved doc). Every rule below must judge
+                // the file being WRITTEN — validating the old path let Save As
+                // bypass the lock/released/outside-WIP checks AND the Rule 2.6
+                // duplicate-name hard block (whose own dialog tells the user
+                // to use Save As!), after which the post-save create-purge
+                // wiped the rival file's history. Prefer the event's target
+                // whenever it is a full path; a plain re-save passes the doc's
+                // own path anyway, and a bare name falls back to the doc path.
+                string docPath = doc.GetPathName();
+                bool fileNameRooted = false;
+                try
+                {
+                    fileNameRooted = !string.IsNullOrEmpty(fileName)
+                        && System.IO.Path.IsPathRooted(fileName);
+                }
+                catch { } // invalid path chars — treat as not rooted
+                string filePath = fileNameRooted ? fileName : docPath;
                 if (string.IsNullOrEmpty(filePath)) filePath = fileName;
                 string userRole = DatabaseManager.GetUserRole(CurrentUser);
 

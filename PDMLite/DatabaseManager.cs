@@ -132,6 +132,22 @@ namespace PDMLite
                 var restored = TryRestoreFromBackup("vault.xml missing");
                 if (restored != null) return restored;
 
+                // An EXISTING backup that failed to restore (corrupt .bak,
+                // transient IO) means this is an ESTABLISHED vault in trouble
+                // — bootstrapping an empty DB here would hand every caller a
+                // blank vault, and the next Save would overwrite the .bak,
+                // destroying the last (possibly hand-repairable) copy of years
+                // of records. Fail the operation loudly instead; only a
+                // genuinely fresh vault (no backup either) bootstraps.
+                bool backupExists = false;
+                try { backupExists = File.Exists(BackupFile); } catch { }
+                if (backupExists)
+                    throw new InvalidOperationException(
+                        "vault.xml is missing and vault.xml.bak could not be " +
+                        "restored. Refusing to create an empty vault over an " +
+                        "established one — restore " + DataFile +
+                        " manually from the backup or an archive copy.");
+
                 var doc = new XDocument(
                     new XElement("BCorePDMVault",
                         new XElement("Files"),
@@ -149,7 +165,11 @@ namespace PDMLite
                         new XElement("RevisionRequests")
                     )
                 );
-                Save(doc); // atomic-path write, not a direct overwrite
+                // Persist the fresh template — except in degraded mode, where
+                // a READ path must never write (the in-memory doc serves this
+                // call; the first real mutation persists it under the lock).
+                if (!LockDegraded)
+                    Save(doc); // atomic-path write, not a direct overwrite
                 return doc;
             }
 
@@ -177,7 +197,30 @@ namespace PDMLite
             {
                 if (!File.Exists(BackupFile)) return null;
                 var doc = XDocument.Load(BackupFile); // proves the backup parses
-                File.Copy(BackupFile, DataFile, overwrite: true);
+
+                // Preserve a corrupt-but-present vault.xml before overwriting
+                // it: it holds exactly ONE save more than the backup and may
+                // be hand-repairable. Best-effort.
+                try
+                {
+                    if (File.Exists(DataFile))
+                        File.Copy(DataFile, DataFile + ".corrupt." +
+                            DateTime.Now.ToString("yyyyMMdd_HHmmss"),
+                            overwrite: true);
+                }
+                catch { }
+
+                // Write the restored copy back — best-effort, and SKIPPED in
+                // degraded mode: a restore is triggered from READ paths, and a
+                // degraded reader must never write over other machines' files
+                // (the same rule as the janitorial writes). The parsed doc
+                // still serves this call either way, and the next healthy
+                // Save rewrites vault.xml via the atomic path anyway.
+                if (!LockDegraded)
+                {
+                    try { File.Copy(BackupFile, DataFile, overwrite: true); }
+                    catch { }
+                }
                 LogDbEvent("VaultRestoredFromBackup", reason);
                 return doc;
             }
@@ -479,6 +522,7 @@ namespace PDMLite
         public static void UpsertFile(VaultFile f)
         {
             bool wasCreate;
+            string rivalPath = null;
             lock (_lock) using (AcquireProcessLock())
             {
                 var doc = LoadOrCreate();
@@ -506,8 +550,21 @@ namespace PDMLite
                 // before the remove-purge fix shipped). Wipe any stale entries
                 // so the new file starts with a clean timeline. The Save at the
                 // end of this method persists the purge.
+                // LAST-LINE GUARD: Rule 2.6's pre-save check and this post-save
+                // insert run in SEPARATE lock acquisitions (the lock is never
+                // held across SOLIDWORKS work), so two machines first-saving
+                // the same name within seconds can both get here — and
+                // PurgeHistoryFor matches by FILENAME, so purging now would
+                // wipe the LIVING rival's whole timeline, not stale leftovers.
+                // When a same-named rival record exists, keep its history (skip
+                // the purge) and audit the collision; Rule 2.6 hard-blocks the
+                // next save of either file until a Master removes one.
                 if (wasCreate)
-                    PurgeHistoryFor(doc, f.FilePath, f.FileName);
+                {
+                    rivalPath = FindNameRival(doc, f.FileName, targetPath);
+                    if (rivalPath == null)
+                        PurgeHistoryFor(doc, f.FilePath, f.FileName);
+                }
 
                 if (existing != null)
                 {
@@ -569,6 +626,11 @@ namespace PDMLite
             // Log outside the DB lock — AuditLogger holds its own file lock.
             AuditLogger.Log(wasCreate ? "Create" : "Save",
                 f.ModifiedBy ?? "", f.FileName, f.PartNumber ?? "");
+            if (rivalPath != null)
+                AuditLogger.Log("DuplicateNameDetected", f.ModifiedBy ?? "",
+                    f.FileName, f.PartNumber ?? "", "",
+                    "rival at " + rivalPath + " — history purge skipped; " +
+                    "remove one of the files via Remove from Vault");
         }
 
         public static string GetFileStatus(string filePath)
@@ -1410,30 +1472,39 @@ namespace PDMLite
         public static string FindFileNameConflict(string fileName,
             string excludeFilePath)
         {
+            lock (_lock) using (AcquireProcessLock())
+            {
+                return FindNameRival(LoadOrCreate(), fileName, excludeFilePath);
+            }
+        }
+
+        // Core rival scan against an already-loaded document — callers hold
+        // the lock. Shared by FindFileNameConflict (the Rule 2.6 save-time
+        // check) and UpsertFile (the create-time last-line guard), so the two
+        // can never disagree about what counts as a rival.
+        private static string FindNameRival(XDocument doc, string fileName,
+            string excludeFilePath)
+        {
             if (string.IsNullOrWhiteSpace(fileName)) return null;
 
             string target = fileName.Trim();
             string exclude = (excludeFilePath ?? "").Trim();
 
-            lock (_lock) using (AcquireProcessLock())
+            foreach (var el in doc.Root.Element("Files").Elements("File"))
             {
-                var doc = LoadOrCreate();
-                foreach (var el in doc.Root.Element("Files").Elements("File"))
-                {
-                    string elPath = ((string)el.Element("FilePath") ?? "").Trim();
-                    if (elPath.Equals(exclude, StringComparison.OrdinalIgnoreCase))
-                        continue;
-                    if (!elPath.StartsWith(WipRoot, StringComparison.OrdinalIgnoreCase))
-                        continue;
+                string elPath = ((string)el.Element("FilePath") ?? "").Trim();
+                if (elPath.Equals(exclude, StringComparison.OrdinalIgnoreCase))
+                    continue;
+                if (!elPath.StartsWith(WipRoot, StringComparison.OrdinalIgnoreCase))
+                    continue;
 
-                    string elFileName = ((string)el.Element("FileName") ?? "").Trim();
-                    if (!elFileName.Equals(target, StringComparison.OrdinalIgnoreCase))
-                        continue;
+                string elFileName = ((string)el.Element("FileName") ?? "").Trim();
+                if (!elFileName.Equals(target, StringComparison.OrdinalIgnoreCase))
+                    continue;
 
-                    bool onDisk = true;
-                    try { onDisk = File.Exists(elPath); } catch { }
-                    if (onDisk) return elPath;
-                }
+                bool onDisk = true;
+                try { onDisk = File.Exists(elPath); } catch { }
+                if (onDisk) return elPath;
             }
 
             return null;

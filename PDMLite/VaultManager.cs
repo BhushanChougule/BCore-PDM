@@ -866,6 +866,7 @@ namespace PDMLite
                 ? user.Substring(0, 2).ToUpper() : user.ToUpper();
             string checkedDateVal = DateTime.Now.ToString("MM/dd/yyyy");
 
+            var cfgSwitchFailures = new List<string>();
             if (!isDrawing)
             {
                 var relCfgsAF = PropertyValidator.GetConfigNames(doc);
@@ -875,6 +876,11 @@ namespace PDMLite
                     // so switch to each one before reading mass properties.
                     // try/finally guarantees we restore the original config even
                     // if a mass-property read throws mid-loop.
+                    // ShowConfiguration2's return IS CHECKED: a failed switch
+                    // means AutoFillWeight would stamp the PREVIOUS config's
+                    // mass — and the STEP loop below would export the previous
+                    // config's GEOMETRY under this config's part number. Such
+                    // a config can't be released safely, so collect and abort.
                     string origCfgAF = (doc.GetActiveConfiguration()
                         as SolidWorks.Interop.sldworks.Configuration)?.Name;
                     try
@@ -885,8 +891,10 @@ namespace PDMLite
                                 checkedByVal, c);
                             PropertyValidator.SetProperty(doc, "CheckedDate",
                                 checkedDateVal, c);
-                            doc.ShowConfiguration2(c);
-                            PropertyValidator.AutoFillWeight(doc);
+                            if (doc.ShowConfiguration2(c))
+                                PropertyValidator.AutoFillWeight(doc);
+                            else
+                                cfgSwitchFailures.Add(c);
                         }
                     }
                     finally
@@ -906,6 +914,31 @@ namespace PDMLite
             {
                 PropertyValidator.SetProperty(doc, "CheckedBy", checkedByVal);
                 PropertyValidator.SetProperty(doc, "CheckedDate", checkedDateVal);
+            }
+
+            // A configuration SOLIDWORKS refused to activate cannot be
+            // released: its PartWeight was not refreshed and its STEP export
+            // would carry another configuration's geometry. Abort before any
+            // archive/export/DB step — disk and vault are untouched.
+            if (cfgSwitchFailures.Count > 0)
+            {
+                AuditLogger.Log("ReleaseFailed", user,
+                    Path.GetFileName(filePath), partNo, rev,
+                    "config switch failed: " +
+                    string.Join(", ", cfgSwitchFailures));
+                MessageBox.Show(
+                    "Release ABORTED — SOLIDWORKS could not activate these " +
+                    "configurations:\n\n  • " +
+                    string.Join("\n  • ", cfgSwitchFailures) + "\n\n" +
+                    "A failed switch would publish the previous " +
+                    "configuration's geometry and weight under this " +
+                    "configuration's part number.\n\n" +
+                    "Nothing was exported and the vault was NOT changed. " +
+                    "Open the file, check the configurations rebuild without " +
+                    "errors, and release again.",
+                    "BCore PDM — Release Failed",
+                    MessageBoxButtons.OK, MessageBoxIcon.Error);
+                return;
             }
 
             // A refused save here would publish a snapshot MISSING the just
@@ -1000,7 +1033,17 @@ namespace PDMLite
                                 collidedStamps.Add(cfgStamp);
                                 continue;
                             }
-                            doc.ShowConfiguration2(c);
+                            if (!doc.ShowConfiguration2(c))
+                            {
+                                // Exporting now would write the PREVIOUS
+                                // config's geometry under THIS config's part
+                                // number — treat exactly like a failed export
+                                // (the failedExports abort below lists it).
+                                failedExports.Add(cfgStamp +
+                                    ".step (config '" + c +
+                                    "' failed to activate)");
+                                continue;
+                            }
                             if (!ExportManager.ExportStepOnly(doc, ExportRoot,
                                     cfgStamp))
                                 failedExports.Add(cfgStamp + ".step");
