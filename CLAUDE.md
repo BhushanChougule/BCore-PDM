@@ -776,7 +776,7 @@ blocker dialogs still show.
 
 \- Drawing filename conventions: single-config uses {modelBasename}.slddrw (shared); multi-config ALSO supports {configName}.slddrw (config-specific, takes priority over shared). Both patterns can coexist — a shared drawing covers all configs; a config-specific drawing covers only that config. PDF export name still comes from the DrawingNo property.
 
-\- Part rev drives the drawing rev (part is the master). Drawing letter syncs to the model immediately at New Revision time (StartDrawingRevisionWith opens the drawing, sets Revision = nextRev, saves, closes). The sync at drawing-release time is still a no-op confirmation.
+\- Part rev drives the drawing rev (part is the master). A NEWLY CREATED drawing (Open Drawing button) initialises its Revision from the model's active config before the auto-save — previously it kept the template default (REV A) until the next New Revision while the model might already be at REV C. Drawing letter syncs to the model immediately at New Revision time (StartDrawingRevisionWith opens the drawing, sets Revision = nextRev, saves, closes). The sync at drawing-release time is still a no-op confirmation.
 
 \- New Revision on a part/assembly auto-starts its drawing revision and warns which assemblies use it.
 

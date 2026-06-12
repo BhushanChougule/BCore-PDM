@@ -2831,6 +2831,25 @@ namespace PDMLite
                 }
 
                 newDrw.ViewZoomtofit2();
+
+                // The drawing always carries the PART's revision (the part is
+                // the master). A drawing created AFTER the model had revved
+                // started at the template's default (e.g. REV A) while the
+                // model was already at REV C — the rev only synced at the
+                // NEXT New Revision/release. Initialise it from the model's
+                // ACTIVE config (the config this drawing documents), before
+                // the auto-save below persists it.
+                try
+                {
+                    string modelRev = !string.IsNullOrEmpty(activeConfig)
+                        ? PropertyValidator.GetProperty(doc, "Revision",
+                              activeConfig)
+                        : PropertyValidator.GetProperty(doc, "Revision");
+                    if (!string.IsNullOrEmpty(modelRev))
+                        PropertyValidator.SetProperty(
+                            newDrw, "Revision", modelRev);
+                }
+                catch { }
             }
 
             // Auto-save the new drawing to the correct WIP path so it is
