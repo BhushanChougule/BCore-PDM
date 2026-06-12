@@ -27,7 +27,13 @@ namespace PDMLite
 
         public Scope Result { get; private set; } = Scope.Cancel;
 
-        public DrawingScopeDialog(int configCount, string activeConfig)
+        // sharedExists=false: the part has NO drawing yet (creation-time
+        // choice). sharedExists=true: a COMMON drawing exists but the active
+        // config has none of its own — Open the common one, or create a
+        // separate drawing for this config (the learned-scope prompt; see
+        // VaultManager.OpenOrCreateDrawing).
+        public DrawingScopeDialog(int configCount, string activeConfig,
+            bool sharedExists = false)
         {
             using (var g = CreateGraphics())
                 _scale = g.DpiX / 96f;
@@ -38,13 +44,16 @@ namespace PDMLite
             Font fHint  = new Font("Segoe UI", 3.1f * _scale);
             Font fBtn   = new Font("Segoe UI", 3.6f * _scale, FontStyle.Bold);
 
-            Text            = "BCore PDM — New Drawing";
+            Text            = sharedExists ? "BCore PDM — Drawing Scope"
+                                           : "BCore PDM — New Drawing";
             StartPosition   = FormStartPosition.CenterScreen;
             FormBorderStyle = FormBorderStyle.FixedDialog;
             MaximizeBox     = false;
             MinimizeBox     = false;
             BackColor       = cBg;
-            ClientSize      = new Size(S(380), S(232));
+            // The sharedExists variant carries longer option labels — give
+            // it a wider client area so nothing clips (found in PR testing).
+            ClientSize      = new Size(S(sharedExists ? 436 : 380), S(232));
 
             int cW = ClientSize.Width;
 
@@ -58,7 +67,7 @@ namespace PDMLite
             };
             titleBar.Controls.Add(new Label
             {
-                Text      = "New Drawing",
+                Text      = sharedExists ? "Open Drawing" : "New Drawing",
                 Font      = fTitle,
                 ForeColor = Color.White,
                 Location  = new Point(0, 0),
@@ -74,9 +83,13 @@ namespace PDMLite
 
             Controls.Add(new Label
             {
-                Text      = "This file has " + configCount +
-                            " configurations and no drawing yet.\n" +
-                            "Select how the new drawing should be created:",
+                Text      = sharedExists
+                    ? "This file has " + configCount + " configurations and " +
+                      "a COMMON drawing.\n\"" + activeConfig +
+                      "\" has no drawing of its own:"
+                    : "This file has " + configCount +
+                      " configurations and no drawing yet.\n" +
+                      "Select how the new drawing should be created:",
                 Font      = fBody,
                 ForeColor = cTextDark,
                 Location  = new Point(x, y),
@@ -88,7 +101,9 @@ namespace PDMLite
 
             var rbCommon = new RadioButton
             {
-                Text      = "Common drawing  (one for ALL configurations)",
+                Text      = sharedExists
+                    ? "Open the common drawing  (covers ALL configs)"
+                    : "Common drawing  (one for ALL configurations)",
                 Font      = fOpt,
                 ForeColor = cTextDark,
                 Location  = new Point(x, y),
@@ -102,7 +117,9 @@ namespace PDMLite
 
             Controls.Add(new Label
             {
-                Text      = "Differentiate configurations with a config / design table.",
+                Text      = sharedExists
+                    ? "Remembered for this configuration — never asked again."
+                    : "Differentiate configurations with a config / design table.",
                 Font      = fHint,
                 ForeColor = cTextGray,
                 Location  = new Point(x + S(16), y),
@@ -114,7 +131,9 @@ namespace PDMLite
 
             var rbPerCfg = new RadioButton
             {
-                Text      = "This configuration only  (\"" + activeConfig + "\")",
+                Text      = (sharedExists ? "Create a separate drawing for  \""
+                                          : "This configuration only  (\"") +
+                            activeConfig + "\"",
                 Font      = fOpt,
                 ForeColor = cTextDark,
                 Location  = new Point(x, y),
@@ -127,7 +146,9 @@ namespace PDMLite
 
             Controls.Add(new Label
             {
-                Text      = "Other configurations can get their own drawings later.",
+                Text      = sharedExists
+                    ? "Creates a drawing named after this configuration; remembered."
+                    : "Other configurations can get their own drawings later.",
                 Font      = fHint,
                 ForeColor = cTextGray,
                 Location  = new Point(x + S(16), y),

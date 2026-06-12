@@ -66,7 +66,12 @@ namespace PDMLite
             { "Material1",   "Material"       },
             { "FinishType",  "Finish Type"    },
             { "Revision",    "Revision"       },
-            { "PartType",    "Part Type"      }
+            { "PartType",    "Part Type"      },
+            // Config-specific drawing-scope choice (Rule 3.5 new-config form
+            // only — see the askDrawingScope ctor parameter). Drives the Open
+            // Drawing button: COMMON opens the shared {basename}.slddrw,
+            // SEPARATE opens/creates {configName}.slddrw.
+            { "DrawingScope", "Drawing"       }
         };
 
         private static readonly Dictionary<string, string[]> Dropdowns =
@@ -118,15 +123,34 @@ namespace PDMLite
             { "PartType", new[] {
                 "Manufactured",
                 "Purchased"
+            }},
+            // Like PartType: NO "-- Select --" sentinel — index 0 (COMMON
+            // DRAWING, the shop convention) is a valid default, so the field
+            // never blocks a save.
+            { "DrawingScope", new[] {
+                "COMMON DRAWING",
+                "SEPARATE DRAWING"
             }}
         };
 
         // Active-config mode (save-time Rules 3/3.5): one row per missing
         // field; values are written to the ACTIVE configuration.
-        public PropertyForm(ModelDoc2 doc, List<string> emptyFields)
+        // askDrawingScope (Rule 3.5 new-config flow only): appends a
+        // "Drawing" dropdown (COMMON DRAWING / SEPARATE DRAWING) so the
+        // common-vs-per-config drawing decision is made the moment the new
+        // configuration gets its identity — stored as the config-specific
+        // DrawingScope property, which the Open Drawing button honours.
+        public PropertyForm(ModelDoc2 doc, List<string> emptyFields,
+            bool askDrawingScope = false)
         {
             _doc = doc;
             _fieldsToFill = emptyFields;
+            if (askDrawingScope &&
+                !emptyFields.Contains("DrawingScope"))
+            {
+                _fieldsToFill = new List<string>(emptyFields);
+                _fieldsToFill.Add("DrawingScope");
+            }
             using (var g = CreateGraphics()) _scale = g.DpiX / 96f;
             BuildUI();
         }

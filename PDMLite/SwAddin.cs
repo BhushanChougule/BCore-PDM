@@ -618,7 +618,8 @@ namespace PDMLite
                                 using (var form = new PropertyForm(
                                     doc,
                                     new List<string>
-                                        { "PartNo", "DrawingNo", "Description" }))
+                                        { "PartNo", "DrawingNo", "Description" },
+                                    askDrawingScope: true))
                                 {
                                     form.ShowDialog();
                                 }
