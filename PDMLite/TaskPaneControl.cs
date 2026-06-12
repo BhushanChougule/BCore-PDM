@@ -1078,8 +1078,32 @@ namespace PDMLite
                 return;
             }
 
-            string filePath = doc.GetPathName();
-            string fileName = Path.GetFileName(filePath);
+            // HARDENED name resolution (one real part rendered a BLANK name
+            // box, surviving Save As — so the cause is what SOLIDWORKS
+            // reports, not the file's bytes). Two failure modes covered:
+            // a path with an illegal character makes Path.GetFileName THROW
+            // on .NET Framework (silently aborting the whole refresh), and
+            // an embedded NUL renders as EMPTY text in GDI. Derive the name
+            // defensively and fall back to the document TITLE so the box
+            // always shows something identifiable.
+            string filePath = "";
+            try { filePath = doc.GetPathName() ?? ""; } catch { }
+            string fileName;
+            try { fileName = Path.GetFileName(filePath); }
+            catch
+            {
+                int cut = filePath.LastIndexOfAny(new[] { '\\', '/' });
+                fileName = cut >= 0 ? filePath.Substring(cut + 1) : filePath;
+            }
+            if (fileName.IndexOf('\0') >= 0)
+                fileName = fileName.Replace("\0", "");
+            fileName = fileName.Trim();
+            if (string.IsNullOrEmpty(fileName) &&
+                !string.IsNullOrEmpty(filePath))
+            {
+                // Saved doc with an unusable path string — show the title.
+                try { fileName = (doc.GetTitle() ?? "").Trim(); } catch { }
+            }
             string status;
             try { status = DatabaseManager.GetFileStatusByName(filePath); }
             catch
