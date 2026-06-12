@@ -691,7 +691,8 @@ namespace PDMLite
                         // Name-mismatched configs that can be AUTO-RENAMED to
                         // their PartNo (one click in ConfigHealthDialog), and
                         // the ones excluded with a reason.
-                        var renameable = new List<string[]>(); // {old, new}
+                        // {oldCfg, newCfg, drwOldPath|null, drwNewPath|null}
+                        var renameable = new List<string[]>();
                         var renamePreview = new List<string>();
                         var renameSkipped = new List<string>();
                         foreach (string c in allCfgsVS)
@@ -1186,8 +1187,10 @@ namespace PDMLite
                 DatabaseManager.RenameFileRecord(oldPath, newPath,
                     CurrentUser);
                 // Deliberately NOT reopened here — RepointDrawingViews opens
-                // it at the new path after the config rename.
-                return wasOpen || true;
+                // it at the new path after the config rename. (wasOpen only
+                // matters for the close above; the repoint step always
+                // opens-saves-closes regardless.)
+                return true;
             }
             catch { return false; }
         }
