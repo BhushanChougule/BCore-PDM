@@ -45,6 +45,15 @@ namespace PDMLite
                 _taskPane = new TaskPaneHost();
                 _taskPane.Register(SwApp);
                 ((SldWorks)SwApp).ActiveDocChangeNotify += OnActiveDocChange;
+                // ActiveDocChangeNotify does NOT fire when the FIRST document
+                // is created/opened into an empty session (no previous active
+                // doc to change from), so a brand-new doc could miss hooking
+                // entirely — its first save then bypassed EVERY save rule (no
+                // validation, no PropertyForm, no DB record). Hook on the
+                // new/open events too; TryHookDoc is idempotent so the
+                // overlap with ActiveDocChangeNotify is harmless.
+                ((SldWorks)SwApp).FileNewNotify2 += OnFileNew;
+                ((SldWorks)SwApp).FileOpenPostNotify += OnFileOpenPost;
                 HookAllOpenDocs();
                 UpdateActivePresence();
                 return true;
@@ -62,6 +71,8 @@ namespace PDMLite
             _taskPane?.Unregister(SwApp);
             try { DatabaseManager.ClearMachineSessions(System.Environment.MachineName); } catch { }
             ((SldWorks)SwApp).ActiveDocChangeNotify -= OnActiveDocChange;
+            ((SldWorks)SwApp).FileNewNotify2 -= OnFileNew;
+            ((SldWorks)SwApp).FileOpenPostNotify -= OnFileOpenPost;
             foreach (var h in _docHandlers.Values)
                 try { h.Detach(); } catch { }
             _docHandlers.Clear();
@@ -73,6 +84,14 @@ namespace PDMLite
         // This catches new files and any document that lost its handler
         // (e.g. due to a spurious DestroyNotify from the Custom Properties tab).
         private int OnActiveDocChange() { HookAllOpenDocs(); UpdateActivePresence(); return 0; }
+
+        // File→New / File→Open into an EMPTY session never fires
+        // ActiveDocChangeNotify — these cover that gap (see ConnectToSW).
+        private int OnFileNew(object newDoc, int docType, string templateName)
+        { HookAllOpenDocs(); return 0; }
+
+        private int OnFileOpenPost(string fileName)
+        { HookAllOpenDocs(); UpdateActivePresence(); return 0; }
 
         internal void HookAllOpenDocs()
         {
@@ -304,7 +323,17 @@ namespace PDMLite
                 // and the released-snapshot model.
                 // Warn but allow override so nobody is ever hard-trapped.
                 const string WipRootPath = @"N:\PDM-SolidWorks\WIP";
-                if (!string.IsNullOrEmpty(filePath))
+                // Only judge the location when we actually KNOW it — a bare
+                // (non-rooted) name would resolve against the process CWD and
+                // produce a bogus outside-vault warning.
+                bool targetPathKnown = false;
+                try
+                {
+                    targetPathKnown = !string.IsNullOrEmpty(filePath)
+                        && System.IO.Path.IsPathRooted(filePath);
+                }
+                catch { }
+                if (targetPathKnown)
                 {
                     bool underWip;
                     try
@@ -342,12 +371,33 @@ namespace PDMLite
                 // No override — unlike a duplicate PartNo this corrupts data.
                 if (!string.IsNullOrEmpty(filePath))
                 {
+                    // The name check must compare FULL file names. Defensive:
+                    // if an event variant ever delivers a bare title with no
+                    // SW extension, append the doc-type extension — and a
+                    // PartNo-style name like "DEMO.05" has ".05" as its
+                    // "extension", so only a real SW extension counts.
+                    string conflictName = System.IO.Path.GetFileName(filePath);
+                    string extNow = System.IO.Path.GetExtension(conflictName)
+                        .ToLowerInvariant();
+                    if (extNow != ".sldprt" && extNow != ".sldasm" &&
+                        extNow != ".slddrw")
+                    {
+                        switch (doc.GetType())
+                        {
+                            case (int)swDocumentTypes_e.swDocPART:
+                                conflictName += ".sldprt"; break;
+                            case (int)swDocumentTypes_e.swDocASSEMBLY:
+                                conflictName += ".sldasm"; break;
+                            case (int)swDocumentTypes_e.swDocDRAWING:
+                                conflictName += ".slddrw"; break;
+                        }
+                    }
                     string dupPath = DatabaseManager.FindFileNameConflict(
-                        System.IO.Path.GetFileName(filePath), filePath);
+                        conflictName, filePath);
                     if (dupPath != null)
                     {
                         Block("DUPLICATE FILE NAME:\n\n" +
-                              "'" + System.IO.Path.GetFileName(filePath) +
+                              "'" + conflictName +
                               "' already exists in the vault at:\n" +
                               dupPath + "\n\n" +
                               "File names must be unique across ALL divisions — " +
