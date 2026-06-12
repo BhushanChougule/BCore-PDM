@@ -861,6 +861,28 @@ namespace PDMLite
                 if (confirm != DialogResult.Yes) return;
             }
 
+            // Bulk/chained releases hand us a doc that may not be the ACTIVE
+            // document (OpenByPath returns already-open docs without
+            // activating; the chained flow runs the model's release while the
+            // DRAWING is active). ShowConfiguration2 — now verified — and
+            // mass-property reads are unreliable on background docs, so the
+            // new abort below could false-fire on healthy files. Best-effort
+            // activate; if it fails, the verified switches still abort rather
+            // than publish wrong geometry.
+            try
+            {
+                var activeNow = PDMLiteAddin.SwApp.ActiveDoc as ModelDoc2;
+                if (activeNow == null || !string.Equals(activeNow.GetPathName(),
+                        filePath, StringComparison.OrdinalIgnoreCase))
+                {
+                    int actErr = 0;
+                    PDMLiteAddin.SwApp.ActivateDoc3(filePath, false,
+                        (int)swRebuildOnActivation_e.swDontRebuildActiveDoc,
+                        ref actErr);
+                }
+            }
+            catch { }
+
             // ── Auto-fill fields (all configurations for parts/assemblies) ─
             string checkedByVal = user.Length >= 2
                 ? user.Substring(0, 2).ToUpper() : user.ToUpper();

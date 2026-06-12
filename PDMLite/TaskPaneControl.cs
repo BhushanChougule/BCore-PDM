@@ -521,13 +521,17 @@ namespace PDMLite
         // ── Refresh Pending Requests button count (Master only) ──────
         private void RefreshRequests()
         {
-            if (_btnRequests == null) return;
-            bool isMaster = DatabaseManager.GetUserRole(
-                PDMLiteAddin.CurrentUser) == "Master";
-            if (!isMaster) return;
+            try
+            {
+                if (_btnRequests == null) return;
+                bool isMaster = DatabaseManager.GetUserRole(
+                    PDMLiteAddin.CurrentUser) == "Master";
+                if (!isMaster) return;
 
-            _pendingCount = DatabaseManager.GetPendingRequests().Count;
-            _btnRequests.Invalidate(); // triggers Paint to redraw with latest count
+                _pendingCount = DatabaseManager.GetPendingRequests().Count;
+                _btnRequests.Invalidate(); // Paint redraws with latest count
+            }
+            catch { } // DB unreachable — keep the last known count
         }
 
         private void OpenRequestsPopup()
@@ -609,7 +613,31 @@ namespace PDMLite
             }
 
             bool truncated;
-            List<VaultFile> results = DatabaseManager.SearchFiles(term, out truncated);
+            List<VaultFile> results;
+            try
+            {
+                results = DatabaseManager.SearchFiles(term, out truncated);
+            }
+            catch
+            {
+                // DB unreachable (network down, or vault.xml missing with an
+                // unrestorable backup — LoadOrCreate now THROWS rather than
+                // bootstrapping an empty vault). This runs on the search
+                // timer's tick: an uncaught throw here would be an unhandled
+                // exception on SOLIDWORKS' message loop.
+                _resultsPanel.Controls.Add(new Label
+                {
+                    Text = "Vault unavailable — check the N: drive.",
+                    Font = _fReg35,
+                    ForeColor = cRed,
+                    Location = new Point(0, S(4)),
+                    AutoSize = false,
+                    Width = S(188),
+                    Height = S(20)
+                });
+                _resultsPanel.Height = S(28);
+                return;
+            }
 
             if (results.Count == 0)
             {
@@ -1052,7 +1080,22 @@ namespace PDMLite
 
             string filePath = doc.GetPathName();
             string fileName = Path.GetFileName(filePath);
-            string status = DatabaseManager.GetFileStatusByName(filePath);
+            string status;
+            try { status = DatabaseManager.GetFileStatusByName(filePath); }
+            catch
+            {
+                // DB unreachable (network down / unrestorable vault) — this
+                // runs from BeginInvoke'd deferred refreshes and DoAction,
+                // where an uncaught throw is an unhandled message-loop
+                // exception inside SOLIDWORKS. Show a dash and stop; the
+                // dashboards and ValidateSave surface the error loudly.
+                _statusVal.Text = "—";
+                _partNoVal.Text = "—";
+                _revVal.Text = "—";
+                _lockedVal.Text = "—";
+                PopulateHistoryPanel(null);
+                return;
+            }
             string partNo = PropertyValidator.GetProperty(doc, "PartNo");
             string rev = PropertyValidator.GetProperty(doc, "Revision");
             var lockInfo = DatabaseManager.GetLockInfo(filePath);
@@ -1096,11 +1139,13 @@ namespace PDMLite
                 // QUARANTINED — first save under a taken name (the post-save
                 // guard refuses to track a duplicate). Say so instead of
                 // implying the file is a tracked WIP.
-                string dup = DatabaseManager.FindFileNameConflict(
-                    fileName, filePath);
-                // "DUPLICATE" not "DUPLICATE NAME" — the value column fits
-                // ~10 chars before clipping (sized for "Not Locked").
-                _statusVal.Text = dup != null ? "DUPLICATE" : "Not Tracked";
+                string dup = null;
+                try { dup = DatabaseManager.FindFileNameConflict(
+                        fileName, filePath); }
+                catch { }
+                // "DUPLICATE" / "Untracked" — the value column fits ~10 chars
+                // before clipping (sized for "Not Locked").
+                _statusVal.Text = dup != null ? "DUPLICATE" : "Untracked";
                 _statusVal.ForeColor = dup != null ? cSwRed : cDark;
             }
             // Drawings share the PartNo of the part/assembly they document —
@@ -1125,8 +1170,10 @@ namespace PDMLite
                 ? VaultManager.GetDrawingOpenLabel(doc)
                 : "Open Drawing");
 
-            // File History
-            var history = DatabaseManager.GetFileHistory(filePath);
+            // File History (guarded — see the status sentinel above)
+            List<HistoryEntry> history = null;
+            try { history = DatabaseManager.GetFileHistory(filePath); }
+            catch { }
             PopulateHistoryPanel(history);
 
             // Refresh pending requests for masters

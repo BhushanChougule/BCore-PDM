@@ -94,7 +94,19 @@ namespace PDMLite
         // not deleted). LoadOrCreate restores from it when vault.xml is missing
         // or corrupt, so a crash mid-write can never cost more than one save.
         private const string BackupFile = @"N:\PDM-SolidWorks\VAULT\vault.xml.bak";
-        private const string WipRoot = @"N:\PDM-SolidWorks\WIP";
+        // Shared with SwAddin's Rule 2.5 so the save rules and the DB-side
+        // rival checks can never disagree about what is "inside the vault".
+        internal const string WipRoot = @"N:\PDM-SolidWorks\WIP";
+
+        // Canonical-WIP test: the WIP root itself or paths under it — NOT
+        // prefix-siblings like N:\PDM-SolidWorks\WIP_OLD\… (the prefix-match
+        // class audit C3 fixed for export globs).
+        private static bool IsUnderWip(string path)
+        {
+            string p = (path ?? "").Trim();
+            return p.StartsWith(WipRoot + "\\", StringComparison.OrdinalIgnoreCase)
+                || p.Equals(WipRoot, StringComparison.OrdinalIgnoreCase);
+        }
         private const string ScrapRoot = @"N:\PDM-SolidWorks\SCRAP";
 
         // Cap search results so a broad term at full scale (~50k files) can
@@ -198,15 +210,27 @@ namespace PDMLite
                 if (!File.Exists(BackupFile)) return null;
                 var doc = XDocument.Load(BackupFile); // proves the backup parses
 
-                // Preserve a corrupt-but-present vault.xml before overwriting
-                // it: it holds exactly ONE save more than the backup and may
-                // be hand-repairable. Best-effort.
+                // Preserve a corrupt-but-present vault.xml once (it holds
+                // exactly ONE save more than the backup — hand-repairable),
+                // then DELETE it. Leaving the corrupt file in place poisons
+                // the NEXT Save: File.Replace banks the on-disk vault.xml
+                // into vault.xml.bak — overwriting the good backup we just
+                // parsed (the degraded-mode skip below leaves the corrupt
+                // file behind, and user MUTATIONS still save in degraded
+                // mode). Deleting unparseable poison is not a "write over
+                // other machines' data" — readers then take the missing-file
+                // branch and restore from .bak; with the file gone, repeated
+                // degraded reads write nothing (no .corrupt litter loop).
+                // The delete only runs AFTER the preservation copy succeeded.
                 try
                 {
                     if (File.Exists(DataFile))
+                    {
                         File.Copy(DataFile, DataFile + ".corrupt." +
                             DateTime.Now.ToString("yyyyMMdd_HHmmss"),
                             overwrite: true);
+                        File.Delete(DataFile);
+                    }
                 }
                 catch { }
 
@@ -556,9 +580,11 @@ namespace PDMLite
                 // the same name within seconds can both get here — and
                 // PurgeHistoryFor matches by FILENAME, so purging now would
                 // wipe the LIVING rival's whole timeline, not stale leftovers.
-                // When a same-named rival record exists, keep its history (skip
-                // the purge) and audit the collision; Rule 2.6 hard-blocks the
-                // next save of either file until a Master removes one.
+                // When a same-named rival record exists, do NOT create a
+                // record at all (matching the OnSavePost quarantine: a second
+                // same-named record corrupts every name-keyed lookup) and do
+                // NOT purge; audit the collision instead. The file stays
+                // untracked on disk and Rule 2.6 blocks its next save.
                 if (wasCreate)
                 {
                     rivalPath = FindNameRival(doc, f.FileName, targetPath);
@@ -566,7 +592,11 @@ namespace PDMLite
                         PurgeHistoryFor(doc, f.FilePath, f.FileName);
                 }
 
-                if (existing != null)
+                if (rivalPath != null)
+                {
+                    // No record, no save — fall through to the audit row only.
+                }
+                else if (existing != null)
                 {
                     existing.Element("FileName").Value    = f.FileName;
                     existing.Element("PartNumber").Value  = f.PartNumber  ?? "";
@@ -620,17 +650,24 @@ namespace PDMLite
                     files.Add(fileEl);
                 }
 
-                Save(doc);
+                if (rivalPath == null)
+                    Save(doc);
             }
 
             // Log outside the DB lock — AuditLogger holds its own file lock.
-            AuditLogger.Log(wasCreate ? "Create" : "Save",
-                f.ModifiedBy ?? "", f.FileName, f.PartNumber ?? "");
+            // NOTE: never advise "Remove from Vault" for a duplicate — record
+            // removal matches by FILENAME and would take the ORIGINAL's record
+            // and history with it; the duplicate FILE is deleted in Explorer.
             if (rivalPath != null)
+            {
                 AuditLogger.Log("DuplicateNameDetected", f.ModifiedBy ?? "",
                     f.FileName, f.PartNumber ?? "", "",
-                    "rival at " + rivalPath + " — history purge skipped; " +
-                    "remove one of the files via Remove from Vault");
+                    "rival at " + rivalPath + " — record NOT created; delete " +
+                    "the duplicate file in Explorer or Save As a unique name");
+                return;
+            }
+            AuditLogger.Log(wasCreate ? "Create" : "Save",
+                f.ModifiedBy ?? "", f.FileName, f.PartNumber ?? "");
         }
 
         public static string GetFileStatus(string filePath)
@@ -1495,7 +1532,7 @@ namespace PDMLite
                 string elPath = ((string)el.Element("FilePath") ?? "").Trim();
                 if (elPath.Equals(exclude, StringComparison.OrdinalIgnoreCase))
                     continue;
-                if (!elPath.StartsWith(WipRoot, StringComparison.OrdinalIgnoreCase))
+                if (!IsUnderWip(elPath))
                     continue;
 
                 string elFileName = ((string)el.Element("FileName") ?? "").Trim();
@@ -1612,30 +1649,30 @@ namespace PDMLite
         {
             var entries = new List<HistoryEntry>();
             string fileName = System.IO.Path.GetFileName(filePath);
-            bool queryUnderWip = (filePath ?? "").Trim()
-                .StartsWith(WipRoot, StringComparison.OrdinalIgnoreCase);
 
             lock (_lock) using (AcquireProcessLock())
             {
                 var doc = LoadOrCreate();
+                // A living rival WIP file owning this name means the query
+                // path is a same-named duplicate — exact-path entries only
+                // (it must not display the original's timeline). Same
+                // predicate as Rule 2.6 / the quarantine / GetFileStatusByName.
+                bool dupQuery = FindNameRival(doc, fileName, filePath) != null;
+
                 foreach (var el in doc.Root
                     .Element("RevisionHistory")
                     .Elements("Entry"))
                 {
                     string entryPath = (string)el.Element("FilePath") ?? "";
-                    // Match by exact path first; fall back to filename so RELEASED
-                    // folder copies share history with their original WIP path —
-                    // but NEVER across two DIFFERENT WIP paths (a same-named
-                    // duplicate must not display the original's timeline).
-                    bool entryUnderWip = entryPath.Trim().StartsWith(WipRoot,
-                        StringComparison.OrdinalIgnoreCase);
+                    // Match by exact path first; fall back to filename so
+                    // RELEASED folder copies share history with their
+                    // original WIP path.
                     bool match = string.Equals(entryPath, filePath,
                                      StringComparison.OrdinalIgnoreCase)
-                              || (string.Equals(
+                              || (!dupQuery && string.Equals(
                                      System.IO.Path.GetFileName(entryPath),
                                      fileName,
-                                     StringComparison.OrdinalIgnoreCase)
-                                  && !(queryUnderWip && entryUnderWip));
+                                     StringComparison.OrdinalIgnoreCase));
                     if (!match) continue;
 
                     entries.Add(new HistoryEntry
@@ -1672,16 +1709,17 @@ namespace PDMLite
         }
 
         // Returns the canonical (WIP/source) status for a file.
-        // Falls back to filename match so RELEASED folder copies reflect correct
-        // status — but NEVER across two DIFFERENT WIP paths: same name on two
-        // WIP paths is a duplicate (post-save quarantine), not a copy of this
-        // file, and borrowing its status showed the ORIGINAL's state under the
-        // duplicate (PR-A testing).
+        // Falls back to filename match so RELEASED folder copies and legacy
+        // records reflect correct status — but NEVER when a LIVING rival WIP
+        // file owns this name: then the query path is a same-named duplicate
+        // and must not wear the original's status (PR-A testing — the
+        // quarantined twin showed the original's Released state). FindNameRival
+        // is the same predicate Rule 2.6 and the quarantine use, so all three
+        // agree; an orphaned/moved record (file gone from disk) is NOT a rival,
+        // preserving the graceful fallback for Explorer-moved files.
         public static string GetFileStatusByName(string filePath)
         {
             string fileName = System.IO.Path.GetFileName(filePath);
-            bool queryUnderWip = (filePath ?? "").Trim()
-                .StartsWith(WipRoot, StringComparison.OrdinalIgnoreCase);
             lock (_lock) using (AcquireProcessLock())
             {
                 var doc = LoadOrCreate();
@@ -1692,18 +1730,16 @@ namespace PDMLite
                             StringComparison.OrdinalIgnoreCase))
                         return (string)el.Element("Status") ?? "";
                 }
-                // Fallback: same filename — only when one side is a
-                // RELEASED-copy path (query or record outside WIP)
+                // A living rival owns this name → the query is a duplicate.
+                if (FindNameRival(doc, fileName, filePath) != null)
+                    return "";
+                // Fallback: same filename, any path (RELEASED copies, legacy
+                // records, orphaned records of a moved file)
                 foreach (var el in doc.Root.Element("Files").Elements("File"))
                 {
-                    if (!string.Equals((string)el.Element("FileName"), fileName,
+                    if (string.Equals((string)el.Element("FileName"), fileName,
                             StringComparison.OrdinalIgnoreCase))
-                        continue;
-                    string elPath = ((string)el.Element("FilePath") ?? "").Trim();
-                    bool recordUnderWip = elPath.StartsWith(WipRoot,
-                        StringComparison.OrdinalIgnoreCase);
-                    if (queryUnderWip && recordUnderWip) continue;
-                    return (string)el.Element("Status") ?? "";
+                        return (string)el.Element("Status") ?? "";
                 }
             }
             return "";

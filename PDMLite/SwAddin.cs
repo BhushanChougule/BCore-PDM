@@ -87,8 +87,11 @@ namespace PDMLite
 
         // File→New / File→Open into an EMPTY session never fires
         // ActiveDocChangeNotify — these cover that gap (see ConnectToSW).
+        // OnFileNew hooks the doc object it is HANDED first: if the new doc
+        // is not yet enumerated by GetDocuments at notify time, the rescan
+        // alone would miss it — the exact bypass these hooks exist to close.
         private int OnFileNew(object newDoc, int docType, string templateName)
-        { HookAllOpenDocs(); return 0; }
+        { TryHookDoc(newDoc as ModelDoc2); HookAllOpenDocs(); return 0; }
 
         private int OnFileOpenPost(string fileName)
         { HookAllOpenDocs(); UpdateActivePresence(); return 0; }
@@ -97,10 +100,48 @@ namespace PDMLite
         {
             try
             {
+                RekeyNewDocHandlers();
                 object[] docs = (object[])SwApp?.GetDocuments();
                 if (docs == null) return;
                 foreach (object d in docs)
                     TryHookDoc(d as ModelDoc2);
+            }
+            catch { }
+        }
+
+        // A never-saved doc is hooked under "NEW:{title}". After its first
+        // save the doc has a real path; without re-keying, the next rescan
+        // would see that path absent from _docHandlers and attach a SECOND
+        // handler to the same doc — every save then ran validation twice
+        // (two PropertyForms / two block dialogs) and upserted twice.
+        private void RekeyNewDocHandlers()
+        {
+            try
+            {
+                List<string> newKeys = null;
+                foreach (var k in _docHandlers.Keys)
+                    if (k.StartsWith("NEW:", StringComparison.Ordinal))
+                        (newKeys ?? (newKeys = new List<string>())).Add(k);
+                if (newKeys == null) return;
+
+                foreach (var k in newKeys)
+                {
+                    var h = _docHandlers[k];
+                    string path = h.DocPath;
+                    if (string.IsNullOrEmpty(path)) continue; // still unsaved
+
+                    _docHandlers.Remove(k);
+                    if (_docHandlers.ContainsKey(path))
+                    {
+                        // Already double-hooked (legacy state) — drop this one.
+                        try { h.Detach(); } catch { }
+                    }
+                    else
+                    {
+                        h.SetId(path);
+                        _docHandlers[path] = h;
+                    }
+                }
             }
             catch { }
         }
@@ -285,6 +326,36 @@ namespace PDMLite
                 catch { } // invalid path chars — treat as not rooted
                 string filePath = fileNameRooted ? fileName : docPath;
                 if (string.IsNullOrEmpty(filePath)) filePath = fileName;
+
+                // A rooted target with a NON-SolidWorks extension is a format
+                // EXPORT (File → Save As → STEP/IGES/PDF…, and
+                // ModelDocExtension.SaveAs fires this same notify in some SW
+                // builds — including the release flow's own exports). Exports
+                // are never vault saves: judging them here popped "FILE
+                // OUTSIDE THE VAULT" on every manual STEP export and could
+                // interject dialogs mid-release.
+                if (fileNameRooted)
+                {
+                    string tExt = "";
+                    try
+                    {
+                        tExt = System.IO.Path.GetExtension(fileName)
+                            .ToLowerInvariant();
+                    }
+                    catch { }
+                    if (tExt.Length > 0 && tExt != ".sldprt" &&
+                        tExt != ".sldasm" && tExt != ".slddrw")
+                        return 0;
+                }
+
+                // Rooted event target, or the doc's own (always rooted) path.
+                // When NEITHER is known (first save of a brand-new doc — the
+                // notify fires before the Save As dialog resolves a target)
+                // the location/name rules cannot run; the post-save
+                // quarantine in OnSavePost owns that case.
+                bool targetPathKnown = fileNameRooted
+                    || !string.IsNullOrEmpty(docPath);
+
                 string userRole = DatabaseManager.GetUserRole(CurrentUser);
 
                 // Rule 1: locked by someone else?
@@ -322,25 +393,21 @@ namespace PDMLite
                 // Saving elsewhere (Desktop, local drive) breaks SOLIDWORKS references
                 // and the released-snapshot model.
                 // Warn but allow override so nobody is ever hard-trapped.
-                const string WipRootPath = @"N:\PDM-SolidWorks\WIP";
-                // Only judge the location when we actually KNOW it — a bare
-                // (non-rooted) name would resolve against the process CWD and
-                // produce a bogus outside-vault warning.
-                bool targetPathKnown = false;
-                try
-                {
-                    targetPathKnown = !string.IsNullOrEmpty(filePath)
-                        && System.IO.Path.IsPathRooted(filePath);
-                }
-                catch { }
+                // Single shared WIP-root constant (DatabaseManager owns it) so
+                // Rule 2.5/2.6 and the DB-side rival checks can never disagree
+                // about what is "inside the vault". The "\\" suffix stops
+                // prefix-siblings (N:\PDM-SolidWorks\WIP_OLD\…) counting as
+                // canonical WIP — the prefix-match class audit C3 fixed.
+                string WipRootPath = DatabaseManager.WipRoot;
                 if (targetPathKnown)
                 {
                     bool underWip;
                     try
                     {
                         underWip = System.IO.Path.GetFullPath(filePath)
-                            .StartsWith(System.IO.Path.GetFullPath(WipRootPath),
-                                        StringComparison.OrdinalIgnoreCase);
+                            .StartsWith(
+                                System.IO.Path.GetFullPath(WipRootPath) + "\\",
+                                StringComparison.OrdinalIgnoreCase);
                     }
                     catch { underWip = true; } // never block on a path parse error
 
@@ -369,29 +436,35 @@ namespace PDMLite
                 // anywhere would overwrite the first one's released snapshot
                 // and archives and delete its revision history on first save.
                 // No override — unlike a duplicate PartNo this corrupts data.
-                if (!string.IsNullOrEmpty(filePath))
+                // ROOTED targets only: a non-rooted name here can only be the
+                // pre-dialog notify of a brand-new doc carrying the doc TITLE
+                // ("Part1") — a name the user never chose; blocking on it
+                // would trap the doc before the Save As dialog could even
+                // open. The post-save quarantine in OnSavePost owns that case.
+                if (targetPathKnown && !string.IsNullOrEmpty(filePath))
                 {
-                    // The name check must compare FULL file names. Defensive:
-                    // if an event variant ever delivers a bare title with no
-                    // SW extension, append the doc-type extension — and a
-                    // PartNo-style name like "DEMO.05" has ".05" as its
-                    // "extension", so only a real SW extension counts.
                     string conflictName = System.IO.Path.GetFileName(filePath);
-                    string extNow = System.IO.Path.GetExtension(conflictName)
-                        .ToLowerInvariant();
-                    if (extNow != ".sldprt" && extNow != ".sldasm" &&
-                        extNow != ".slddrw")
+
+                    // Save As ONTO another tracked file's exact path slips
+                    // past the name check via self-exclusion (the exclude
+                    // param IS the target). Overwriting a different vault
+                    // file's geometry while its record and history live on is
+                    // the same corruption Rule 2.6 exists to stop.
+                    if (!filePath.Equals(docPath ?? "",
+                            StringComparison.OrdinalIgnoreCase) &&
+                        !string.IsNullOrEmpty(
+                            DatabaseManager.GetFileStatus(filePath)))
                     {
-                        switch (doc.GetType())
-                        {
-                            case (int)swDocumentTypes_e.swDocPART:
-                                conflictName += ".sldprt"; break;
-                            case (int)swDocumentTypes_e.swDocASSEMBLY:
-                                conflictName += ".sldasm"; break;
-                            case (int)swDocumentTypes_e.swDocDRAWING:
-                                conflictName += ".slddrw"; break;
-                        }
+                        Block("TARGET IS A VAULT FILE:\n\n" +
+                              "This save would OVERWRITE the tracked vault " +
+                              "file:\n" + filePath + "\n\n" +
+                              "Saving over another vault file destroys its " +
+                              "geometry while its record and history live " +
+                              "on.\n\nSave under a different name " +
+                              "(File → Save As).");
+                        return 1;
                     }
+
                     string dupPath = DatabaseManager.FindFileNameConflict(
                         conflictName, filePath);
                     if (dupPath != null)
@@ -702,7 +775,10 @@ namespace PDMLite
                 string filePath = doc.GetPathName();
                 if (string.IsNullOrEmpty(filePath)) filePath = fileName;
                 string currentStatus = DatabaseManager.GetFileStatus(filePath);
-                _taskPane?.RefreshPanel();
+                // NOTE: the task pane is refreshed AFTER the upsert below (or
+                // after the quarantine dialog) — refreshing here showed every
+                // legitimate first save as "Untracked" because no record
+                // existed yet, and nothing re-rendered until the next event.
 
                 // POST-SAVE QUARANTINE (Rule 2.6's last line of defence): on
                 // the FIRST save of a brand-new document SOLIDWORKS fires the
@@ -745,6 +821,7 @@ namespace PDMLite
                             "As), then delete the duplicate:\n" + filePath,
                             (int)swMessageBoxIcon_e.swMbWarning,
                             (int)swMessageBoxBtn_e.swMbOk);
+                        _taskPane?.RefreshPanel(); // card shows DUPLICATE
                         return 0;
                     }
                 }
@@ -796,6 +873,7 @@ namespace PDMLite
                 }
 
                 DatabaseManager.UpsertFile(vf);
+                _taskPane?.RefreshPanel(); // record exists now — card is accurate
 
                 // Warn (do not block) when non-active configs have incomplete
                 // properties so the engineer knows to switch configs and save.
@@ -849,8 +927,17 @@ namespace PDMLite
         {
             private readonly PDMLiteAddin _addin;
             private readonly ModelDoc2    _doc;
-            private readonly string       _id;
+            private string                _id; // re-keyed after first save
             private readonly int          _type;
+
+            // Current on-disk path of the wrapped doc ("" while unsaved).
+            // Used by RekeyNewDocHandlers to migrate "NEW:" ids to real paths.
+            public string DocPath
+            {
+                get { try { return _doc?.GetPathName() ?? ""; } catch { return ""; } }
+            }
+
+            public void SetId(string id) { _id = id; }
 
             // Part delegates
             private DPartDocEvents_FileSaveNotifyEventHandler    _partSave;
@@ -973,7 +1060,15 @@ namespace PDMLite
             }
 
             private int OnSave(string fileName) => _addin.ValidateSave(_doc, fileName);
-            private int OnPost(int t, string fn) => _addin.OnSavePost(_doc, fn);
+
+            // Save As COPY writes a side file while the doc itself stays at
+            // its old path, unwritten — upserting would stamp the ORIGINAL
+            // record's ModifiedBy/Date and audit a "Save" that never touched
+            // it. Skip the post-save pipeline for copies (the pre-save rules
+            // already judged the copy's target).
+            private int OnPost(int t, string fn) =>
+                t == (int)swFileSaveTypes_e.swFileSaveAsCopy
+                    ? 0 : _addin.OnSavePost(_doc, fn);
             private int OnConfigChange() { _addin.OnActiveConfigChanged(); return 0; }
 
             private int OnDestroy()
