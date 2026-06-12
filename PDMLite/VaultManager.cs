@@ -2042,12 +2042,14 @@ namespace PDMLite
                 }
             }
 
-            // Show rollback dialog
-            var dialog = new RollbackDialog(archivedFiles, currentRev);
-            if (dialog.ShowDialog() != DialogResult.OK) return;
-
-            string selectedFile = dialog.SelectedFile;
-            string targetRev = dialog.SelectedRevision;
+            // Show rollback dialog (using: ShowDialog does not dispose)
+            string selectedFile, targetRev;
+            using (var dialog = new RollbackDialog(archivedFiles, currentRev))
+            {
+                if (dialog.ShowDialog() != DialogResult.OK) return;
+                selectedFile = dialog.SelectedFile;
+                targetRev = dialog.SelectedRevision;
+            }
 
             // Final confirmation
             var confirm = MessageBox.Show(
@@ -2678,7 +2680,7 @@ namespace PDMLite
             dlgHeader.Controls.Add(new Label
             {
                 Text = title,
-                Font = new Font("Segoe UI", 4.5f * scale, FontStyle.Bold),
+                Font = fDlgBtn,    // same spec (4.5f bold) — one font, one handle
                 ForeColor = Color.White,
                 Location = new Point(0, 0),
                 AutoSize = false, Width = dlgW, Height = SC(26),
@@ -2743,7 +2745,21 @@ namespace PDMLite
             };
             noteForm.Controls.Add(noteCancel);
 
-            return noteForm.ShowDialog() == DialogResult.OK ? note : null;
+            // ShowDialog does not dispose; this dialog opens on every request
+            // submit/reject, so free the form + its fonts deterministically (a
+            // control does not own its Font — dispose them separately). The
+            // finally keeps the cleanup unconditional even if an exception
+            // escapes the modal loop.
+            try
+            {
+                return noteForm.ShowDialog() == DialogResult.OK ? note : null;
+            }
+            finally
+            {
+                noteForm.Dispose();
+                fDlgLabel.Dispose();
+                fDlgBtn.Dispose();
+            }
         }
 
         // ── Batch helpers (bulk release / bulk approve) ───────────────────

@@ -51,12 +51,78 @@ namespace PDMLite
         private readonly Color cMaroon = Color.FromArgb(140, 60, 60);
         private readonly Color cSwRed = Color.FromArgb(190, 55, 50); // muted SOLIDWORKS red
 
+        // Fonts for the REBUILT panels (search result cards + file history).
+        // Created ONCE (ctor) and disposed in Dispose(bool). These panels are
+        // torn down and rebuilt constantly — every search keystroke and every
+        // doc/config switch — and a Font assigned to a control is NOT owned
+        // by it, so the old per-card "new Font(...)" leaked a GDI handle per
+        // label per rebuild, marching SOLIDWORKS toward the 10,000-handle
+        // ceiling over a multi-day session (audit C4).
+        private Font _fBold38, _fBold35, _fBold34, _fBold31;
+        private Font _fReg35, _fReg33, _fItalic33;
+        // Paint-invariant StringFormat for the cards' rotated status bar —
+        // shared like the fonts (was allocated on every WM_PAINT).
+        private StringFormat _sfBarCenter;
+
         public TaskPaneControl()
         {
             this.AutoScaleMode = AutoScaleMode.Dpi;
             using (var g = this.CreateGraphics())
                 _scale = g.DpiX / 96f;
+
+            _fBold38 = new Font("Segoe UI", 3.8f * _scale, FontStyle.Bold);
+            _fBold35 = new Font("Segoe UI", 3.5f * _scale, FontStyle.Bold);
+            _fBold34 = new Font("Segoe UI", 3.4f * _scale, FontStyle.Bold);
+            _fBold31 = new Font("Segoe UI", 3.1f * _scale, FontStyle.Bold);
+            _fReg35 = new Font("Segoe UI", 3.5f * _scale);
+            _fReg33 = new Font("Segoe UI", 3.3f * _scale);
+            _fItalic33 = new Font("Segoe UI", 3.3f * _scale, FontStyle.Italic);
+            _sfBarCenter = new StringFormat
+            {
+                Alignment = StringAlignment.Center,
+                LineAlignment = StringAlignment.Center
+            };
+
             BuildUI();
+        }
+
+        // base.Dispose disposes child CONTROLS, but not fonts (a control does
+        // not own its Font) and not the timer (created without a container).
+        // Order matters: tear the children down FIRST, then release the fonts
+        // they were painting with — the reverse leaves a window where a
+        // re-entrant repaint could draw with a disposed Font.
+        protected override void Dispose(bool disposing)
+        {
+            base.Dispose(disposing);
+            if (disposing)
+            {
+                _searchTimer?.Stop();
+                _searchTimer?.Dispose();
+                _fBold38?.Dispose();
+                _fBold35?.Dispose();
+                _fBold34?.Dispose();
+                _fBold31?.Dispose();
+                _fReg35?.Dispose();
+                _fReg33?.Dispose();
+                _fItalic33?.Dispose();
+                _sfBarCenter?.Dispose();
+            }
+        }
+
+        // Controls.Clear() does NOT dispose the removed controls — WinForms
+        // re-parents them to a hidden "parking window" where they keep their
+        // USER/GDI handles alive forever. The task pane lives for the whole
+        // SOLIDWORKS session and these panels rebuild constantly, so plain
+        // Clear() marched the process toward the 10,000-handle ceiling (at
+        // which point SOLIDWORKS stops painting and dies). Dispose every
+        // child, THEN clear (audit C4).
+        private static void ClearAndDispose(Control container)
+        {
+            var children = new Control[container.Controls.Count];
+            container.Controls.CopyTo(children, 0);
+            container.Controls.Clear();
+            foreach (Control c in children)
+                try { c.Dispose(); } catch { }
         }
 
         private int S(float v) => (int)(v * _scale);
@@ -150,7 +216,7 @@ namespace PDMLite
                 if (_searchBox.Text.Length >= 2) _searchTimer.Start();
                 else if (_searchBox.Text.Length == 0)
                 {
-                    _resultsPanel.Controls.Clear();
+                    ClearAndDispose(_resultsPanel);
                     _resultsPanel.Height = 0;
                 }
             };
@@ -172,7 +238,7 @@ namespace PDMLite
             btnClear.Click += (s, e) =>
             {
                 _searchBox.Text = "";
-                _resultsPanel.Controls.Clear();
+                ClearAndDispose(_resultsPanel);
                 _resultsPanel.Height = 0;
             };
             this.Controls.Add(btnClear);
@@ -466,8 +532,8 @@ namespace PDMLite
 
         private void OpenRequestsPopup()
         {
-            var form = new PendingRequestsForm(_scale);
-            form.ShowDialog(this);
+            using (var form = new PendingRequestsForm(_scale))
+                form.ShowDialog(this);
             RefreshRequests();
         }
 
@@ -534,7 +600,7 @@ namespace PDMLite
         private void RunSearch()
         {
             string term = _searchBox.Text.Trim();
-            _resultsPanel.Controls.Clear();
+            ClearAndDispose(_resultsPanel);
 
             if (string.IsNullOrEmpty(term))
             {
@@ -550,7 +616,7 @@ namespace PDMLite
                 _resultsPanel.Controls.Add(new Label
                 {
                     Text = "No files found for: " + term,
-                    Font = new Font("Segoe UI", 3.5f * _scale),
+                    Font = _fReg35,
                     ForeColor = cTextLight,
                     Location = new Point(0, S(4)),
                     AutoSize = false,
@@ -625,19 +691,12 @@ namespace PDMLite
                         System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
                     gr.TextRenderingHint =
                         System.Drawing.Text.TextRenderingHint.AntiAliasGridFit;
-                    using (var bf = new Font("Segoe UI",
-                        3.1f * _scale, FontStyle.Bold))
-                    using (var br = new SolidBrush(Color.White))
-                    {
-                        var sf = new StringFormat
-                        {
-                            Alignment = StringAlignment.Center,
-                            LineAlignment = StringAlignment.Center
-                        };
-                        gr.TranslateTransform(barW / 2f, cardH / 2f);
-                        gr.RotateTransform(-90f);
-                        gr.DrawString(statusText, bf, br, 0, 0, sf);
-                    }
+                    gr.TranslateTransform(barW / 2f, cardH / 2f);
+                    gr.RotateTransform(-90f);
+                    // Brushes.White is the framework's cached brush (never
+                    // dispose it); font + format are the shared fields.
+                    gr.DrawString(statusText, _fBold31, Brushes.White,
+                        0, 0, _sfBarCenter);
                 };
                 card.Controls.Add(bar);
 
@@ -645,7 +704,7 @@ namespace PDMLite
                 card.Controls.Add(new Label
                 {
                     Text = g.DisplayName,
-                    Font = new Font("Segoe UI", 3.8f * _scale, FontStyle.Bold),
+                    Font = _fBold38,
                     ForeColor = cTextDark,
                     Location = new Point(contentLeft, S(6)),
                     AutoSize = false,
@@ -665,7 +724,7 @@ namespace PDMLite
                 card.Controls.Add(new Label
                 {
                     Text = pnText,
-                    Font = new Font("Segoe UI", 3.5f * _scale, FontStyle.Bold),
+                    Font = _fBold35,
                     ForeColor = cTextGray,
                     Location = new Point(contentLeft, S(21)),
                     AutoSize = false,
@@ -679,7 +738,7 @@ namespace PDMLite
                 {
                     Text = string.IsNullOrEmpty(g.Description)
                                 ? "(no description)" : g.Description,
-                    Font = new Font("Segoe UI", 3.3f * _scale),
+                    Font = _fReg33,
                     ForeColor = cTextLight,
                     Location = new Point(contentLeft, S(34)),
                     AutoSize = false,
@@ -699,7 +758,7 @@ namespace PDMLite
                 Button btnModel = new Button
                 {
                     Text = partLabel,
-                    Font = new Font("Segoe UI", 3.4f * _scale, FontStyle.Bold),
+                    Font = _fBold34,
                     Width = btnW,
                     Height = btnH,
                     Location = new Point(contentLeft, btnY),
@@ -717,7 +776,7 @@ namespace PDMLite
                 Button btnDrawing = new Button
                 {
                     Text = "Open DRW",
-                    Font = new Font("Segoe UI", 3.4f * _scale, FontStyle.Bold),
+                    Font = _fBold34,
                     Width = btnW,
                     Height = btnH,
                     Location = new Point(contentLeft + btnW + gap, btnY),
@@ -751,7 +810,7 @@ namespace PDMLite
                 {
                     Text = "Showing first " + cards.Count +
                            " — refine your search to narrow results.",
-                    Font = new Font("Segoe UI", 3.3f * _scale, FontStyle.Italic),
+                    Font = _fItalic33,
                     ForeColor = cTextLight,
                     Location = new Point(0, ry + S(2)),
                     AutoSize = false,
@@ -767,7 +826,7 @@ namespace PDMLite
         private void OpenFile(string filePath)
         {
             _searchBox.Text = "";
-            _resultsPanel.Controls.Clear();
+            ClearAndDispose(_resultsPanel);
             _resultsPanel.Height = 0;
 
             if (!File.Exists(filePath))
@@ -1063,16 +1122,14 @@ namespace PDMLite
         // ── History Panel ─────────────────────────────────────────────
         private void PopulateHistoryPanel(List<HistoryEntry> history)
         {
-            _historyPanel.Controls.Clear();
-            Font fHistBold = new Font("Segoe UI", 3.8f * _scale, FontStyle.Bold);
-            Font fHistSub  = new Font("Segoe UI", 3.3f * _scale);
+            ClearAndDispose(_historyPanel);
 
             if (history == null || history.Count == 0)
             {
                 _historyPanel.Controls.Add(new Label
                 {
                     Text = "No history yet",
-                    Font = fHistSub,
+                    Font = _fReg33,
                     ForeColor = cTextGray,
                     Location = new Point(S(4), S(6)),
                     AutoSize = false,
@@ -1092,7 +1149,7 @@ namespace PDMLite
                 _historyPanel.Controls.Add(new Label
                 {
                     Text = "● " + entry.Status,
-                    Font = fHistBold,
+                    Font = _fBold38,
                     ForeColor = StatusColor(entry.Status),
                     Location = new Point(S(4), hy),
                     AutoSize = false,
@@ -1104,7 +1161,7 @@ namespace PDMLite
                 _historyPanel.Controls.Add(new Label
                 {
                     Text = dateStr + "  " + entry.ChangedBy,
-                    Font = fHistSub,
+                    Font = _fReg33,
                     ForeColor = cTextGray,
                     Location = new Point(S(4), hy),
                     AutoSize = false,
@@ -1118,7 +1175,7 @@ namespace PDMLite
                     _historyPanel.Controls.Add(new Label
                     {
                         Text = entry.ChangeNote,
-                        Font = fHistSub,
+                        Font = _fReg33,
                         ForeColor = cTextLight,
                         Location = new Point(S(4), hy),
                         AutoSize = false,
@@ -1221,7 +1278,21 @@ namespace PDMLite
 
                 // ── "BCore PDM" — "BC" in cBrand, "ore PDM" in cTextDark ──
                 // Paint-based panel avoids Label padding causing gap/clipping issues
+                // Dialog-local fonts: disposing the form disposes its controls
+                // but NOT their fonts, so release them when the dialog closes.
                 Font fTitle = new Font("Segoe UI", 10f * _scale, FontStyle.Bold);
+                Font fAboutSub = new Font("Segoe UI", 3.8f * _scale);
+                Font fAboutName = new Font("Georgia", 7f * _scale,
+                    FontStyle.Bold | FontStyle.Italic);
+                Font fAboutVer = new Font("Segoe UI", 3.8f * _scale,
+                    FontStyle.Bold);
+                form.FormClosed += (s, e) =>
+                {
+                    fTitle.Dispose();
+                    fAboutSub.Dispose();
+                    fAboutName.Dispose();
+                    fAboutVer.Dispose();
+                };
                 var titlePanel = new Panel {
                     Location  = new Point(0, y),
                     Width     = fw,
@@ -1250,7 +1321,7 @@ namespace PDMLite
                 // "A Product Data Management Solution for"
                 form.Controls.Add(new Label {
                     Text = "A Product Data Management Solution for",
-                    Font = new Font("Segoe UI", 3.8f * _scale),
+                    Font = fAboutSub,
                     ForeColor = cTextGray, TextAlign = ContentAlignment.MiddleCenter,
                     Location  = new Point(0, y),
                     AutoSize  = false, Width = fw, Height = S(16)
@@ -1260,7 +1331,7 @@ namespace PDMLite
                 // "Richards-Wilcox" — Georgia Bold Italic
                 form.Controls.Add(new Label {
                     Text = "Richards-Wilcox",
-                    Font = new Font("Georgia", 7f * _scale, FontStyle.Bold | FontStyle.Italic),
+                    Font = fAboutName,
                     ForeColor = cTextDark, TextAlign = ContentAlignment.MiddleCenter,
                     Location  = new Point(0, y),
                     AutoSize  = false, Width = fw, Height = S(22)
@@ -1270,7 +1341,7 @@ namespace PDMLite
                 // "Designed, Developed and Maintained by"
                 form.Controls.Add(new Label {
                     Text = "Designed, Developed and Maintained by",
-                    Font = new Font("Segoe UI", 3.8f * _scale),
+                    Font = fAboutSub,
                     ForeColor = cTextGray, TextAlign = ContentAlignment.MiddleCenter,
                     Location  = new Point(0, y),
                     AutoSize  = false, Width = fw, Height = S(16)
@@ -1280,7 +1351,7 @@ namespace PDMLite
                 // "Bhushan Chougule" — Georgia Bold Italic, same cBrand as "BC"
                 form.Controls.Add(new Label {
                     Text = "Bhushan Chougule",
-                    Font = new Font("Georgia", 7f * _scale, FontStyle.Bold | FontStyle.Italic),
+                    Font = fAboutName,
                     ForeColor = cBrand, TextAlign = ContentAlignment.MiddleCenter,
                     Location  = new Point(0, y),
                     AutoSize  = false, Width = fw, Height = S(22)
@@ -1298,7 +1369,7 @@ namespace PDMLite
                 // "Release Version 1.0"
                 form.Controls.Add(new Label {
                     Text = "Release Version 1.0",
-                    Font = new Font("Segoe UI", 3.8f * _scale, FontStyle.Bold),
+                    Font = fAboutVer,
                     ForeColor = cTextLight, TextAlign = ContentAlignment.MiddleCenter,
                     Location  = new Point(0, y),
                     AutoSize  = false, Width = fw, Height = S(16)

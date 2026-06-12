@@ -50,6 +50,17 @@ namespace PDMLite
                 _taskPaneView?.DeleteView();
             }
             catch { }
+
+            // DeleteView destroys only the native pane. The managed control —
+            // its whole control tree, the shared card/history fonts and the
+            // (possibly armed) search debounce timer — must be disposed here
+            // too, or every add-in unload/reload cycle leaks a full pane and
+            // leaves a live timer whose tick would run against the orphaned
+            // control. Null it so OnActiveDocChange/RefreshPanel/RunDeferred
+            // degrade to no-ops if SOLIDWORKS fires anything afterwards.
+            try { _taskPaneControl?.Dispose(); } catch { }
+            _taskPaneControl = null;
+            _taskPaneView = null;
         }
 
         // ── Refresh panel every time user switches active document ────
