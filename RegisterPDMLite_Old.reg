@@ -8,7 +8,7 @@ Windows Registry Editor Version 5.00
 ; Same version invariant as RegisterPDMLite.reg: the Assembly version below
 ; must match AssemblyVersion in PDMLite\Properties\AssemblyInfo.cs (1.0.0.0).
 
-; ── COM Registration (per-user, no admin needed) ────────────────────
+; -- COM Registration (per-user, no admin needed) --------------------
 
 [HKEY_CURRENT_USER\Software\Classes\CLSID\{A1B2C3D4-E5F6-7890-ABCD-EF1234567890}]
 @="PDMLite.PDMLiteAddin"
@@ -33,7 +33,7 @@ Windows Registry Editor Version 5.00
 [HKEY_CURRENT_USER\Software\Classes\PDMLite.PDMLiteAddin\CLSID]
 @="{A1B2C3D4-E5F6-7890-ABCD-EF1234567890}"
 
-; ── SOLIDWORKS Add-in Registration ──────────────────────────────────
+; -- SOLIDWORKS Add-in Registration ----------------------------------
 
 [HKEY_CURRENT_USER\Software\SolidWorks\AddIns\{A1B2C3D4-E5F6-7890-ABCD-EF1234567890}]
 @=dword:00000001

@@ -666,6 +666,8 @@ Styled to house convention: brand title bar (cBrandDark), body 3.7f × \_scale, 
 
 \- RegisterPDMLite.reg = manual machine-wide fallback (admin) when RegAsm is unavailable; RegisterPDMLite\_Old.reg = per-user HKCU variant (NO admin). Both CodeBase entries point at N:\\PDM-SolidWorks\\ADDIN\\PDMLite.dll. INVARIANT: their hardcoded "Version=1.0.0.0" must match AssemblyVersion in Properties\\AssemblyInfo.cs (pinned 1.0.0.0, no wildcard) — bump the version and the .reg files must be updated (or just rerun InstallPDMLite.bat, which derives metadata from the DLL).
 
+\- LINE-ENDING INVARIANT: all .bat/.reg files are committed with literal CRLF and .gitattributes pins them `-text` (no git eol conversion) — cmd.exe's goto/label scanning misbehaves in LF-only batch files and regedit expects CRLF imports, so a checkout with any core.autocrlf setting (or a GitHub zip download) must still yield CRLF. The installer's reg add calls pin /reg:64 so the SOLIDWORKS keys land in the 64-bit registry view even if run from a 32-bit cmd.
+
 
 
 \## Workflows

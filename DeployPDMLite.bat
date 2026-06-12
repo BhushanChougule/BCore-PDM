@@ -53,6 +53,7 @@ copy /y "%SRC%\PdfSharp.dll" "%DEST%\" >nul || goto :copyfail
 echo Copying registration files...
 copy /y "%~dp0InstallPDMLite.bat" "%DEST%\" >nul
 copy /y "%~dp0RegisterPDMLite.reg" "%DEST%\" >nul
+copy /y "%~dp0RegisterPDMLite_Old.reg" "%DEST%\" >nul
 
 echo.
 echo ============================================

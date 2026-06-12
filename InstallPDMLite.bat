@@ -42,7 +42,7 @@ if not exist "%DLL%" (
     echo  - Deploy the add-in first: run DeployPDMLite.bat on the build machine.
     echo  - Elevated sessions often lack the N: mapping. Map it in this window
     echo    ^(net use N: \\^<server^>\^<share^>^) or rerun with the UNC path:
-    echo        InstallPDMLite.bat "\\^<server^>\PDM-SolidWorks\ADDIN"
+    echo        InstallPDMLite.bat "\\<server>\PDM-SolidWorks\ADDIN"
     goto :fail
 )
 
@@ -71,9 +71,9 @@ if errorlevel 1 (
 
 echo.
 echo Step 2: Registering with SOLIDWORKS...
-reg add "HKLM\SOFTWARE\SolidWorks\AddIns\%GUID%" /ve /t REG_DWORD /d 1 /f || goto :regfail
-reg add "HKLM\SOFTWARE\SolidWorks\AddIns\%GUID%" /v "Title" /t REG_SZ /d "BCore PDM" /f || goto :regfail
-reg add "HKLM\SOFTWARE\SolidWorks\AddIns\%GUID%" /v "Description" /t REG_SZ /d "BCore PDM - Property Enforcer and Vault" /f || goto :regfail
+reg add "HKLM\SOFTWARE\SolidWorks\AddIns\%GUID%" /ve /t REG_DWORD /d 1 /f /reg:64 || goto :regfail
+reg add "HKLM\SOFTWARE\SolidWorks\AddIns\%GUID%" /v "Title" /t REG_SZ /d "BCore PDM" /f /reg:64 || goto :regfail
+reg add "HKLM\SOFTWARE\SolidWorks\AddIns\%GUID%" /v "Description" /t REG_SZ /d "BCore PDM - Property Enforcer and Vault" /f /reg:64 || goto :regfail
 
 echo.
 echo ============================================
