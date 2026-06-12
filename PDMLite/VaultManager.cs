@@ -277,11 +277,36 @@ namespace PDMLite
             }
             bool removeDrawing = drwPaths.Count > 0;
 
+            // Parent assemblies (models only — assemblies don't reference
+            // drawings). Removing a component breaks every assembly that uses
+            // it: the WIP copy moves to SCRAP under a timestamped name, so the
+            // stored reference dangles and the component comes up missing on
+            // next open. WARN, don't block — detection is best-effort
+            // (GetParentAssemblies reads stored ref paths from disk) and a
+            // Master may legitimately retire a product top-down. Same pattern
+            // as the New Revision / Rollback parent warnings.
+            string parentWarning = "";
+            if (!isDrawing)
+            {
+                var parents = GetParentAssemblies(filePath);
+                if (parents.Count > 0)
+                    parentWarning =
+                        "WARNING — USED BY " + parents.Count +
+                        (parents.Count == 1 ? " ASSEMBLY:" : " ASSEMBLIES:") +
+                        "\n  " + string.Join("\n  ", parents) + "\n" +
+                        "Removing this file will BREAK " +
+                        (parents.Count == 1
+                            ? "that assembly"
+                            : "those assemblies") +
+                        " (missing component on next open).\n\n";
+            }
+
             string drwNames = string.Join(", ",
                 drwPaths.Select(Path.GetFileName));
             string confirmMsg =
                 "Remove " + fileName + " from the vault?\n\n" +
                 "Status : " + status + "\n\n" +
+                parentWarning +
                 "The file" +
                 (removeDrawing
                     ? (drwPaths.Count == 1
