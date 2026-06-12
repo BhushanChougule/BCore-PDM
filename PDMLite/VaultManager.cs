@@ -755,29 +755,63 @@ namespace PDMLite
             {
                 // Sync drawing revision with referenced part revision
                 string referencedPath = GetDrawingReferencedModel(doc);
+                bool revSynced = false;
                 if (!string.IsNullOrEmpty(referencedPath))
                 {
                     ModelDoc2 refModel = PDMLiteAddin.SwApp
                         .GetOpenDocumentByName(referencedPath) as ModelDoc2;
 
+                    // Read the revision from the SPECIFIC config this drawing
+                    // documents — not the model's active config (which may be
+                    // any config after a release/export loop switched it).
+                    // Mirrors GetDrawingPartNo / GetDrawingNo.
+                    string drwCfg = GetDrawingPrimaryConfig(doc);
+                    string partRev = null;
                     if (refModel != null)
-                    {
-                        // Read the revision from the SPECIFIC config this drawing
-                        // documents — not the model's active config (which may be
-                        // any config after a release/export loop switched it).
-                        // Mirrors GetDrawingPartNo / GetDrawingNo.
-                        string drwCfg = GetDrawingPrimaryConfig(doc);
-                        string partRev = !string.IsNullOrEmpty(drwCfg)
+                        partRev = !string.IsNullOrEmpty(drwCfg)
                             ? PropertyValidator.GetProperty(refModel, "Revision", drwCfg)
                             : PropertyValidator.GetProperty(refModel, "Revision");
-                        if (!string.IsNullOrEmpty(partRev))
+
+                    if (string.IsNullOrEmpty(partRev))
+                    {
+                        // Model not reachable as an OPEN document — exactly the
+                        // chained-release case: the model's own release CLOSES
+                        // it before the drawing release resumes, and the sync
+                        // then silently skipped, releasing the drawing at its
+                        // stale rev. Its DB record is current (the model's
+                        // release saved via the post-save upsert), so read the
+                        // revision from there — per-config when known.
+                        var rec = DatabaseManager.GetFileRecord(referencedPath);
+                        if (rec != null)
                         {
-                            rev = partRev;
-                            // Update drawing revision to match part
-                            PropertyValidator.SetProperty(doc, "Revision", rev);
+                            if (!string.IsNullOrEmpty(drwCfg) &&
+                                rec.Configurations != null)
+                                partRev = rec.Configurations.FirstOrDefault(ce =>
+                                    string.Equals(ce.Name, drwCfg,
+                                        StringComparison.OrdinalIgnoreCase))
+                                    ?.Revision;
+                            if (string.IsNullOrEmpty(partRev))
+                                partRev = rec.Revision;
                         }
                     }
+
+                    if (!string.IsNullOrEmpty(partRev))
+                    {
+                        rev = partRev;
+                        // Update drawing revision to match part
+                        PropertyValidator.SetProperty(doc, "Revision", rev);
+                        revSynced = true;
+                    }
                 }
+                if (!revSynced)
+                    MessageBox.Show(
+                        "WARNING: the referenced model's revision could not " +
+                        "be read — the drawing will release at its OWN " +
+                        "REV " + rev + ".\n\n" +
+                        "Verify the drawing's revision matches its model " +
+                        "after this release.",
+                        "BCore PDM — Revision Sync",
+                        MessageBoxButtons.OK, MessageBoxIcon.Warning);
 
                 // Drawing PDF stamp: "DrawingNo REV B"  e.g. TEST-02 REV B
                 string drawingNo = GetDrawingNo(doc);
@@ -1293,10 +1327,15 @@ namespace PDMLite
         // ── NEW REVISION ──────────────────────────────────────────────────
         // suppressPrompts (used by bulk approve): skips the confirm prompt and
         // the final summary dialog only. Blocker/failure dialogs still show.
-        public static void StartNewRevision(ModelDoc2 doc, bool suppressPrompts = false)
+        // Returns TRUE only when the revision bump actually reached disk and
+        // the DB went WIP — callers that resolve engineer requests
+        // (BulkApprove / ApproveRequest) must gate on this, NOT on a
+        // GetFileStatus()=="WIP" re-read, which false-positives whenever the
+        // file was ALREADY WIP before a failed attempt.
+        public static bool StartNewRevision(ModelDoc2 doc, bool suppressPrompts = false)
         {
             string user = PDMLiteAddin.CurrentUser;
-            if (!IsMaster(user)) { NotMaster(); return; }
+            if (!IsMaster(user)) { NotMaster(); return false; }
 
             // Check file has been saved to disk
             if (string.IsNullOrEmpty(doc.GetPathName()))
@@ -1306,10 +1345,17 @@ namespace PDMLite
                     "BCore PDM — Release Blocked",
                     MessageBoxButtons.OK,
                     MessageBoxIcon.Stop);
-                return;
+                return false;
             }
 
             string filePath   = doc.GetPathName();
+            // The file's status BEFORE anything is touched — the abort paths
+            // must restore THIS state, not assume Released: New Revision is
+            // also reachable for WIP files (task-pane button, engineer
+            // requests), and blindly re-applying read-only froze a WIP file
+            // solid with a dialog claiming it was "still Released".
+            string priorStatus = DatabaseManager.GetFileStatus(filePath);
+            bool wasReleased   = priorStatus == "Released";
             int docTypeSNR    = doc.GetType();
             bool isDrawingSNR = docTypeSNR == (int)swDocumentTypes_e.swDocDRAWING;
             string currentRev = PropertyValidator.GetProperty(doc, "Revision");
@@ -1345,7 +1391,7 @@ namespace PDMLite
                         allCfgsSNR.Select(c => cfgCurrentRevs[c]).ToList(),
                         allCfgsSNR.Select(c => cfgNextRevs[c]).ToList()))
                     {
-                        if (picker.ShowDialog() != DialogResult.OK) return;
+                        if (picker.ShowDialog() != DialogResult.OK) return false;
                         selectedCfgs = picker.SelectedConfigs ?? new List<string>();
                         if (selectedCfgs.Count == 0)
                         {
@@ -1354,7 +1400,7 @@ namespace PDMLite
                                 "BCore PDM — New Revision",
                                 MessageBoxButtons.OK,
                                 MessageBoxIcon.Information);
-                            return;
+                            return false;
                         }
                     }
                 }
@@ -1375,7 +1421,7 @@ namespace PDMLite
                         MessageBoxButtons.YesNo,
                         MessageBoxIcon.Question);
 
-                    if (confirm != DialogResult.Yes) return;
+                    if (confirm != DialogResult.Yes) return false;
                 }
             }
 
@@ -1441,12 +1487,26 @@ namespace PDMLite
 
             if (fresh == null)
             {
+                // Restore the pre-operation state: read-only was already
+                // stripped above, and for a Released file leaving it writable
+                // breaks the release protection until the next release. This
+                // abort previously restored nothing, logged nothing, and left
+                // the user's pre-closed drawing closed.
+                if (wasReleased) SetReadOnly(filePath, true);
+                AuditLogger.Log("NewRevisionFailed", user,
+                    Path.GetFileName(filePath), partNo, nextRev,
+                    "could not reopen the file after close");
+                ReopenPreClosedDrawing(drwWasOpen, drwPreClose);
                 MessageBox.Show(
                     "Could not reopen the file to start the new revision:\n" +
-                    filePath + "\n\nPlease open it manually and try again.",
+                    filePath + "\n\nPlease open it manually and try again." +
+                    (wasReleased
+                        ? "\n\nThe file is still Released at REV " + currentRev +
+                          " and the vault was NOT changed."
+                        : ""),
                     "BCore PDM — New Revision Failed",
                     MessageBoxButtons.OK, MessageBoxIcon.Warning);
-                return;
+                return false;
             }
 
             // Bump revision on the now-writable document and save. This save
@@ -1492,19 +1552,26 @@ namespace PDMLite
                     }
                 }
                 catch { }
-                SetReadOnly(filePath, true);
+                // Re-apply read-only ONLY if the file was Released before —
+                // freezing a WIP file solid (and telling its owner it was
+                // "still Released") was worse than the failure itself.
+                if (wasReleased) SetReadOnly(filePath, true);
                 AuditLogger.Log("NewRevisionFailed", user,
                     Path.GetFileName(filePath), partNo, nextRev,
                     "Save3 failed — revision bump never reached disk");
+                ReopenPreClosedDrawing(drwWasOpen, drwPreClose);
                 MessageBox.Show(
                     "New Revision ABORTED — SOLIDWORKS could not save the " +
                     "revision bump to disk:\n" + filePath + "\n\n" +
-                    "The file is still Released at REV " + currentRev + " and " +
-                    "the vault was NOT changed. Close the file (do not save) " +
-                    "and try again.",
+                    "The file is still " +
+                    (wasReleased ? "Released"
+                        : string.IsNullOrEmpty(priorStatus) ? "untracked"
+                                                            : priorStatus) +
+                    " at REV " + currentRev + " and the vault was NOT " +
+                    "changed. Close the file (do not save) and try again.",
                     "BCore PDM — New Revision Failed",
                     MessageBoxButtons.OK, MessageBoxIcon.Error);
-                return;
+                return false;
             }
 
             // Reset to WIP — source path only (no separate entry for RELEASED copy)
@@ -1571,18 +1638,7 @@ namespace PDMLite
             // Reopen the drawing if we pre-closed it above. By this point
             // the drawing's read-only flag is cleared and the DB is WIP, so
             // it reopens as a writable document referencing the updated part.
-            if (drwWasOpen && drwPreClose != null)
-            {
-                try
-                {
-                    int eDrw = 0, wDrw = 0;
-                    PDMLiteAddin.SwApp.OpenDoc6(drwPreClose,
-                        (int)swDocumentTypes_e.swDocDRAWING,
-                        (int)swOpenDocOptions_e.swOpenDocOptions_Silent,
-                        "", ref eDrw, ref wDrw);
-                }
-                catch { }
-            }
+            ReopenPreClosedDrawing(drwWasOpen, drwPreClose);
 
             // ── Warn about parent assemblies that use this file ───────────
             List<string> parents = GetParentAssemblies(filePath);
@@ -1612,6 +1668,24 @@ namespace PDMLite
             if (!suppressPrompts)
                 MessageBox.Show(msg, "BCore PDM",
                     MessageBoxButtons.OK, MessageBoxIcon.Information);
+            return true;
+        }
+
+        // Reopen the drawing StartNewRevision pre-closed — on success AND on
+        // every abort: silently losing the user's open drawing was a side
+        // effect of a failed revision.
+        private static void ReopenPreClosedDrawing(bool wasOpen, string drwPath)
+        {
+            if (!wasOpen || drwPath == null) return;
+            try
+            {
+                int eDrw = 0, wDrw = 0;
+                PDMLiteAddin.SwApp.OpenDoc6(drwPath,
+                    (int)swDocumentTypes_e.swDocDRAWING,
+                    (int)swOpenDocOptions_e.swOpenDocOptions_Silent,
+                    "", ref eDrw, ref wDrw);
+            }
+            catch { }
         }
 
         // ── HELPERS ───────────────────────────────────────────────────────
@@ -1820,7 +1894,17 @@ namespace PDMLite
                             "bump its Revision to REV " + nextRev + ")";
                     }
                 }
-                catch { }
+                catch
+                {
+                    // A THROWN failure (e.g. a COM call rejected while SW is
+                    // busy mid-New-Revision) must surface exactly like the
+                    // null/false paths above — swallowing it reported success
+                    // while the drawing's rev stayed stale on disk, and could
+                    // leave the silently-opened drawing open.
+                    try { PDMLiteAddin.SwApp.CloseDoc(drwPath); } catch { }
+                    result += "  (WARNING: the Revision bump to REV " + nextRev +
+                        " FAILED — open the drawing and set it manually)";
+                }
 
                 return result;
             }
@@ -3030,8 +3114,11 @@ namespace PDMLite
                     result.Skipped.Add(r.FileName + " — could not open (revision)");
                     continue;
                 }
-                StartNewRevision(doc, suppressPrompts: true);
-                if (DatabaseManager.GetFileStatus(r.FilePath) == "WIP")
+                // Gate on the RETURN, not a status re-read: "WIP" is also the
+                // status of a file that was already WIP before a FAILED
+                // attempt, which resolved the request and emailed "approved"
+                // for a revision that never reached disk.
+                if (StartNewRevision(doc, suppressPrompts: true))
                 {
                     DatabaseManager.ResolveRequest(r.Id, "Approved");
                     EmailManager.NotifyRequestApproved("Revision", r.FileName, r.RequestedBy);
@@ -3091,10 +3178,9 @@ namespace PDMLite
                 return;
             }
 
-            StartNewRevision(doc);
-
-            // Only resolve when the revision actually completed.
-            if (DatabaseManager.GetFileStatus(request.FilePath) == "WIP")
+            // Only resolve when the revision actually completed — gate on the
+            // return, not a status re-read (already-WIP files false-positive).
+            if (StartNewRevision(doc))
             {
                 DatabaseManager.ResolveRequest(request.Id, "Approved");
                 EmailManager.NotifyRequestApproved(
