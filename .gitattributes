@@ -1,0 +1,7 @@
+# Windows script/registry files must keep CRLF line endings VERBATIM:
+# cmd.exe's goto/label scanning misbehaves in LF-only batch files and
+# regedit expects CRLF in .reg imports. -text disables ALL git eol
+# conversion so the committed CRLF bytes reach every checkout (and zip
+# download) exactly as-is, regardless of anyone's core.autocrlf.
+*.bat -text
+*.reg -text
