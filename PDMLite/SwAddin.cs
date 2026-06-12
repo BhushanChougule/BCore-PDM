@@ -688,6 +688,12 @@ namespace PDMLite
                         var cfgGaps = PropertyValidator.ValidateAllConfigs(doc);
 
                         var issueLines = new List<string>();
+                        // Name-mismatched configs that can be AUTO-RENAMED to
+                        // their PartNo (one click in ConfigHealthDialog), and
+                        // the ones excluded with a reason.
+                        var renameable = new List<string[]>(); // {old, new}
+                        var renamePreview = new List<string>();
+                        var renameSkipped = new List<string>();
                         foreach (string c in allCfgsVS)
                         {
                             var issues = new List<string>();
@@ -698,7 +704,28 @@ namespace PDMLite
                             if (!string.IsNullOrWhiteSpace(cpn) &&
                                 !string.Equals(c.Trim(), cpn.Trim(),
                                     StringComparison.OrdinalIgnoreCase))
+                            {
                                 issues.Add("name should match Part No " + cpn);
+
+                                string target = cpn.Trim();
+                                if (allCfgsVS.Any(o => string.Equals(o.Trim(),
+                                        target,
+                                        StringComparison.OrdinalIgnoreCase)))
+                                    renameSkipped.Add("  \"" + c +
+                                        "\" — a config named \"" + target +
+                                        "\" already exists");
+                                else if (ConfigDrawingExists(filePath, c))
+                                    renameSkipped.Add("  \"" + c +
+                                        "\" — a drawing named after this " +
+                                        "config exists (rename would break " +
+                                        "the link)");
+                                else
+                                {
+                                    renameable.Add(new[] { c, target });
+                                    renamePreview.Add(
+                                        "  " + c + "  →  " + target);
+                                }
+                            }
 
                             // (b) completeness — non-active configs only
                             // (Rule 3 already covers the active config)
@@ -715,20 +742,66 @@ namespace PDMLite
 
                         if (issueLines.Count > 0)
                         {
-                            int choice = SwApp.SendMsgToUser2(
-                                "SOME CONFIGURATIONS NEED ATTENTION:\n\n" +
-                                string.Join("\n", issueLines) + "\n\n" +
-                                "Config names should match their Part No (per-config " +
-                                "drawings, search and revision tracking rely on it), " +
-                                "and every config needs all required properties " +
-                                "before the release gate will pass.\n\n" +
-                                "Fix them now — renaming a config after an assembly " +
-                                "references it breaks those references.\n\n" +
-                                "Save anyway?",
-                                (int)swMessageBoxIcon_e.swMbWarning,
-                                (int)swMessageBoxBtn_e.swMbYesNo);
-                            if (choice == (int)swMessageBoxResult_e.swMbHitNo)
-                                return 1;
+                            // DESIGN-TABLE parts never get the rename action:
+                            // the table owns the config names, and an API
+                            // rename would desynchronise it (rename in the
+                            // table instead).
+                            bool designTable = false;
+                            try { designTable = doc.GetDesignTable() != null; }
+                            catch { }
+                            int parentCount = 0;
+                            if (!designTable && renameable.Count > 0)
+                            {
+                                try
+                                {
+                                    parentCount = VaultManager
+                                        .GetParentAssemblies(filePath).Count;
+                                }
+                                catch { }
+                            }
+
+                            using (var dlg = new ConfigHealthDialog(
+                                issueLines, renamePreview, renameSkipped,
+                                designTable, parentCount))
+                            {
+                                dlg.ShowDialog();
+                                if (dlg.Result ==
+                                    ConfigHealthDialog.Choice.Cancel)
+                                    return 1;
+                                if (dlg.Result ==
+                                    ConfigHealthDialog.Choice.Rename)
+                                {
+                                    var failed = new List<string>();
+                                    foreach (var m in renameable)
+                                    {
+                                        try
+                                        {
+                                            var cfgObj =
+                                                doc.GetConfigurationByName(m[0])
+                                                as SolidWorks.Interop.sldworks
+                                                    .Configuration;
+                                            if (cfgObj != null)
+                                                cfgObj.Name = m[1];
+                                            if (doc.GetConfigurationByName(m[1])
+                                                    == null)
+                                                failed.Add(m[0]);
+                                        }
+                                        catch { failed.Add(m[0]); }
+                                    }
+                                    if (failed.Count > 0)
+                                        SwApp.SendMsgToUser2(
+                                            "These configurations could NOT " +
+                                            "be renamed — rename them " +
+                                            "manually in the Configuration" +
+                                            "Manager:\n  • " +
+                                            string.Join("\n  • ", failed),
+                                            (int)swMessageBoxIcon_e.swMbWarning,
+                                            (int)swMessageBoxBtn_e.swMbOk);
+                                    // Fall through: THIS save persists the
+                                    // new names, and the post-save upsert
+                                    // refreshes the per-config DB block.
+                                }
+                            }
                         }
                     }
 
@@ -964,6 +1037,33 @@ namespace PDMLite
             }
             catch { }
             return 0;
+        }
+
+        // True when a config-specific drawing named after this config exists
+        // on disk (model's folder or any WIP division) — renaming the config
+        // would silently break the {configName}.slddrw linkage, so Rule 3.6's
+        // auto-rename skips such configs.
+        private static bool ConfigDrawingExists(string modelPath, string cfgName)
+        {
+            try
+            {
+                var invalid = System.IO.Path.GetInvalidFileNameChars();
+                string safe = new string(cfgName.Select(
+                    ch => invalid.Contains(ch) ? '_' : ch).ToArray());
+                if (string.IsNullOrEmpty(safe)) return false;
+                string name = safe + ".slddrw";
+
+                string md = System.IO.Path.GetDirectoryName(modelPath);
+                if (!string.IsNullOrEmpty(md) &&
+                    System.IO.File.Exists(System.IO.Path.Combine(md, name)))
+                    return true;
+                foreach (string div in DatabaseManager.WipDivisions)
+                    if (System.IO.File.Exists(System.IO.Path.Combine(
+                            DatabaseManager.WipRoot, div, name)))
+                        return true;
+            }
+            catch { }
+            return false;
         }
 
         private void Block(string reason) =>

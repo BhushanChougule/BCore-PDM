@@ -1784,7 +1784,7 @@ namespace PDMLite
         // reference paths stored inside each assembly matching the vault path
         // format. GetDocumentDependencies2 reads the file from disk WITHOUT
         // opening it in the UI.
-        private static List<string> GetParentAssemblies(string filePath)
+        internal static List<string> GetParentAssemblies(string filePath)
         {
             var parents = new List<string>();
             try
