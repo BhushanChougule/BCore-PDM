@@ -2209,6 +2209,63 @@ namespace PDMLite
                 AuditLogger.Log("Rollback", user, Path.GetFileName(filePath),
                     partNo, targetRev);
 
+                // ── Step 8.5: Sync the record with the RESTORED file ──────
+                // The record's PartNo/Description/Revision/configs are
+                // written at SAVE time — and a rolled-back file is Released
+                // (saves blocked), so without this sync the search cards and
+                // dashboard would show the PRE-rollback identity forever
+                // (found in PR-A testing after an overwrite was rolled back).
+                // Reopen the restored file briefly (read-only — it was just
+                // locked; the Released/lock popups only fire for non-Masters
+                // and rollback is Master-only), read its real properties,
+                // update the record, close it again. Best-effort: the
+                // rollback itself has already fully succeeded.
+                try
+                {
+                    ModelDoc2 restored = OpenByPath(filePath);
+                    if (restored != null)
+                    {
+                        var sync = new VaultFile
+                        {
+                            FilePath    = filePath,
+                            FileName    = Path.GetFileName(filePath),
+                            PartNumber  = PropertyValidator.GetProperty(
+                                              restored, "PartNo"),
+                            Description = PropertyValidator.GetProperty(
+                                              restored, "Description"),
+                            Revision    = PropertyValidator.GetProperty(
+                                              restored, "Revision"),
+                            Status      = "",   // empty = preserve Released
+                            ModifiedBy  = user,
+                            ModifiedDate = DateTime.Now
+                        };
+                        if (ext != ".slddrw")
+                        {
+                            var cfgs = new List<ConfigEntry>();
+                            foreach (string c in
+                                PropertyValidator.GetConfigNames(restored))
+                            {
+                                cfgs.Add(new ConfigEntry
+                                {
+                                    Name        = c,
+                                    PartNo      = PropertyValidator.GetProperty(
+                                                      restored, "PartNo", c),
+                                    Description = PropertyValidator.GetProperty(
+                                                      restored, "Description", c),
+                                    DrawingNo   = PropertyValidator.GetProperty(
+                                                      restored, "DrawingNo", c),
+                                    Revision    = PropertyValidator.GetProperty(
+                                                      restored, "Revision", c)
+                                });
+                            }
+                            sync.Configurations = cfgs;
+                        }
+                        DatabaseManager.UpsertFile(sync);
+                        try { PDMLiteAddin.SwApp.CloseDoc(filePath); } catch { }
+                    }
+                }
+                catch { }
+
                 // ── Step 9: Offer to roll back the matching drawing ───────
                 // Drawings are archived as a matched pair with the model, so a
                 // drawing archive at the same revision should exist if one was
