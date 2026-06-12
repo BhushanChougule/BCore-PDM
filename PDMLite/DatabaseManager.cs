@@ -1934,6 +1934,57 @@ namespace PDMLite
                 c => System.Array.IndexOf(invalid, c) >= 0 ? '_' : c).ToArray());
         }
 
+        // ── Drawing-scope preference (Open Drawing button) ────────────────
+        // For a multi-config model whose only drawing is the COMMON one, the
+        // button asks "open common / create config-specific?" for a config
+        // with no drawing of its own — but at most TWICE: two "common"
+        // answers lock the part to the common drawing forever ("" = still
+        // undecided, "Common" = locked, never ask again). The per-config
+        // pattern needs no DB state: an existing {configName}.slddrw on disk
+        // IS the signal (see VaultManager.OpenOrCreateDrawing).
+        public static string GetDrawingScope(string filePath)
+        {
+            lock (_lock) using (AcquireProcessLock())
+            {
+                var doc = LoadOrCreate();
+                foreach (var el in doc.Root.Element("Files").Elements("File"))
+                {
+                    if (string.Equals((string)el.Element("FilePath"), filePath,
+                            StringComparison.OrdinalIgnoreCase))
+                        return (string)el.Element("DrawingScope") ?? "";
+                }
+            }
+            return "";
+        }
+
+        // One "open the common drawing" answer. The second one locks the
+        // scope to Common permanently.
+        public static void RegisterDrawingScopeCommonChoice(string filePath)
+        {
+            lock (_lock) using (AcquireProcessLock())
+            {
+                var doc = LoadOrCreate();
+                foreach (var el in doc.Root.Element("Files").Elements("File"))
+                {
+                    if (!string.Equals((string)el.Element("FilePath"), filePath,
+                            StringComparison.OrdinalIgnoreCase))
+                        continue;
+
+                    int count = 0;
+                    int.TryParse(
+                        (string)el.Element("DrawingScopeCommonCount") ?? "0",
+                        out count);
+                    count++;
+                    SetOrAdd(el, "DrawingScopeCommonCount",
+                        count.ToString());
+                    if (count >= 2)
+                        SetOrAdd(el, "DrawingScope", "Common");
+                    Save(doc);
+                    return;
+                }
+            }
+        }
+
         public static List<string> GetDrawingsForConfig(string modelFilePath, string configName)
         {
             var result = new List<string>();

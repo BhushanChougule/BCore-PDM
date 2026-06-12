@@ -2499,6 +2499,65 @@ namespace PDMLite
                 MessageBoxButtons.OK, MessageBoxIcon.Information);
         }
 
+        // First directory containing the named drawing file, or null.
+        private static string FindDrawingFileInDirs(
+            List<string> searchDirs, string fileName)
+        {
+            foreach (string d in searchDirs)
+            {
+                string full = Path.Combine(d, fileName);
+                if (File.Exists(full)) return full;
+            }
+            return null;
+        }
+
+        // Bring an already-open drawing to the front, or open it from disk.
+        private static void ActivateOrOpenDrawing(string fullPath)
+        {
+            ModelDoc2 already = PDMLiteAddin.SwApp
+                .GetOpenDocumentByName(fullPath) as ModelDoc2;
+            if (already != null)
+            {
+                int ae = 0;
+                PDMLiteAddin.SwApp.ActivateDoc3(fullPath, false,
+                    (int)swRebuildOnActivation_e.swDontRebuildActiveDoc,
+                    ref ae);
+            }
+            else
+            {
+                int errs = 0, warnings = 0;
+                PDMLiteAddin.SwApp.OpenDoc6(fullPath,
+                    (int)swDocumentTypes_e.swDocDRAWING,
+                    (int)swOpenDocOptions_e.swOpenDocOptions_Silent,
+                    "", ref errs, ref warnings);
+            }
+        }
+
+        // True when ANY configuration of this model already has its own
+        // {configName}.slddrw on disk — the per-config drawing pattern is
+        // established, and new configs get their own drawings without asking.
+        private static bool AnyConfigSpecificDrawingExists(ModelDoc2 doc,
+            List<string> searchDirs, char[] invalidChars, string modelBasename)
+        {
+            try
+            {
+                foreach (string cfg in PropertyValidator.GetConfigNames(doc))
+                {
+                    string safe = new string(cfg.Select(
+                        ch => invalidChars.Contains(ch) ? '_' : ch).ToArray());
+                    if (string.IsNullOrEmpty(safe)) continue;
+                    if (safe.Equals(modelBasename,
+                            StringComparison.OrdinalIgnoreCase))
+                        continue; // that name IS the shared drawing
+                    if (FindDrawingFileInDirs(searchDirs, safe + ".slddrw")
+                            != null)
+                        return true;
+                }
+            }
+            catch { }
+            return false;
+        }
+
         // ── OPEN OR CREATE DRAWING for current part/assembly ──────────
         public static void OpenOrCreateDrawing(ModelDoc2 doc)
         {
@@ -2536,49 +2595,62 @@ namespace PDMLite
                 new string(activeConfig.Select(
                     c => invalidChars.Contains(c) ? '_' : c).ToArray());
 
-            // Build an ORDERED list of drawing names to search for:
-            //   1. Config-specific: {configName}.slddrw  (multi-config only, first)
-            //   2. Shared:          {modelBasename}.slddrw
-            // The first one found on disk wins, giving config-specific drawings
-            // priority over the shared config-table drawing.
-            var candidateNames = new List<string>();
-            if (isMultiConfig && !string.IsNullOrEmpty(safeCfgName))
-                candidateNames.Add(safeCfgName + ".slddrw");
-            candidateNames.Add(modelBasename + ".slddrw");
-
             // Folders to search: model's own folder first, then every WIP division
             var searchDirs = new List<string>();
             if (!string.IsNullOrEmpty(dir)) searchDirs.Add(dir);
             foreach (string div in DatabaseManager.WipDivisions)
                 searchDirs.Add(Path.Combine(WipFolder, div));
 
-            foreach (string candidateName in candidateNames)
-            {
-                foreach (string searchDir in searchDirs)
-                {
-                    string fullPath = Path.Combine(searchDir, candidateName);
-                    if (!File.Exists(fullPath)) continue;
+            // 1. A config-specific drawing for the ACTIVE config wins outright.
+            string foundCfg = (isMultiConfig && !string.IsNullOrEmpty(safeCfgName))
+                ? FindDrawingFileInDirs(searchDirs, safeCfgName + ".slddrw")
+                : null;
+            if (foundCfg != null) { ActivateOrOpenDrawing(foundCfg); return; }
 
-                    // Already open → bring to front without reopening
-                    ModelDoc2 already = PDMLiteAddin.SwApp
-                        .GetOpenDocumentByName(fullPath) as ModelDoc2;
-                    if (already != null)
+            // 2. Only the SHARED drawing exists. For a multi-config part whose
+            // active config has no drawing of its own, the right move is
+            // LEARNED rather than assumed:
+            //  - any OTHER config already has its own {configName}.slddrw →
+            //    the per-config pattern is established: this config gets its
+            //    own drawing too, no questions asked;
+            //  - the part is locked to "Common" (the user answered "open the
+            //    common drawing" twice) → open it silently, never ask again;
+            //  - otherwise ASK (DrawingScopeDialog, sharedExists variant):
+            //    "open common" counts toward the two-answer Common lock,
+            //    "create separate" falls through to the creation flow below
+            //    (and the new file on disk establishes the per-config pattern
+            //    for every future config).
+            string foundShared = FindDrawingFileInDirs(
+                searchDirs, modelBasename + ".slddrw");
+            bool createPerConfigBesideShared = false;
+            if (foundShared != null)
+            {
+                bool openShared = true;
+                if (isMultiConfig && !string.IsNullOrEmpty(safeCfgName))
+                {
+                    if (AnyConfigSpecificDrawingExists(
+                            doc, searchDirs, invalidChars, modelBasename))
                     {
-                        int ae = 0;
-                        PDMLiteAddin.SwApp.ActivateDoc3(fullPath, false,
-                            (int)swRebuildOnActivation_e.swDontRebuildActiveDoc,
-                            ref ae);
+                        openShared = false;
                     }
-                    else
+                    else if (DatabaseManager.GetDrawingScope(filePath) != "Common")
                     {
-                        int errs = 0, warnings = 0;
-                        PDMLiteAddin.SwApp.OpenDoc6(fullPath,
-                            (int)swDocumentTypes_e.swDocDRAWING,
-                            (int)swOpenDocOptions_e.swOpenDocOptions_Silent,
-                            "", ref errs, ref warnings);
+                        using (var ask = new DrawingScopeDialog(
+                            PropertyValidator.GetConfigNames(doc).Count,
+                            activeConfig, sharedExists: true))
+                        {
+                            if (ask.ShowDialog() != DialogResult.OK)
+                                return; // cancelled
+                            if (ask.Result == DrawingScopeDialog.Scope.PerConfig)
+                                openShared = false;
+                            else
+                                DatabaseManager
+                                    .RegisterDrawingScopeCommonChoice(filePath);
+                        }
                     }
-                    return;
                 }
+                if (openShared) { ActivateOrOpenDrawing(foundShared); return; }
+                createPerConfigBesideShared = true;
             }
 
             // No drawing found on disk — check if an unsaved new drawing is
@@ -2628,8 +2700,8 @@ namespace PDMLite
             //               ({configName}.slddrw). The name chosen here is the
             //               only place the decision is made; after that the file
             //               on disk carries it and the prompt never repeats.
-            bool createPerConfig = false;
-            if (isMultiConfig && !string.IsNullOrEmpty(safeCfgName))
+            bool createPerConfig = createPerConfigBesideShared;
+            if (!createPerConfig && isMultiConfig && !string.IsNullOrEmpty(safeCfgName))
             {
                 int cfgCount = PropertyValidator.GetConfigNames(doc).Count;
                 using (var scopeDlg = new DrawingScopeDialog(cfgCount, activeConfig))
@@ -2637,6 +2709,10 @@ namespace PDMLite
                     if (scopeDlg.ShowDialog() != DialogResult.OK) return; // cancelled
                     createPerConfig =
                         scopeDlg.Result == DrawingScopeDialog.Scope.PerConfig;
+                    // A creation-time "Common" answer is the FIRST of the two
+                    // confirmations that lock the part to the common drawing.
+                    if (!createPerConfig)
+                        DatabaseManager.RegisterDrawingScopeCommonChoice(filePath);
                 }
             }
 
