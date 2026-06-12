@@ -790,7 +790,7 @@ blocker dialogs still show.
 
 scan ARCHIVE\\{type}\\ for matching files → show RollbackDialog →
 
-archive current → restore selected → update RELEASED folder → cleanup exports →
+archive current → CLOSE the doc (an open drawing first — it holds a reference; SOLIDWORKS holds the open file's handle, so restoring over the ACTIVE file always failed with a sharing violation; restore retries 5×300ms while SW releases the handle; doc properties are captured BEFORE the close) → restore selected → update RELEASED folder → cleanup exports →
 
 set read-only → update DB → if a matching drawing archive exists at the target rev,
 

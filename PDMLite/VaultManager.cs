@@ -2129,6 +2129,11 @@ namespace PDMLite
 
             if (confirm != DialogResult.Yes) return;
 
+            // Read everything still needed from the document BEFORE closing
+            // it below — after CloseDoc the COM reference is dead.
+            string partNo = PropertyValidator.GetProperty(doc, "PartNo");
+            string drawingNo = PropertyValidator.GetProperty(doc, "DrawingNo");
+
             try
             {
                 // ── Step 1: Remove read-only from current files ───────────
@@ -2149,8 +2154,39 @@ namespace PDMLite
                 // ── Step 3: Remove read-only from archived file ───────────
                 SetReadOnly(selectedFile, false);
 
+                // ── Step 3.5: CLOSE the document ──────────────────────────
+                // SOLIDWORKS holds the open file's handle, so restoring over
+                // it fails with a sharing violation ("being used by another
+                // process") — rollback is always run on the ACTIVE file, so
+                // without this close the restore could never succeed. An open
+                // drawing holds a reference to the model and would make
+                // CloseDoc a silent no-op, so close it first. The confirm
+                // dialog already told the Master the file must be reopened.
+                if (ext != ".slddrw")
+                {
+                    string rbDrw = FindDrawingPath(filePath);
+                    if (rbDrw != null &&
+                        PDMLiteAddin.SwApp.GetOpenDocumentByName(rbDrw) != null)
+                        try { PDMLiteAddin.SwApp.CloseDoc(rbDrw); } catch { }
+                }
+                try { PDMLiteAddin.SwApp.CloseDoc(filePath); } catch { }
+
                 // ── Step 4: Restore selected revision to active location ──
-                File.Copy(selectedFile, filePath, overwrite: true);
+                // SOLIDWORKS may not release the handle the instant CloseDoc
+                // returns — retry briefly (same pattern as MoveToScrap).
+                for (int attempt = 0; ; attempt++)
+                {
+                    try
+                    {
+                        File.Copy(selectedFile, filePath, overwrite: true);
+                        break;
+                    }
+                    catch (IOException)
+                    {
+                        if (attempt == 4) throw;
+                        System.Threading.Thread.Sleep(300);
+                    }
+                }
 
                 // ── Step 5: Restore to RELEASED folder ───────────────────
                 if (File.Exists(releasedCopy))
@@ -2161,10 +2197,9 @@ namespace PDMLite
                 SetReadOnly(releasedCopy, true);
 
                 // ── Step 7: Archive old exports ───────────────────────────────
-                // Use actual PartNo (not filename) to match STEP/PDF naming
-                string partNo = PropertyValidator.GetProperty(doc, "PartNo");
+                // Uses the PartNo/DrawingNo captured BEFORE the close above
+                // (actual PartNo, not filename, to match STEP/PDF naming).
                 string partNoClean = partNo.Replace(".", "");
-                string drawingNo = PropertyValidator.GetProperty(doc, "DrawingNo");
                 CleanupExportsOnRollback(partNoClean, drawingNo, partNo);
 
                 // ── Step 8: Update database ───────────────────────────────
