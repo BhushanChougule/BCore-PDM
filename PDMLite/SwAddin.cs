@@ -745,9 +745,28 @@ namespace PDMLite
                             // DESIGN-TABLE parts never get the rename action:
                             // the table owns the config names, and an API
                             // rename would desynchronise it (rename in the
-                            // table instead).
+                            // table instead). Detected via the FEATURE TREE:
+                            // an inserted Excel design table is a real
+                            // "DesignTable" feature, while the auto-generated
+                            // Configuration Table (present on ordinary multi-
+                            // config parts) is UI-only — GetDesignTable()
+                            // false-positived on it and withheld the rename
+                            // button from manually-configured parts (found in
+                            // PR-52 testing).
                             bool designTable = false;
-                            try { designTable = doc.GetDesignTable() != null; }
+                            try
+                            {
+                                var ft = doc.FirstFeature() as Feature;
+                                while (ft != null)
+                                {
+                                    if (ft.GetTypeName2() == "DesignTable")
+                                    {
+                                        designTable = true;
+                                        break;
+                                    }
+                                    ft = ft.GetNextFeature() as Feature;
+                                }
+                            }
                             catch { }
                             int parentCount = 0;
                             if (!designTable && renameable.Count > 0)
