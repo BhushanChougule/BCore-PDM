@@ -109,26 +109,33 @@ namespace PDMLite
             catch { }
         }
 
-        // A never-saved doc is hooked under "NEW:{title}". After its first
-        // save the doc has a real path; without re-keying, the next rescan
-        // would see that path absent from _docHandlers and attach a SECOND
+        // A never-saved doc is hooked under "NEW:{title}", and a Save As
+        // re-binds the live doc to a NEW path while its dictionary key keeps
+        // the OLD one. Either way, without re-keying the next rescan would
+        // see the current path absent from _docHandlers and attach a SECOND
         // handler to the same doc — every save then ran validation twice
         // (two PropertyForms / two block dialogs) and upserted twice.
+        // Re-key EVERY handler whose doc path no longer matches its key.
         private void RekeyNewDocHandlers()
         {
             try
             {
-                List<string> newKeys = null;
-                foreach (var k in _docHandlers.Keys)
-                    if (k.StartsWith("NEW:", StringComparison.Ordinal))
-                        (newKeys ?? (newKeys = new List<string>())).Add(k);
-                if (newKeys == null) return;
+                List<string> staleKeys = null;
+                foreach (var kv in _docHandlers)
+                {
+                    string path = kv.Value.DocPath;
+                    if (string.IsNullOrEmpty(path)) continue; // still unsaved
+                    if (!kv.Key.Equals(path, StringComparison.OrdinalIgnoreCase))
+                        (staleKeys ?? (staleKeys = new List<string>()))
+                            .Add(kv.Key);
+                }
+                if (staleKeys == null) return;
 
-                foreach (var k in newKeys)
+                foreach (var k in staleKeys)
                 {
                     var h = _docHandlers[k];
                     string path = h.DocPath;
-                    if (string.IsNullOrEmpty(path)) continue; // still unsaved
+                    if (string.IsNullOrEmpty(path)) continue;
 
                     _docHandlers.Remove(k);
                     if (_docHandlers.ContainsKey(path))
@@ -767,7 +774,12 @@ namespace PDMLite
             }
         }
 
-        internal int OnSavePost(ModelDoc2 doc, string fileName)
+        // sourceId = the per-doc handler's key at save time: the doc's path
+        // when it was hooked ("NEW:{title}" for a never-saved doc). After a
+        // Save As it still holds the PRE-SAVE identity, which is how the
+        // overwrite detection below knows this save CAME FROM somewhere else.
+        internal int OnSavePost(ModelDoc2 doc, string fileName,
+            string sourceId = null)
         {
             try
             {
@@ -822,8 +834,46 @@ namespace PDMLite
                             (int)swMessageBoxIcon_e.swMbWarning,
                             (int)swMessageBoxBtn_e.swMbOk);
                         _taskPane?.RefreshPanel(); // card shows DUPLICATE
+                        RekeyNewDocHandlers();     // Save As moved the doc's path
                         return 0;
                     }
+                }
+
+                // OVERWRITE DETECTION: in this SOLIDWORKS' event order the
+                // pre-save notify carries NO target, so a Save As that lands
+                // ON a tracked vault file's path cannot be blocked — the disk
+                // write has already replaced that file's geometry, and the
+                // silent upsert below would re-bind its record and whole
+                // history to a different part with only an innocent "Save"
+                // row. Can't undo the write; make it LOUD instead. (Released
+                // targets are already protected by OS read-only; this catches
+                // WIP targets.) sourceId still holds the pre-save identity:
+                // a different path, or "NEW:{title}" for a brand-new doc.
+                if (!string.IsNullOrEmpty(currentStatus) &&
+                    !string.IsNullOrEmpty(sourceId) &&
+                    !sourceId.Equals(filePath, StringComparison.OrdinalIgnoreCase))
+                {
+                    string from = sourceId.StartsWith("NEW:", StringComparison.Ordinal)
+                        ? "a new unsaved document"
+                        : sourceId;
+                    AuditLogger.Log("VaultFileOverwritten", CurrentUser,
+                        System.IO.Path.GetFileName(filePath),
+                        PropertyValidator.GetProperty(doc, "PartNo"), "",
+                        "Save As from " + from + " replaced this tracked " +
+                        "file's geometry on disk");
+                    SwApp.SendMsgToUser2(
+                        "VAULT FILE OVERWRITTEN — BCore PDM\n\n" +
+                        "This Save As just REPLACED the tracked vault file:\n" +
+                        filePath + "\n\n" +
+                        "Its previous geometry is gone from WIP (check " +
+                        "RELEASED/ARCHIVE for recoverable copies) and its " +
+                        "record and history now describe the NEW content.\n\n" +
+                        "If this was unintentional, tell a Master IMMEDIATELY " +
+                        "— the event is in the audit log as " +
+                        "'VaultFileOverwritten'.",
+                        (int)swMessageBoxIcon_e.swMbWarning,
+                        (int)swMessageBoxBtn_e.swMbOk);
+                    // fall through — the record must reflect what is on disk
                 }
 
                 int docType    = doc.GetType();
@@ -874,6 +924,11 @@ namespace PDMLite
 
                 DatabaseManager.UpsertFile(vf);
                 _taskPane?.RefreshPanel(); // record exists now — card is accurate
+                // Re-key THIS doc's handler right away if the save moved its
+                // path (Save As) — waiting for the next doc-switch rescan
+                // would repeat the overwrite warning on an immediate re-save
+                // and double-hook the doc.
+                RekeyNewDocHandlers();
 
                 // Warn (do not block) when non-active configs have incomplete
                 // properties so the engineer knows to switch configs and save.
@@ -1068,7 +1123,7 @@ namespace PDMLite
             // already judged the copy's target).
             private int OnPost(int t, string fn) =>
                 t == (int)swFileSaveTypes_e.swFileSaveAsCopy
-                    ? 0 : _addin.OnSavePost(_doc, fn);
+                    ? 0 : _addin.OnSavePost(_doc, fn, _id);
             private int OnConfigChange() { _addin.OnActiveConfigChanged(); return 0; }
 
             private int OnDestroy()
