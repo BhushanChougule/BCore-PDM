@@ -109,6 +109,25 @@ namespace PDMLite
             }
         }
 
+        // Owner-drawn Label for the Active File name. The stock Label's
+        // paint path can be broken by in-process OLE in-place machinery —
+        // observed on the one part with a DESIGN TABLE (embedded Excel OLE):
+        // Text/bounds/font all correct, yet nothing painted. TextRenderer
+        // goes through raw GDI ExtTextOut, the most glitch-resistant text
+        // path in WinForms, and NoPrefix also neutralises mnemonic quirks.
+        private sealed class PaintedLabel : Label
+        {
+            protected override void OnPaint(PaintEventArgs e)
+            {
+                e.Graphics.Clear(BackColor); // no per-paint brush (audit C4)
+                TextRenderer.DrawText(e.Graphics, Text, Font,
+                    ClientRectangle, ForeColor,
+                    TextFormatFlags.Left | TextFormatFlags.VerticalCenter |
+                    TextFormatFlags.EndEllipsis | TextFormatFlags.NoPrefix |
+                    TextFormatFlags.SingleLine);
+            }
+        }
+
         // Controls.Clear() does NOT dispose the removed controls — WinForms
         // re-parents them to a hidden "parking window" where they keep their
         // USER/GDI handles alive forever. The task pane lives for the whole
@@ -343,7 +362,7 @@ namespace PDMLite
                 Width = S(3),
                 Height = S(26)
             });
-            _fileNameLbl = new Label
+            _fileNameLbl = new PaintedLabel
             {
                 Text = "No file open",
                 Font = fValue,
