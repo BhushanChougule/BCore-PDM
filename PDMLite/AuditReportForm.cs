@@ -1284,11 +1284,11 @@ namespace PDMLite
                 int btnY = S(10) + rowH + S(6);
                 var btnAll = MakeBtn("Select All", cBrand, fBtn,
                     new Point(S(8), btnY), S(108), rowH);
-                btnAll.Click += (s, e) => SetVisible(true);
+                btnAll.Click += (s, e) => SetMatched(true);
                 Controls.Add(btnAll);
                 var btnNone = MakeBtn("Clear", cBrandDark, fBtn,
                     new Point(S(120), btnY), S(108), rowH);
-                btnNone.Click += (s, e) => SetVisible(false);
+                btnNone.Click += (s, e) => SetMatched(false);
                 Controls.Add(btnNone);
 
                 int countY = btnY + rowH + S(6);
@@ -1358,9 +1358,26 @@ namespace PDMLite
                 _state[_visibleRaw[e.Index]] = (e.NewValue == CheckState.Checked);
             }
 
-            private void SetVisible(bool check)
+            // True when the value (or its "(Blanks)" display form) matches the
+            // search term. Shared by RebuildList and SetMatched so Select All /
+            // Clear act on exactly the matched set — the rendered list caps at
+            // DisplayCap, but matched values past the cap must flip too, or on
+            // a high-cardinality column "Clear, then tick one" would leave the
+            // rest checked and commit a filter that allows almost everything.
+            private static bool MatchesTerm(string raw, string term)
             {
-                foreach (var raw in _visibleRaw) _state[raw] = check;
+                if (term.Length == 0) return true;
+                string disp = raw.Length == 0 ? "(Blanks)" : raw;
+                return disp.IndexOf(term, StringComparison.OrdinalIgnoreCase) >= 0;
+            }
+
+            // Tick/untick every value matched by the search box (NOT just the
+            // rendered subset — see MatchesTerm).
+            private void SetMatched(bool check)
+            {
+                string term = (_search.Text ?? "").Trim();
+                foreach (var raw in _allValues)
+                    if (MatchesTerm(raw, term)) _state[raw] = check;
                 RebuildList();
             }
 
@@ -1374,14 +1391,11 @@ namespace PDMLite
                 int matched = 0;
                 foreach (var raw in _allValues)
                 {
-                    string disp = raw.Length == 0 ? "(Blanks)" : raw;
-                    if (term.Length > 0 &&
-                        disp.IndexOf(term, StringComparison.OrdinalIgnoreCase) < 0)
-                        continue;
+                    if (!MatchesTerm(raw, term)) continue;
                     matched++;
                     if (_visibleRaw.Count >= DisplayCap) continue;
                     _visibleRaw.Add(raw);
-                    _list.Items.Add(disp, _state[raw]);
+                    _list.Items.Add(raw.Length == 0 ? "(Blanks)" : raw, _state[raw]);
                 }
                 _list.EndUpdate();
                 _list.ItemCheck += List_ItemCheck;
