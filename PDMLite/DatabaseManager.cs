@@ -484,10 +484,16 @@ namespace PDMLite
                 var doc = LoadOrCreate();
                 var files = doc.Root.Element("Files");
 
+                // Case-insensitive path match — Windows paths are. A casing
+                // difference (n:\ vs N:\, which SOLIDWORKS can produce) used
+                // to miss the existing record, create a DUPLICATE, and the
+                // wasCreate purge below then wiped the file's whole history.
+                string targetPath = (f.FilePath ?? "").Trim();
                 XElement existing = null;
                 foreach (var el in files.Elements("File"))
                 {
-                    if ((string)el.Element("FilePath") == f.FilePath)
+                    string elPath = ((string)el.Element("FilePath") ?? "").Trim();
+                    if (elPath.Equals(targetPath, StringComparison.OrdinalIgnoreCase))
                     {
                         existing = el;
                         break;
@@ -1383,6 +1389,50 @@ namespace PDMLite
                                 return elFileName.Length > 0 ? elFileName : elPath;
                         }
                     }
+                }
+            }
+
+            return null;
+        }
+
+        // Returns the FilePath of ANOTHER tracked vault file already using this
+        // file name (case-insensitive), or null. The vault keys on the file
+        // name everywhere: RELEASED/ARCHIVE/SCRAP are flat folders, search and
+        // the dashboard dedupe by name, drawing↔model linkage is by basename,
+        // and RemoveFileRecord/PurgeHistoryFor match by name — so a second
+        // "Bracket.sldprt" in a different division would overwrite the first
+        // one's released snapshot and archives and hijack/delete its history.
+        // ValidateSave hard-blocks on a non-null return.
+        // Only canonical records under WIP count as rivals: a same-name record
+        // OUTSIDE WIP is a legacy RELEASED-folder copy of the same file, and a
+        // WIP record whose file is gone from disk is an orphan awaiting purge —
+        // neither should block a save.
+        public static string FindFileNameConflict(string fileName,
+            string excludeFilePath)
+        {
+            if (string.IsNullOrWhiteSpace(fileName)) return null;
+
+            string target = fileName.Trim();
+            string exclude = (excludeFilePath ?? "").Trim();
+
+            lock (_lock) using (AcquireProcessLock())
+            {
+                var doc = LoadOrCreate();
+                foreach (var el in doc.Root.Element("Files").Elements("File"))
+                {
+                    string elPath = ((string)el.Element("FilePath") ?? "").Trim();
+                    if (elPath.Equals(exclude, StringComparison.OrdinalIgnoreCase))
+                        continue;
+                    if (!elPath.StartsWith(WipRoot, StringComparison.OrdinalIgnoreCase))
+                        continue;
+
+                    string elFileName = ((string)el.Element("FileName") ?? "").Trim();
+                    if (!elFileName.Equals(target, StringComparison.OrdinalIgnoreCase))
+                        continue;
+
+                    bool onDisk = true;
+                    try { onDisk = File.Exists(elPath); } catch { }
+                    if (onDisk) return elPath;
                 }
             }
 

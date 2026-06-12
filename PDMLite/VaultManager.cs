@@ -7,6 +7,7 @@ using System.IO;
 using System.Linq;
 using System.Runtime.InteropServices;
 using System.Text;
+using System.Text.RegularExpressions;
 using System.Windows.Forms;
 
 namespace PDMLite
@@ -212,19 +213,106 @@ namespace PDMLite
             string rev = PropertyValidator.GetProperty(doc, "Revision");
             string drawingNo = PropertyValidator.GetProperty(doc, "DrawingNo");
 
-            // Associated drawing (models only). Always scrapped together with
-            // the model — a drawing without its referenced model is blank and
-            // useless. Released drawings are NOT exempt: the Released status
-            // becomes meaningless without the model they document.
-            string drwPath = isDrawing ? null : FindDrawingPath(filePath);
-            bool removeDrawing = drwPath != null;
+            // Per-config identity (models only). Exports are named per config
+            // ({cfgPartNo}-R{rev}.step, {cfgDrawingNo} REV {rev}.pdf), so the
+            // active config's numbers alone would leave every OTHER config's
+            // deliverables behind in EXPORTS — stale "current" files for a
+            // part that no longer exists in the vault.
+            var cfgNames = isDrawing
+                ? new List<string>()
+                : PropertyValidator.GetConfigNames(doc);
+            var scrapPartNos = new List<string>();
+            var scrapDrawingNos = new List<string>();
+            foreach (string cfg in cfgNames)
+            {
+                string cp = PropertyValidator.GetProperty(doc, "PartNo", cfg);
+                string cd = PropertyValidator.GetProperty(doc, "DrawingNo", cfg);
+                if (!string.IsNullOrEmpty(cp) &&
+                    !scrapPartNos.Contains(cp, StringComparer.OrdinalIgnoreCase))
+                    scrapPartNos.Add(cp);
+                if (!string.IsNullOrEmpty(cd) &&
+                    !scrapDrawingNos.Contains(cd, StringComparer.OrdinalIgnoreCase))
+                    scrapDrawingNos.Add(cd);
+            }
+            // Config enumeration is best-effort — fall back to the active
+            // config's numbers so a transient failure never scraps NOTHING.
+            if (!isDrawing && scrapPartNos.Count == 0 &&
+                !string.IsNullOrEmpty(partNo))
+                scrapPartNos.Add(partNo);
+            if (!isDrawing && scrapDrawingNos.Count == 0 &&
+                !string.IsNullOrEmpty(drawingNo))
+                scrapDrawingNos.Add(drawingNo);
 
+            // Associated drawings (models only): the shared {basename}.slddrw
+            // plus every CONFIG-SPECIFIC drawing ({configName}.slddrw) — the
+            // shared search alone left config-specific drawings orphaned in
+            // WIP with live DB records pointing at a removed model. Always
+            // scrapped together with the model — a drawing without its
+            // referenced model is blank and useless. Released drawings are
+            // NOT exempt: the Released status becomes meaningless without the
+            // model they document. Deduped by FILENAME, preferring the
+            // canonical WIP path (a legacy RELEASED-copy record of the same
+            // drawing must not shadow the real working file).
+            var drwPaths = new List<string>();
+            if (!isDrawing)
+            {
+                string shared = FindDrawingPath(filePath);
+                if (shared != null) drwPaths.Add(shared);
+                foreach (string cfg in cfgNames)
+                    foreach (string dp in
+                        DatabaseManager.GetDrawingsForConfig(filePath, cfg))
+                    {
+                        string dpName = Path.GetFileName(dp);
+                        int dupAt = drwPaths.FindIndex(p =>
+                            Path.GetFileName(p).Equals(dpName,
+                                StringComparison.OrdinalIgnoreCase));
+                        if (dupAt < 0)
+                            drwPaths.Add(dp);
+                        else if (!drwPaths[dupAt].StartsWith(WipFolder,
+                                     StringComparison.OrdinalIgnoreCase) &&
+                                 dp.StartsWith(WipFolder,
+                                     StringComparison.OrdinalIgnoreCase))
+                            drwPaths[dupAt] = dp;
+                    }
+            }
+            bool removeDrawing = drwPaths.Count > 0;
+
+            // Parent assemblies (models only — assemblies don't reference
+            // drawings). Removing a component breaks every assembly that uses
+            // it: the WIP copy moves to SCRAP under a timestamped name, so the
+            // stored reference dangles and the component comes up missing on
+            // next open. WARN, don't block — detection is best-effort
+            // (GetParentAssemblies reads stored ref paths from disk) and a
+            // Master may legitimately retire a product top-down. Same pattern
+            // as the New Revision / Rollback parent warnings.
+            string parentWarning = "";
+            if (!isDrawing)
+            {
+                var parents = GetParentAssemblies(filePath);
+                if (parents.Count > 0)
+                    parentWarning =
+                        "WARNING — USED BY " + parents.Count +
+                        (parents.Count == 1 ? " ASSEMBLY:" : " ASSEMBLIES:") +
+                        "\n  " + string.Join("\n  ", parents) + "\n" +
+                        "Removing this file will BREAK " +
+                        (parents.Count == 1
+                            ? "that assembly"
+                            : "those assemblies") +
+                        " (missing component on next open).\n\n";
+            }
+
+            string drwNames = string.Join(", ",
+                drwPaths.Select(Path.GetFileName));
             string confirmMsg =
                 "Remove " + fileName + " from the vault?\n\n" +
                 "Status : " + status + "\n\n" +
+                parentWarning +
                 "The file" +
                 (removeDrawing
-                    ? " and its drawing (" + Path.GetFileName(drwPath) + "),"
+                    ? (drwPaths.Count == 1
+                        ? " and its drawing (" + drwNames + "),"
+                        : " and its " + drwPaths.Count + " drawings (" +
+                          drwNames + "),")
                     : "") +
                 " their released copies and exports will be MOVED to:\n" +
                 ScrapFolder + "\n\n" +
@@ -236,41 +324,54 @@ namespace PDMLite
                     != DialogResult.Yes) return;
 
             // Close open documents before moving files on disk (Windows holds a
-            // lock on an open file). Close the drawing first — it references the
-            // model, so the model can't close while the drawing is open.
-            if (drwPath != null)
+            // lock on an open file). Close the drawings first — they reference
+            // the model, so the model can't close while a drawing is open.
+            foreach (string dp in drwPaths)
             {
                 var openDrw = PDMLiteAddin.SwApp
-                    ?.GetOpenDocumentByName(drwPath) as ModelDoc2;
+                    ?.GetOpenDocumentByName(dp) as ModelDoc2;
                 if (openDrw != null)
-                    try { PDMLiteAddin.SwApp.CloseDoc(drwPath); } catch { }
+                    try { PDMLiteAddin.SwApp.CloseDoc(dp); } catch { }
             }
             try { PDMLiteAddin.SwApp.CloseDoc(filePath); } catch { }
 
             // Move the primary file's artifacts to SCRAP.
             MoveToScrap(filePath);
             MoveToScrap(Path.Combine(RelFolder, fileName));
-            if (isDrawing) ScrapExports(null, drawingNo);      // drawing → PDF only
-            else ScrapExports(partNo, drawingNo);             // model   → STEP + PDF
+            if (isDrawing)
+            {
+                ScrapExports(null, drawingNo);             // drawing → PDF only
+            }
+            else
+            {
+                // Model: STEP + BOM per config PartNo, PDF per config
+                // DrawingNo — covers the associated drawings' PDFs too.
+                foreach (string pn in scrapPartNos) ScrapExports(pn, null);
+                foreach (string dn in scrapDrawingNos) ScrapExports(null, dn);
+            }
             DatabaseManager.RemoveFileRecord(filePath);
             AuditLogger.Log("RemoveFromVault", user, fileName, partNo, rev,
                 "moved to SCRAP");
 
-            // Move the associated drawing's artifacts if the user opted in.
-            if (removeDrawing && drwPath != null)
+            // Move every associated drawing's artifacts (PDFs were already
+            // scrapped above via the per-config DrawingNos).
+            foreach (string dp in drwPaths)
             {
-                string drwName = Path.GetFileName(drwPath);
-                MoveToScrap(drwPath);
+                string drwName = Path.GetFileName(dp);
+                MoveToScrap(dp);
                 MoveToScrap(Path.Combine(RelFolder, drwName));
-                ScrapExports(null, drawingNo);
-                DatabaseManager.RemoveFileRecord(drwPath);
+                DatabaseManager.RemoveFileRecord(dp);
                 AuditLogger.Log("RemoveFromVault", user, drwName, partNo, rev,
                     "drawing of " + fileName + ", moved to SCRAP");
             }
 
             MessageBox.Show(
                 fileName + " removed from the vault." +
-                (removeDrawing ? "\nAssociated drawing also removed." : "") +
+                (removeDrawing
+                    ? "\n" + (drwPaths.Count == 1
+                        ? "Associated drawing also removed."
+                        : drwPaths.Count + " associated drawings also removed.")
+                    : "") +
                 "\n\nFiles moved to SCRAP:\n" + ScrapFolder,
                 "BCore PDM — Remove from Vault",
                 MessageBoxButtons.OK, MessageBoxIcon.Information);
@@ -318,28 +419,52 @@ namespace PDMLite
             catch { return null; }
         }
 
-        // Move a file's current exports to SCRAP. STEP files are named by the
-        // dotless part number; PDFs by the drawing number — match the same
-        // prefixes the exporter uses.
+        // Move a file's current exports to SCRAP. STEP files are named
+        // {partNoClean}-R{rev}.step, PDFs {drawingNo} REV {rev}.pdf, BOMs
+        // {rawPartNo}-R{rev}_BOM.csv — globs are anchored to those exact
+        // conventions and ExportNameFilter'd so retiring TEST02 can never
+        // scrap TEST021's deliverables (same C3 fix as ArchiveOldExports).
         private static void ScrapExports(string partNo, string drawingNo)
         {
             try
             {
                 string stepExport = Path.Combine(ExportRoot, "STEP");
                 string pdfExport = Path.Combine(ExportRoot, "PDF");
+                string bomExport = Path.Combine(ExportRoot, "BOM");
 
                 string partNoClean = (partNo ?? "").Replace(".", "");
                 if (!string.IsNullOrEmpty(partNoClean) &&
                     Directory.Exists(stepExport))
+                {
+                    var stepFilter = ExportNameFilter(partNoClean, "-R", ".step");
                     foreach (string f in Directory.GetFiles(
-                        stepExport, partNoClean + "*.step"))
-                        MoveToScrap(f);
+                        stepExport, partNoClean + "-R*.step"))
+                        if (stepFilter.IsMatch(Path.GetFileName(f)))
+                            MoveToScrap(f);
+                }
 
                 if (!string.IsNullOrEmpty(drawingNo) &&
                     Directory.Exists(pdfExport))
+                {
+                    var pdfFilter = ExportNameFilter(drawingNo, " REV ", ".pdf");
                     foreach (string f in Directory.GetFiles(
-                        pdfExport, drawingNo + "*.pdf"))
-                        MoveToScrap(f);
+                        pdfExport, drawingNo + " REV *.pdf"))
+                        if (pdfFilter.IsMatch(Path.GetFileName(f)))
+                            MoveToScrap(f);
+                }
+
+                // BOM CSV (assemblies) — uses the RAW PartNo (dots preserved).
+                // Previously not scrapped at all, leaving a retired assembly's
+                // current BOM in EXPORTS forever.
+                if (!string.IsNullOrEmpty(partNo) &&
+                    Directory.Exists(bomExport))
+                {
+                    var bomFilter = ExportNameFilter(partNo, "-R", "_BOM.csv");
+                    foreach (string f in Directory.GetFiles(
+                        bomExport, partNo + "-R*_BOM.csv"))
+                        if (bomFilter.IsMatch(Path.GetFileName(f)))
+                            MoveToScrap(f);
+                }
             }
             catch { }
         }
@@ -1730,14 +1855,32 @@ namespace PDMLite
             catch { }
         }
 
+        // Exact-name filter paired with each export glob. A glob alone is a
+        // PREFIX match: releasing TEST02 would also sweep TEST021's and
+        // TEST02A's current exports into ARCHIVE (they all start "TEST02").
+        // Even the anchored glob "{id}-R*.step" still matches a part whose
+        // number merely begins "{id}-R" (e.g. TEST02-R1 → "TEST02-R1-RA.step").
+        // The regex pins the revision token to letters/digits only, so exactly
+        // "{identifier}{sep}{rev}{suffix}" survives and nothing else.
+        private static Regex ExportNameFilter(string identifier, string sep,
+            string suffix)
+        {
+            return new Regex(
+                "^" + Regex.Escape(identifier) + Regex.Escape(sep) +
+                "[A-Za-z0-9]+" + Regex.Escape(suffix) + "$",
+                RegexOptions.IgnoreCase);
+        }
+
         // Move every file in srcDir matching pattern into destDir, overwriting
         // a stale same-named archive copy. No-op if srcDir is missing.
+        // exactName (when given) post-filters the glob's prefix matches down to
+        // exact export names — see ExportNameFilter.
         // Each file is moved independently: a single failure (e.g. one file open
         // in a viewer, or a read-only stale archive copy) is logged-and-skipped so
         // it can NEVER block the other files — moving the old BOM must not stop the
         // old STEP/PDF from archiving, and vice-versa.
         private static void MoveMatching(string srcDir, string destDir,
-            string pattern)
+            string pattern, Regex exactName = null)
         {
             if (!Directory.Exists(srcDir)) return;
             string[] files;
@@ -1748,6 +1891,9 @@ namespace PDMLite
             Directory.CreateDirectory(destDir);
             foreach (string file in files)
             {
+                if (exactName != null &&
+                    !exactName.IsMatch(Path.GetFileName(file)))
+                    continue;
                 try
                 {
                     string dest = Path.Combine(destDir, Path.GetFileName(file));
@@ -1774,27 +1920,36 @@ namespace PDMLite
             {
                 // Each MoveMatching is independent (its own per-file try/catch),
                 // so a failure in one type can't skip the others.
+                // Globs are anchored to the export naming convention and paired
+                // with an ExportNameFilter so ONLY this part's exports move —
+                // a bare "{id}*.step" prefix glob archived OTHER parts' current
+                // exports whenever one part number started with another (C3).
 
-                // STEP (parts/assemblies). fileIdentifier is the dot-stripped PartNo.
+                // STEP: {partNoClean}-R{rev}.step. fileIdentifier is the
+                // dot-stripped PartNo.
                 if (!isDrawing)
                     MoveMatching(Path.Combine(ExportRoot, "STEP"),
                         Path.Combine(ObsFolder, "STEP"),
-                        fileIdentifier + "*.step");
+                        fileIdentifier + "-R*.step",
+                        ExportNameFilter(fileIdentifier, "-R", ".step"));
 
-                // PDF (drawings, and any part/assembly PDF). fileIdentifier is the
-                // DrawingNo for drawings, dot-stripped PartNo otherwise.
+                // PDF: {drawingNo} REV {rev}.pdf. fileIdentifier is the
+                // DrawingNo for drawings, dot-stripped PartNo otherwise (a
+                // model's PDF only matches when its DrawingNo equals it).
                 MoveMatching(Path.Combine(ExportRoot, "PDF"),
                     Path.Combine(ObsFolder, "PDF"),
-                    fileIdentifier + "*.pdf");
+                    fileIdentifier + " REV *.pdf",
+                    ExportNameFilter(fileIdentifier, " REV ", ".pdf"));
 
-                // BOM CSV (assemblies only). Uses the RAW PartNo (dots preserved)
-                // because the BOM file is named {partNo}-R{rev}_BOM.csv.
+                // BOM CSV (assemblies only): {partNo}-R{rev}_BOM.csv with the
+                // RAW PartNo (dots preserved).
                 if (!isDrawing)
                 {
                     string bid = bomIdentifier ?? fileIdentifier;
                     MoveMatching(Path.Combine(ExportRoot, "BOM"),
                         Path.Combine(ObsFolder, "BOM"),
-                        bid + "*_BOM.csv");
+                        bid + "-R*_BOM.csv",
+                        ExportNameFilter(bid, "-R", "_BOM.csv"));
                 }
             }
             catch { }
@@ -1838,9 +1993,15 @@ namespace PDMLite
                 return;
             }
 
-            // Find all archived revisions matching this filename
+            // Find all archived revisions matching this filename. The glob is
+            // a prefix match, so post-filter to the exact "{name} REV {rev}"
+            // archive convention — without it a file named "Bracket" would
+            // also list (and could restore) "Bracket REV PLATE"'s archives.
+            var archiveFilter = ExportNameFilter(fileName, " REV ", ext);
             string[] archivedFiles = Directory.GetFiles(
-                archivePath, fileName + " REV *" + ext);
+                    archivePath, fileName + " REV *" + ext)
+                .Where(f => archiveFilter.IsMatch(Path.GetFileName(f)))
+                .ToArray();
 
             if (archivedFiles.Length == 0)
             {
@@ -2952,22 +3113,27 @@ namespace PDMLite
             try
             {
                 // Each MoveMatching is independent (its own per-file try/catch),
-                // so a failure in one type can't skip the others.
+                // so a failure in one type can't skip the others. Globs are
+                // anchored + ExportNameFilter'd so only THIS part's exports
+                // move (same C3 fix as ArchiveOldExports).
 
                 // BOM CSV (assemblies) — raw PartNo so the glob matches the
                 // {partNo}-R{rev}_BOM.csv filename correctly.
                 string bomId = rawPartNo ?? partNoClean;
                 MoveMatching(Path.Combine(ExportRoot, "BOM"),
-                    Path.Combine(ObsFolder, "BOM"), bomId + "*_BOM.csv");
+                    Path.Combine(ObsFolder, "BOM"), bomId + "-R*_BOM.csv",
+                    ExportNameFilter(bomId, "-R", "_BOM.csv"));
 
-                // STEP files matching part number.
+                // STEP files matching part number: {partNoClean}-R{rev}.step.
                 MoveMatching(Path.Combine(ExportRoot, "STEP"),
-                    Path.Combine(ObsFolder, "STEP"), partNoClean + "*.step");
+                    Path.Combine(ObsFolder, "STEP"), partNoClean + "-R*.step",
+                    ExportNameFilter(partNoClean, "-R", ".step"));
 
-                // PDFs matching drawing number.
+                // PDFs matching drawing number: {drawingNo} REV {rev}.pdf.
                 if (!string.IsNullOrEmpty(drawingNo))
                     MoveMatching(Path.Combine(ExportRoot, "PDF"),
-                        Path.Combine(ObsFolder, "PDF"), drawingNo + "*.pdf");
+                        Path.Combine(ObsFolder, "PDF"), drawingNo + " REV *.pdf",
+                        ExportNameFilter(drawingNo, " REV ", ".pdf"));
             }
             catch { }
         }

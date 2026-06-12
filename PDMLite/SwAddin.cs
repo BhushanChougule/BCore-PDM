@@ -315,6 +315,32 @@ namespace PDMLite
                     }
                 }
 
+                // Rule 2.6: vault-wide file-name uniqueness — HARD BLOCK, all
+                // doc types (drawing basenames drive the drawing↔model link).
+                // RELEASED/ARCHIVE/SCRAP are flat folders keyed on file name
+                // and the DB dedupes/purges by it, so a second "Bracket.sldprt"
+                // anywhere would overwrite the first one's released snapshot
+                // and archives and delete its revision history on first save.
+                // No override — unlike a duplicate PartNo this corrupts data.
+                if (!string.IsNullOrEmpty(filePath))
+                {
+                    string dupPath = DatabaseManager.FindFileNameConflict(
+                        System.IO.Path.GetFileName(filePath), filePath);
+                    if (dupPath != null)
+                    {
+                        Block("DUPLICATE FILE NAME:\n\n" +
+                              "'" + System.IO.Path.GetFileName(filePath) +
+                              "' already exists in the vault at:\n" +
+                              dupPath + "\n\n" +
+                              "File names must be unique across ALL divisions — " +
+                              "the vault keys released snapshots, archives and " +
+                              "drawing links on the file name.\n\n" +
+                              "Save this file under a different name " +
+                              "(File → Save As).");
+                        return 1;
+                    }
+                }
+
                 int docType = doc.GetType();
                 bool isPart = docType == (int)swDocumentTypes_e.swDocPART;
                 bool isAsm  = docType == (int)swDocumentTypes_e.swDocASSEMBLY;
