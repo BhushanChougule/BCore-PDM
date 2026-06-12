@@ -611,14 +611,16 @@ namespace PDMLite
                                     "SOLIDWORKS copies all properties when a new " +
                                     "configuration is created.\n" +
                                     "Please enter a unique Part No, Drawing No, " +
-                                    "and Description for this configuration.",
+                                    "Description and starting Revision for this " +
+                                    "configuration.",
                                     (int)swMessageBoxIcon_e.swMbWarning,
                                     (int)swMessageBoxBtn_e.swMbOk);
 
                                 using (var form = new PropertyForm(
                                     doc,
                                     new List<string>
-                                        { "PartNo", "DrawingNo", "Description" },
+                                        { "PartNo", "DrawingNo", "Description",
+                                          "Revision" },
                                     askDrawingScope: true))
                                 {
                                     form.ShowDialog();
