@@ -2617,31 +2617,6 @@ namespace PDMLite
             }
         }
 
-        // True when ANY configuration of this model already has its own
-        // {configName}.slddrw on disk — the per-config drawing pattern is
-        // established, and new configs get their own drawings without asking.
-        private static bool AnyConfigSpecificDrawingExists(ModelDoc2 doc,
-            List<string> searchDirs, char[] invalidChars, string modelBasename)
-        {
-            try
-            {
-                foreach (string cfg in PropertyValidator.GetConfigNames(doc))
-                {
-                    string safe = new string(cfg.Select(
-                        ch => invalidChars.Contains(ch) ? '_' : ch).ToArray());
-                    if (string.IsNullOrEmpty(safe)) continue;
-                    if (safe.Equals(modelBasename,
-                            StringComparison.OrdinalIgnoreCase))
-                        continue; // that name IS the shared drawing
-                    if (FindDrawingFileInDirs(searchDirs, safe + ".slddrw")
-                            != null)
-                        return true;
-                }
-            }
-            catch { }
-            return false;
-        }
-
         // ── OPEN OR CREATE DRAWING for current part/assembly ──────────
         public static void OpenOrCreateDrawing(ModelDoc2 doc)
         {
@@ -2691,19 +2666,8 @@ namespace PDMLite
                 : null;
             if (foundCfg != null) { ActivateOrOpenDrawing(foundCfg); return; }
 
-            // 2. Only the SHARED drawing exists. For a multi-config part whose
-            // active config has no drawing of its own, the right move is
-            // LEARNED rather than assumed:
-            //  - any OTHER config already has its own {configName}.slddrw →
-            //    the per-config pattern is established: this config gets its
-            //    own drawing too, no questions asked;
-            //  - the part is locked to "Common" (the user answered "open the
-            //    common drawing" twice) → open it silently, never ask again;
-            //  - otherwise ASK (DrawingScopeDialog, sharedExists variant):
-            //    "open common" counts toward the two-answer Common lock,
-            //    "create separate" falls through to the creation flow below
-            //    (and the new file on disk establishes the per-config pattern
-            //    for every future config).
+            // 2. Only the SHARED drawing exists. The active config\'s own
+            // DrawingScope property decides what happens (see inside).
             string foundShared = FindDrawingFileInDirs(
                 searchDirs, modelBasename + ".slddrw");
             bool createPerConfigBesideShared = false;
@@ -2712,24 +2676,47 @@ namespace PDMLite
                 bool openShared = true;
                 if (isMultiConfig && !string.IsNullOrEmpty(safeCfgName))
                 {
-                    if (AnyConfigSpecificDrawingExists(
-                            doc, searchDirs, invalidChars, modelBasename))
+                    // The active config's own DrawingScope custom property
+                    // decides (set from the Rule 3.5 new-config PropertyForm's
+                    // "Drawing" dropdown): COMMON → open the shared drawing,
+                    // SEPARATE → create {configName}.slddrw. A config without
+                    // the property (created before the feature, or never run
+                    // through Rule 3.5) is asked ONCE and the answer is
+                    // WRITTEN INTO the property — every config answers at most
+                    // once, ever. Stored on the FILE (config-specific custom
+                    // property), not the DB: it travels with the part and is
+                    // visible/fixable in SW's own property manager.
+                    string scopeProp = "";
+                    try
+                    {
+                        scopeProp = (PropertyValidator.GetProperty(
+                            doc, "DrawingScope") ?? "").Trim().ToUpperInvariant();
+                    }
+                    catch { }
+
+                    if (scopeProp.StartsWith("SEPARATE"))
                     {
                         openShared = false;
                     }
-                    else if (DatabaseManager.GetDrawingScope(filePath) != "Common")
+                    else if (!scopeProp.StartsWith("COMMON"))
                     {
                         using (var ask = new DrawingScopeDialog(
                             PropertyValidator.GetConfigNames(doc).Count,
                             activeConfig, sharedExists: true))
                         {
                             if (ask.ShowDialog() != DialogResult.OK)
-                                return; // cancelled
-                            if (ask.Result == DrawingScopeDialog.Scope.PerConfig)
-                                openShared = false;
-                            else
-                                DatabaseManager
-                                    .RegisterDrawingScopeCommonChoice(filePath);
+                                return; // cancelled — asked again next time
+                            bool perCfg =
+                                ask.Result == DrawingScopeDialog.Scope.PerConfig;
+                            try
+                            {
+                                PropertyValidator.SetProperty(doc,
+                                    "DrawingScope",
+                                    perCfg ? "SEPARATE DRAWING"
+                                           : "COMMON DRAWING");
+                            }
+                            catch { }
+                            if (perCfg) openShared = false;
                         }
                     }
                 }
@@ -2793,10 +2780,15 @@ namespace PDMLite
                     if (scopeDlg.ShowDialog() != DialogResult.OK) return; // cancelled
                     createPerConfig =
                         scopeDlg.Result == DrawingScopeDialog.Scope.PerConfig;
-                    // A creation-time "Common" answer is the FIRST of the two
-                    // confirmations that lock the part to the common drawing.
-                    if (!createPerConfig)
-                        DatabaseManager.RegisterDrawingScopeCommonChoice(filePath);
+                    // Remember the choice on the ACTIVE config so the Open
+                    // Drawing button never needs to ask this config again.
+                    try
+                    {
+                        PropertyValidator.SetProperty(doc, "DrawingScope",
+                            createPerConfig ? "SEPARATE DRAWING"
+                                            : "COMMON DRAWING");
+                    }
+                    catch { }
                 }
             }
 

@@ -118,7 +118,7 @@ namespace PDMLite
             Controls.Add(new Label
             {
                 Text      = sharedExists
-                    ? "Choosing this twice stops this question for this part."
+                    ? "Remembered for this configuration — never asked again."
                     : "Differentiate configurations with a config / design table.",
                 Font      = fHint,
                 ForeColor = cTextGray,
@@ -147,7 +147,7 @@ namespace PDMLite
             Controls.Add(new Label
             {
                 Text      = sharedExists
-                    ? "Future new configurations then get their own drawings automatically."
+                    ? "Creates a drawing named after this configuration; remembered."
                     : "Other configurations can get their own drawings later.",
                 Font      = fHint,
                 ForeColor = cTextGray,
