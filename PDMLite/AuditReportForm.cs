@@ -1242,6 +1242,8 @@ namespace PDMLite
             private CheckedListBox _list;
             private TextBox _search;
             private Label _count;
+            private Button _ok;
+            private Color _okBack;
 
             public HashSet<string> SelectedValues { get; private set; }
 
@@ -1284,11 +1286,11 @@ namespace PDMLite
                 int btnY = S(10) + rowH + S(6);
                 var btnAll = MakeBtn("Select All", cBrand, fBtn,
                     new Point(S(8), btnY), S(108), rowH);
-                btnAll.Click += (s, e) => SetVisible(true);
+                btnAll.Click += (s, e) => SetMatched(true);
                 Controls.Add(btnAll);
                 var btnNone = MakeBtn("Clear", cBrandDark, fBtn,
                     new Point(S(120), btnY), S(108), rowH);
-                btnNone.Click += (s, e) => SetVisible(false);
+                btnNone.Click += (s, e) => SetMatched(false);
                 Controls.Add(btnNone);
 
                 int countY = btnY + rowH + S(6);
@@ -1318,16 +1320,17 @@ namespace PDMLite
                 _list.ItemCheck += List_ItemCheck;
                 Controls.Add(_list);
 
-                var ok = MakeBtn("OK", cBrand, fBtn,
+                _okBack = cBrand;
+                _ok = MakeBtn("OK", cBrand, fBtn,
                     new Point(S(8), okY), S(108), rowH);
-                ok.Click += (s, e) => { Commit(); DialogResult = DialogResult.OK; Close(); };
-                Controls.Add(ok);
+                _ok.Click += (s, e) => { Commit(); DialogResult = DialogResult.OK; Close(); };
+                Controls.Add(_ok);
                 var cancel = MakeBtn("Cancel", Color.FromArgb(120, 128, 140), fBtn,
                     new Point(S(120), okY), S(108), rowH);
                 cancel.Click += (s, e) => { DialogResult = DialogResult.Cancel; Close(); };
                 Controls.Add(cancel);
 
-                AcceptButton = ok;
+                AcceptButton = _ok;
                 CancelButton = cancel;
 
                 RebuildList();
@@ -1356,11 +1359,44 @@ namespace PDMLite
             {
                 if (e.Index < 0 || e.Index >= _visibleRaw.Count) return;
                 _state[_visibleRaw[e.Index]] = (e.NewValue == CheckState.Checked);
+                UpdateOkEnabled();
             }
 
-            private void SetVisible(bool check)
+            // OK commits the checked matches; with NONE ticked it would commit
+            // an empty filter and blank the whole grid (a typo'd search term +
+            // Enter — OK is the AcceptButton — or Clear + OK). Greyed out until
+            // at least one match is ticked, like Excel.
+            private void UpdateOkEnabled()
             {
-                foreach (var raw in _visibleRaw) _state[raw] = check;
+                if (_ok == null) return;
+                string term = (_search.Text ?? "").Trim();
+                bool any = false;
+                foreach (var kv in _state)
+                    if (kv.Value && MatchesTerm(kv.Key, term)) { any = true; break; }
+                _ok.Enabled = any;
+                _ok.BackColor = any ? _okBack : Color.FromArgb(170, 175, 182);
+            }
+
+            // True when the value (or its "(Blanks)" display form) matches the
+            // search term. Shared by RebuildList and SetMatched so Select All /
+            // Clear act on exactly the matched set — the rendered list caps at
+            // DisplayCap, but matched values past the cap must flip too, or on
+            // a high-cardinality column "Clear, then tick one" would leave the
+            // rest checked and commit a filter that allows almost everything.
+            private static bool MatchesTerm(string raw, string term)
+            {
+                if (term.Length == 0) return true;
+                string disp = raw.Length == 0 ? "(Blanks)" : raw;
+                return disp.IndexOf(term, StringComparison.OrdinalIgnoreCase) >= 0;
+            }
+
+            // Tick/untick every value matched by the search box (NOT just the
+            // rendered subset — see MatchesTerm).
+            private void SetMatched(bool check)
+            {
+                string term = (_search.Text ?? "").Trim();
+                foreach (var raw in _allValues)
+                    if (MatchesTerm(raw, term)) _state[raw] = check;
                 RebuildList();
             }
 
@@ -1374,28 +1410,43 @@ namespace PDMLite
                 int matched = 0;
                 foreach (var raw in _allValues)
                 {
-                    string disp = raw.Length == 0 ? "(Blanks)" : raw;
-                    if (term.Length > 0 &&
-                        disp.IndexOf(term, StringComparison.OrdinalIgnoreCase) < 0)
-                        continue;
+                    if (!MatchesTerm(raw, term)) continue;
                     matched++;
                     if (_visibleRaw.Count >= DisplayCap) continue;
                     _visibleRaw.Add(raw);
-                    _list.Items.Add(disp, _state[raw]);
+                    _list.Items.Add(raw.Length == 0 ? "(Blanks)" : raw, _state[raw]);
                 }
                 _list.EndUpdate();
                 _list.ItemCheck += List_ItemCheck;
 
-                _count.Text = matched > _visibleRaw.Count
-                    ? string.Format("{0:N0} of {1:N0} shown — type to narrow",
-                        _visibleRaw.Count, matched)
-                    : string.Format("{0:N0} value{1}", matched, matched == 1 ? "" : "s");
+                if (matched > _visibleRaw.Count)
+                    _count.Text = string.Format("{0:N0} of {1:N0} shown — type to narrow",
+                        _visibleRaw.Count, matched);
+                else if (term.Length > 0)
+                    _count.Text = matched == 0
+                        ? "No matches"
+                        : string.Format("{0:N0} match{1} — OK filters to ticked",
+                            matched, matched == 1 ? "" : "es");
+                else
+                    _count.Text = string.Format("{0:N0} value{1}",
+                        matched, matched == 1 ? "" : "s");
+
+                UpdateOkEnabled();
             }
 
+            // OK while a search term is active commits the CHECKED MATCHES ONLY
+            // (Excel's "filter to search results"). Values outside the search
+            // keep whatever checked state they had from BEFORE the term was
+            // typed — folding them in would quietly re-allow values the user
+            // never saw, so "search, tick one, OK" showed almost everything
+            // instead of the one ticked value.
             private void Commit()
             {
+                string term = (_search.Text ?? "").Trim();
                 SelectedValues = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-                foreach (var kv in _state) if (kv.Value) SelectedValues.Add(kv.Key);
+                foreach (var kv in _state)
+                    if (kv.Value && MatchesTerm(kv.Key, term))
+                        SelectedValues.Add(kv.Key);
             }
         }
     }
