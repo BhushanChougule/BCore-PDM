@@ -104,20 +104,28 @@ namespace PDMLite
                     "rename is disabled to keep the table in sync).",
                     fBody, cOrange);
             }
-            else if (renamePreview.Count > 0)
+            else
             {
-                Add("\"Rename && Save\" renames these configs to their " +
-                    "Part No now — the only cheap moment (before any " +
-                    "assembly references them):", fBody, cTextDark);
-                Add(string.Join("\n", renamePreview), fBold, cBrandDark);
+                if (renamePreview.Count > 0)
+                {
+                    Add("\"Rename && Save\" renames these configs to their " +
+                        "Part No now — the only cheap moment (before any " +
+                        "assembly references them):", fBody, cTextDark);
+                    Add(string.Join("\n", renamePreview), fBold, cBrandDark);
+                    if (parentAsmCount > 0)
+                        Add("CAUTION: this part is used by " + parentAsmCount +
+                            " assembl" + (parentAsmCount == 1 ? "y" : "ies") +
+                            " — if any of them reference these configs BY " +
+                            "NAME, renaming breaks that reference.",
+                            fBody, cOrange);
+                }
+                // ALWAYS show the skip reasons — previously they were only
+                // rendered when at least one config WAS renameable, so a
+                // fully-skipped part showed no rename button and no
+                // explanation why (found in PR-52 testing).
                 if (renameSkipped.Count > 0)
                     Add("Not auto-renamed (fix manually):\n" +
                         string.Join("\n", renameSkipped), fBody, cOrange);
-                if (parentAsmCount > 0)
-                    Add("CAUTION: this part is used by " + parentAsmCount +
-                        " assembl" + (parentAsmCount == 1 ? "y" : "ies") +
-                        " — if any of them reference these configs BY NAME, " +
-                        "renaming breaks that reference.", fBody, cOrange);
             }
 
             int btnH = S(26);
