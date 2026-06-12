@@ -1098,7 +1098,9 @@ namespace PDMLite
                 // implying the file is a tracked WIP.
                 string dup = DatabaseManager.FindFileNameConflict(
                     fileName, filePath);
-                _statusVal.Text = dup != null ? "DUPLICATE NAME" : "Not Tracked";
+                // "DUPLICATE" not "DUPLICATE NAME" — the value column fits
+                // ~10 chars before clipping (sized for "Not Locked").
+                _statusVal.Text = dup != null ? "DUPLICATE" : "Not Tracked";
                 _statusVal.ForeColor = dup != null ? cSwRed : cDark;
             }
             // Drawings share the PartNo of the part/assembly they document —
