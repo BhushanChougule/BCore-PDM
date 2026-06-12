@@ -1552,7 +1552,8 @@ namespace PDMLite
             private TextBox _search;
             private Label _count;
 
-            // The checked subset of the shown values (never null). The caller
+            // The checked subset of the values — restricted to the in-popup
+            // search matches when a term is active (never null). The caller
             // decides whether that equals "no filter" (it also folds in any
             // allowed values that were hidden by other filters).
             public HashSet<string> SelectedValues { get; private set; }
@@ -1715,16 +1716,30 @@ namespace PDMLite
                 _list.EndUpdate();
                 _list.ItemCheck += List_ItemCheck;
 
-                _count.Text = matched > _visibleRaw.Count
-                    ? string.Format("{0:N0} of {1:N0} shown — type to narrow",
-                        _visibleRaw.Count, matched)
-                    : string.Format("{0:N0} value{1}", matched, matched == 1 ? "" : "s");
+                if (matched > _visibleRaw.Count)
+                    _count.Text = string.Format("{0:N0} of {1:N0} shown — type to narrow",
+                        _visibleRaw.Count, matched);
+                else if (term.Length > 0)
+                    _count.Text = string.Format("{0:N0} match{1} — OK filters to ticked",
+                        matched, matched == 1 ? "" : "es");
+                else
+                    _count.Text = string.Format("{0:N0} value{1}",
+                        matched, matched == 1 ? "" : "s");
             }
 
+            // OK while a search term is active commits the CHECKED MATCHES ONLY
+            // (Excel's "filter to search results"). Values outside the search
+            // keep whatever checked state they had from BEFORE the term was
+            // typed — folding them in would quietly re-allow files the user
+            // never saw, so "search, tick one, OK" showed almost everything
+            // instead of the one ticked file.
             private void Commit()
             {
+                string term = (_search.Text ?? "").Trim();
                 SelectedValues = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-                foreach (var kv in _state) if (kv.Value) SelectedValues.Add(kv.Key);
+                foreach (var kv in _state)
+                    if (kv.Value && MatchesTerm(kv.Key, term))
+                        SelectedValues.Add(kv.Key);
             }
         }
     }
