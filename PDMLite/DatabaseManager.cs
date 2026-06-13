@@ -85,6 +85,21 @@ namespace PDMLite
         public DateTime OpenedDate { get; set; }
     }
 
+    // A live exclusive claim on a vault operation (Release / New Revision /
+    // Rollback / Remove / Unlock) — see TryBeginOperation. Distinct from both
+    // the hard Master Lock (a stored state) and OpenSessions (read presence):
+    // this guards the MINUTES-long check-then-act window of a Master command,
+    // so two Masters can't interleave Release/Remove/New-Revision on the same
+    // file while confirmation dialogs sit open.
+    public class ActiveOperation
+    {
+        public string FilePath { get; set; }
+        public string User { get; set; }
+        public string Machine { get; set; }
+        public string Operation { get; set; }
+        public DateTime StartedDate { get; set; }
+    }
+
     public static class DatabaseManager
     {
         private const string VaultFolder = @"N:\PDM-SolidWorks\VAULT";
@@ -1030,7 +1045,10 @@ namespace PDMLite
 
         // Remove every session for a machine — called on add-in load and unload
         // so entries a crashed SOLIDWORKS left behind on this PC never linger
-        // and falsely warn other engineers.
+        // and falsely warn other engineers. Also clears this machine's
+        // operation CLAIMS (see TryBeginOperation) in the same pass, so a
+        // crashed SOLIDWORKS never wedges a file shut for the full 30-minute
+        // staleness window.
         public static void ClearMachineSessions(string machine)
         {
             if (string.IsNullOrWhiteSpace(machine)) return;
@@ -1039,13 +1057,171 @@ namespace PDMLite
                 if (LockDegraded) return; // advisory presence — see RegisterOpenSession
 
                 var doc = LoadOrCreate();
+                var toRemove = new List<XElement>();
+
                 var sessions = doc.Root.Element("OpenSessions");
-                if (sessions == null) return;
+                if (sessions != null)
+                    foreach (var el in sessions.Elements("Session"))
+                    {
+                        if (string.Equals((string)el.Element("Machine"), machine,
+                                StringComparison.OrdinalIgnoreCase))
+                            toRemove.Add(el);
+                    }
+
+                var ops = doc.Root.Element("ActiveOperations");
+                if (ops != null)
+                    foreach (var el in ops.Elements("Operation"))
+                    {
+                        if (string.Equals((string)el.Element("Machine"), machine,
+                                StringComparison.OrdinalIgnoreCase))
+                            toRemove.Add(el);
+                    }
+
+                if (toRemove.Count > 0)
+                {
+                    foreach (var el in toRemove) el.Remove();
+                    Save(doc);
+                }
+            }
+        }
+
+        // ════════════════════════════════════════════════════════════════
+        // Active operations (cross-machine Master-command claims)
+        // ════════════════════════════════════════════════════════════════
+        // Release / New Revision / Rollback / Remove are check-then-act flows
+        // that hold confirmation dialogs open for minutes between the status
+        // checks and the final DB write. The cross-machine vault.lock only
+        // serialises individual DB calls — it is never held across SOLIDWORKS
+        // work — so two Masters could interleave operations on the SAME file
+        // (double release, lock steal, remove-during-release). A claim marks
+        // the file "operation in progress" for the WHOLE flow. Advisory, like
+        // OpenSessions: backed by an <ActiveOperations> section in vault.xml,
+        // stale after StaleOperationMinutes (crash backstop — claims are also
+        // wiped per-machine by ClearMachineSessions on add-in load/unload).
+
+        private const int StaleOperationMinutes = 30;
+
+        private static XElement EnsureActiveOperations(XDocument doc)
+        {
+            var el = doc.Root.Element("ActiveOperations");
+            if (el == null)
+            {
+                el = new XElement("ActiveOperations");
+                doc.Root.Add(el);
+            }
+            return el;
+        }
+
+        // Claim filePath for an exclusive vault operation. TRUE = the claim is
+        // ours (recorded, or refreshed if we already held it — nested/chained
+        // flows like a drawing release chaining its model's release re-claim
+        // harmlessly). FALSE = another user/machine holds a live claim; holder
+        // describes it so the caller can say who/what/when.
+        //
+        // Degraded-lock mode: the claim can neither be trusted nor safely
+        // written (a stale whole-vault snapshot must never be saved without
+        // the cross-machine lock), so the operation is allowed through
+        // UNGUARDED — never worse than before claims existed (non-fatal
+        // philosophy, same rule as the janitorial writes).
+        public static bool TryBeginOperation(string filePath, string user,
+            string machine, string operation, out ActiveOperation holder)
+        {
+            holder = null;
+            if (string.IsNullOrWhiteSpace(filePath)) return true;
+            lock (_lock) using (AcquireProcessLock())
+            {
+                if (LockDegraded) return true;
+
+                var doc = LoadOrCreate();
+                var ops = EnsureActiveOperations(doc);
+
+                XElement mine = null;
+                var stale = new List<XElement>();
+                foreach (var el in ops.Elements("Operation"))
+                {
+                    if (!string.Equals((string)el.Element("FilePath"), filePath,
+                            StringComparison.OrdinalIgnoreCase))
+                        continue;
+
+                    DateTime started;
+                    if (!DateTime.TryParse((string)el.Element("StartedDate"),
+                            out started) ||
+                        (DateTime.Now - started).TotalMinutes >
+                            StaleOperationMinutes)
+                    {
+                        stale.Add(el);
+                        continue;
+                    }
+
+                    if (string.Equals((string)el.Element("User"), user,
+                            StringComparison.OrdinalIgnoreCase) &&
+                        string.Equals((string)el.Element("Machine"), machine,
+                            StringComparison.OrdinalIgnoreCase))
+                    {
+                        mine = el;
+                    }
+                    else
+                    {
+                        holder = new ActiveOperation
+                        {
+                            FilePath = filePath,
+                            User = (string)el.Element("User") ?? "",
+                            Machine = (string)el.Element("Machine") ?? "",
+                            Operation = (string)el.Element("Operation") ?? "",
+                            StartedDate = started
+                        };
+                        // Conflict — leave the vault untouched (stale entries
+                        // are purged on a later successful claim).
+                        return false;
+                    }
+                }
+
+                foreach (var el in stale) el.Remove();
+
+                if (mine != null)
+                {
+                    SetOrAdd(mine, "Operation", operation);
+                    SetOrAdd(mine, "StartedDate", DateTime.Now.ToString("o"));
+                }
+                else
+                {
+                    ops.Add(new XElement("Operation",
+                        new XElement("FilePath", filePath),
+                        new XElement("User", user),
+                        new XElement("Machine", machine),
+                        new XElement("Operation", operation),
+                        new XElement("StartedDate", DateTime.Now.ToString("o"))
+                    ));
+                }
+                Save(doc);
+                return true;
+            }
+        }
+
+        // Release this user@machine's claim on filePath. Called from the
+        // operation's finally block so even an aborted/thrown flow releases
+        // its claim; a crash is covered by the staleness window + the
+        // per-machine wipe on add-in load.
+        public static void EndOperation(string filePath, string user,
+            string machine)
+        {
+            if (string.IsNullOrWhiteSpace(filePath)) return;
+            lock (_lock) using (AcquireProcessLock())
+            {
+                if (LockDegraded) return; // see TryBeginOperation
+
+                var doc = LoadOrCreate();
+                var ops = doc.Root.Element("ActiveOperations");
+                if (ops == null) return;
 
                 var toRemove = new List<XElement>();
-                foreach (var el in sessions.Elements("Session"))
+                foreach (var el in ops.Elements("Operation"))
                 {
-                    if (string.Equals((string)el.Element("Machine"), machine,
+                    if (string.Equals((string)el.Element("FilePath"), filePath,
+                            StringComparison.OrdinalIgnoreCase) &&
+                        string.Equals((string)el.Element("User"), user,
+                            StringComparison.OrdinalIgnoreCase) &&
+                        string.Equals((string)el.Element("Machine"), machine,
                             StringComparison.OrdinalIgnoreCase))
                         toRemove.Add(el);
                 }
@@ -1559,7 +1735,10 @@ namespace PDMLite
 
                 doc.Root.Element("RevisionRequests").Add(
                     new XElement("Request",
-                        new XElement("Id", DateTime.Now.Ticks.ToString()),
+                        // GUID, not DateTime.Now.Ticks: two machines submitting
+                        // within the same tick collided, and ResolveRequest
+                        // then resolved the WRONG engineer's request.
+                        new XElement("Id", Guid.NewGuid().ToString("N")),
                         new XElement("RequestType", requestType),
                         new XElement("FilePath", filePath),
                         new XElement("FileName", System.IO.Path.GetFileName(filePath)),
@@ -1622,23 +1801,52 @@ namespace PDMLite
                 (string)el.Element("RequestedBy"), user,
                 StringComparison.OrdinalIgnoreCase));
 
-        public static void ResolveRequest(string id, string status)
+        // Resolve a request, but ONLY while it is still Pending — two Masters
+        // working from stale popup snapshots used to both resolve (and both
+        // ACT ON) the same request. Returns false when the request was already
+        // resolved by someone else (or no longer exists), so callers can skip
+        // the duplicate action instead of running it twice.
+        public static bool ResolveRequest(string id, string status)
         {
             lock (_lock) using (AcquireProcessLock())
             {
                 var doc = LoadOrCreate();
                 var reqElement = doc.Root.Element("RevisionRequests");
-                if (reqElement == null) return;
+                if (reqElement == null) return false;
 
                 foreach (var el in reqElement.Elements("Request"))
                 {
                     if ((string)el.Element("Id") == id)
                     {
-                        el.Element("Status").Value = status;
-                        break;
+                        if ((string)el.Element("Status") != "Pending")
+                            return false; // already handled elsewhere
+                        SetOrAdd(el, "Status", status);
+                        Save(doc);
+                        return true;
                     }
                 }
-                Save(doc);
+                return false;
+            }
+        }
+
+        // Fresh is-it-still-pending check, read at ACTION time (not popup-load
+        // time) so a request another Master just approved/rejected is skipped
+        // rather than double-executed.
+        public static bool IsRequestPending(string id)
+        {
+            if (string.IsNullOrEmpty(id)) return false;
+            lock (_lock) using (AcquireProcessLock())
+            {
+                var doc = LoadOrCreate();
+                var reqElement = doc.Root.Element("RevisionRequests");
+                if (reqElement == null) return false;
+
+                foreach (var el in reqElement.Elements("Request"))
+                {
+                    if ((string)el.Element("Id") == id)
+                        return (string)el.Element("Status") == "Pending";
+                }
+                return false;
             }
         }
 
