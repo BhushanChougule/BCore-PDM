@@ -1536,6 +1536,7 @@ namespace PDMLite
             {
                 case "Released": return cGreen;
                 case "Locked": return cOrange;
+                case "Obsolete": return Color.FromArgb(120, 120, 120);
                 default: return cBrand;
             }
         }

@@ -160,6 +160,142 @@ namespace PDMLite
             }
         }
 
+        // ── MARK OBSOLETE ──────────────────────────────────────────────────
+        // Master-only. Marks a file Obsolete: a superseded-but-referenceable
+        // state, distinct from Remove-from-Vault (which scraps the file off to
+        // SCRAP). An Obsolete file stays in place on disk, frozen read-only, and
+        // keeps its full history — it is just flagged not-for-new-use, blocks
+        // editing (ValidateSave) and is excluded from the release pickers. Path-
+        // based so it can be invoked on ANY file from the Vault Dashboard right-
+        // click (the file need not be open).
+        public static void MarkObsolete(string filePath)
+        {
+            string user = PDMLiteAddin.CurrentUser;
+            if (!IsMaster(user)) { NotMaster(); return; }
+            if (string.IsNullOrEmpty(filePath)) return;
+
+            string status = DatabaseManager.GetFileStatus(filePath);
+            if (string.Equals(status, "Obsolete",
+                    StringComparison.OrdinalIgnoreCase))
+            {
+                MessageBox.Show("This file is already Obsolete.",
+                    "BCore PDM — Obsolete",
+                    MessageBoxButtons.OK, MessageBoxIcon.Information);
+                return;
+            }
+
+            string name = Path.GetFileName(filePath);
+
+            // Warn (do not block) about parent assemblies that still reference
+            // this file — marking it Obsolete signals it must not be used in new
+            // designs, so those assemblies should be revised away from it. Same
+            // best-effort GetParentAssemblies pattern as New Revision / Remove.
+            string parentWarn = "";
+            try
+            {
+                var parents = GetParentAssemblies(filePath);
+                if (parents.Count > 0)
+                    parentWarn = "\n\nNOTE: still referenced by " +
+                        parents.Count + " assembly(ies):\n  • " +
+                        string.Join("\n  • ", parents) +
+                        "\nThose assemblies should be revised away from it.";
+            }
+            catch { }
+
+            var confirm = MessageBox.Show(
+                "Mark this file OBSOLETE (superseded)?\n\n  • " + name + "\n\n" +
+                "It stays in the vault for reference (history preserved) and is " +
+                "frozen read-only, but flagged not-for-new-use: it cannot be " +
+                "edited or released until a Master Reinstates it." + parentWarn,
+                "BCore PDM — Mark Obsolete",
+                MessageBoxButtons.YesNo, MessageBoxIcon.Warning);
+            if (confirm != DialogResult.Yes) return;
+
+            // Required reason-for-change.
+            string reason;
+            while (true)
+            {
+                reason = ShowNoteDialog("Mark Obsolete — Reason",
+                    "Why is this file being made obsolete? (required)");
+                if (reason == null) return; // cancelled
+                if (!string.IsNullOrWhiteSpace(reason)) break;
+                MessageBox.Show("A reason is required.",
+                    "BCore PDM — Reason Required",
+                    MessageBoxButtons.OK, MessageBoxIcon.Information);
+            }
+
+            SetReadOnly(filePath, true); // freeze on disk (best-effort)
+            DatabaseManager.SetFileStatus(filePath, "Obsolete", user,
+                "Marked Obsolete — " + reason);
+            AuditLogger.Log("MarkObsolete", user, name, "", "", reason);
+
+            MessageBox.Show(
+                name + " is now Obsolete.\n\nIt remains in the vault for " +
+                "reference but cannot be edited or released until Reinstated.",
+                "BCore PDM — Obsolete",
+                MessageBoxButtons.OK, MessageBoxIcon.Information);
+        }
+
+        // ── REINSTATE (from Obsolete) ──────────────────────────────────────
+        // Master-only. Returns an Obsolete file to WIP (editable again). To
+        // re-publish it, release it normally afterwards. Mirrors UnlockFile's
+        // close+reopen so SOLIDWORKS discards its cached read-only state.
+        public static void ReinstateFromObsolete(string filePath)
+        {
+            string user = PDMLiteAddin.CurrentUser;
+            if (!IsMaster(user)) { NotMaster(); return; }
+            if (string.IsNullOrEmpty(filePath)) return;
+
+            string status = DatabaseManager.GetFileStatus(filePath);
+            if (!string.Equals(status, "Obsolete",
+                    StringComparison.OrdinalIgnoreCase))
+            {
+                MessageBox.Show(
+                    "This file is not Obsolete (current status: " +
+                    (string.IsNullOrEmpty(status) ? "WIP" : status) + ").",
+                    "BCore PDM — Reinstate",
+                    MessageBoxButtons.OK, MessageBoxIcon.Information);
+                return;
+            }
+
+            string name = Path.GetFileName(filePath);
+            var confirm = MessageBox.Show(
+                "Reinstate this Obsolete file to WIP (editable)?\n\n  • " +
+                name + "\n\nIt becomes editable again; release it normally to " +
+                "re-publish it.",
+                "BCore PDM — Reinstate",
+                MessageBoxButtons.YesNo, MessageBoxIcon.Question);
+            if (confirm != DialogResult.Yes) return;
+
+            SetReadOnly(filePath, false);
+            DatabaseManager.SetFileStatus(filePath, "WIP", user,
+                "Reinstated from Obsolete to WIP");
+            AuditLogger.Log("Reinstate", user, name);
+
+            // If the file is open, close+reopen so SW drops cached read-only.
+            ModelDoc2 openDoc = PDMLiteAddin.SwApp
+                ?.GetOpenDocumentByName(filePath) as ModelDoc2;
+            int reopenType = openDoc != null ? openDoc.GetType() : -1;
+
+            MessageBox.Show(
+                name + " reinstated to WIP. Engineers can edit it again.",
+                "BCore PDM — Reinstated",
+                MessageBoxButtons.OK, MessageBoxIcon.Information);
+
+            if (reopenType >= 0)
+            {
+                try
+                {
+                    PDMLiteAddin.SwApp.CloseDoc(filePath);
+                    int errs = 0, warnings = 0;
+                    PDMLiteAddin.SwApp.OpenDoc6(filePath, reopenType,
+                        (int)swOpenDocOptions_e.swOpenDocOptions_Silent,
+                        "", ref errs, ref warnings);
+                }
+                catch { }
+            }
+        }
+
         // ── REMOVE FROM VAULT ──────────────────────────────────────────────
         // Master-only. Retires a file: moves its on-disk artifacts (WIP copy,
         // RELEASED snapshot, exports) to the SCRAP folder and deletes the
