@@ -29,6 +29,11 @@ namespace PDMLite
         private readonly Color cDark      = Color.FromArgb(75, 80, 90);
         private readonly Color cOrange    = Color.FromArgb(185, 115, 55);
 
+        // Fonts are FIELDS (not ctor locals) and disposed in Dispose(bool): a Font
+        // assigned to a control is NOT owned by it, so leaving them as locals would
+        // leak a GDI handle per dialog open (audit-C4 discipline, like PropertyForm).
+        private Font _fTitle, _fBody, _fBold, _fBtn;
+
         public ConfigHealthDialog(
             List<string> issueLines,
             List<string> renamePreview,   // "Default  →  FORD.01" lines
@@ -38,10 +43,10 @@ namespace PDMLite
         {
             using (var g = CreateGraphics()) _scale = g.DpiX / 96f;
 
-            Font fTitle = new Font("Segoe UI", 6f * _scale, FontStyle.Bold);
-            Font fBody  = new Font("Segoe UI", 3.7f * _scale);
-            Font fBold  = new Font("Segoe UI", 3.7f * _scale, FontStyle.Bold);
-            Font fBtn   = new Font("Segoe UI", 3.6f * _scale, FontStyle.Bold);
+            Font fTitle = _fTitle = new Font("Segoe UI", 6f * _scale, FontStyle.Bold);
+            Font fBody  = _fBody  = new Font("Segoe UI", 3.7f * _scale);
+            Font fBold  = _fBold  = new Font("Segoe UI", 3.7f * _scale, FontStyle.Bold);
+            Font fBtn   = _fBtn   = new Font("Segoe UI", 3.6f * _scale, FontStyle.Bold);
 
             Text            = "BCore PDM — Configuration Check";
             StartPosition   = FormStartPosition.CenterScreen;
@@ -168,6 +173,16 @@ namespace PDMLite
             AcceptButton = (IButtonControl)btnRename ?? btnSave;
             CancelButton = btnCancel;
             ClientSize   = new Size(cW, btnY + btnH + S(12));
+        }
+
+        protected override void Dispose(bool disposing)
+        {
+            if (disposing)
+            {
+                _fTitle?.Dispose(); _fBody?.Dispose();
+                _fBold?.Dispose(); _fBtn?.Dispose();
+            }
+            base.Dispose(disposing);
         }
     }
 }

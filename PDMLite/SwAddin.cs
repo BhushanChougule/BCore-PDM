@@ -839,13 +839,17 @@ namespace PDMLite
                                         // then the config, then the drawing's
                                         // VIEW references (which point at the
                                         // config BY NAME and must follow it).
-                                        if (m[2] != null &&
-                                            !RenameConfigDrawing(m[2], m[3]))
+                                        bool drawingRenamed = false;
+                                        if (m[2] != null)
                                         {
-                                            failed.Add(m[0] +
-                                                " (its drawing could not be " +
-                                                "renamed)");
-                                            continue;
+                                            if (!RenameConfigDrawing(m[2], m[3]))
+                                            {
+                                                failed.Add(m[0] +
+                                                    " (its drawing could not be " +
+                                                    "renamed)");
+                                                continue;
+                                            }
+                                            drawingRenamed = true;
                                         }
                                         try
                                         {
@@ -858,16 +862,37 @@ namespace PDMLite
                                             if (doc.GetConfigurationByName(m[1])
                                                     == null)
                                             {
+                                                // Config rename did NOT take — UNDO
+                                                // the drawing rename so the pair never
+                                                // diverges (drawing at the new name
+                                                // while the config keeps the old one).
+                                                if (drawingRenamed)
+                                                    RenameConfigDrawing(m[3], m[2]);
                                                 failed.Add(m[0]);
                                                 continue;
                                             }
                                         }
-                                        catch { failed.Add(m[0]); continue; }
-                                        if (m[2] != null)
-                                            RepointDrawingViews(
-                                                m[3], m[0], m[1]);
+                                        catch
+                                        {
+                                            if (drawingRenamed)
+                                                RenameConfigDrawing(m[3], m[2]);
+                                            failed.Add(m[0]);
+                                            continue;
+                                        }
+                                        // Repoint the drawing's views to the new
+                                        // config name, save-VERIFIED (TrySaveVerified
+                                        // per the house rule — a bare Save3 could
+                                        // silently leave the views on the old name).
+                                        bool repointed = m[2] == null ||
+                                            RepointDrawingViews(m[3], m[0], m[1]);
                                         performed.Add(
                                             new[] { m[0], m[1] });
+                                        if (!repointed)
+                                            failed.Add(m[0] +
+                                                " (config + drawing renamed, but its " +
+                                                "drawing's views could not be saved — " +
+                                                "open it and set the views to " +
+                                                m[1] + ")");
                                     }
                                     if (failed.Count > 0)
                                         SwApp.SendMsgToUser2(
@@ -1135,14 +1160,11 @@ namespace PDMLite
             return 0;
         }
 
-        // Config name sanitised for filename use — mirrors
-        // VaultManager.OpenOrCreateDrawing / DatabaseManager.SanitizeFileName.
-        private static string SafeCfgFileName(string cfgName)
-        {
-            var invalid = System.IO.Path.GetInvalidFileNameChars();
-            return new string((cfgName ?? "").Select(
-                ch => invalid.Contains(ch) ? '_' : ch).ToArray());
-        }
+        // Config name sanitised for filename use. Single-sources the rule through
+        // DatabaseManager.SanitizeFileName (was a 3rd copy of the same logic that
+        // could drift). null → "" so callers can null-check the result.
+        private static string SafeCfgFileName(string cfgName) =>
+            DatabaseManager.SanitizeFileName(cfgName ?? "");
 
         // Path of the config-specific drawing named after this config (model's
         // folder or any WIP division), or null. Rule 3.6's auto-rename either
@@ -1180,14 +1202,10 @@ namespace PDMLite
         {
             try
             {
-                bool wasOpen = false;
                 try
                 {
                     if (SwApp.GetOpenDocumentByName(oldPath) != null)
-                    {
-                        wasOpen = true;
                         SwApp.CloseDoc(oldPath);
-                    }
                 }
                 catch { }
 
@@ -1205,9 +1223,7 @@ namespace PDMLite
                 DatabaseManager.RenameFileRecord(oldPath, newPath,
                     CurrentUser);
                 // Deliberately NOT reopened here — RepointDrawingViews opens
-                // it at the new path after the config rename. (wasOpen only
-                // matters for the close above; the repoint step always
-                // opens-saves-closes regardless.)
+                // it at the new path after the config rename.
                 return true;
             }
             catch { return false; }
@@ -1217,7 +1233,7 @@ namespace PDMLite
         // the OLD config name — open the renamed drawing silently, repoint
         // every model view, save, close. Best-effort: a failure is reported
         // by the caller's summary only via the audit trail of the next save.
-        private static void RepointDrawingViews(string drwPath,
+        private static bool RepointDrawingViews(string drwPath,
             string oldCfg, string newCfg)
         {
             try
@@ -1229,7 +1245,7 @@ namespace PDMLite
                     "", ref e2, ref w2) as ModelDoc2;
                 if (drw == null)
                     drw = SwApp.GetOpenDocumentByName(drwPath) as ModelDoc2;
-                if (drw == null) return;
+                if (drw == null) return false;
 
                 var draw = drw as DrawingDoc;
                 if (draw != null)
@@ -1254,15 +1270,14 @@ namespace PDMLite
                     }
                 }
 
-                bool prev = SuppressSaveValidation;
-                SuppressSaveValidation = true;
-                try { drw.Save3(
-                        (int)swSaveAsOptions_e.swSaveAsOptions_Silent,
-                        0, 0); }
-                finally { SuppressSaveValidation = prev; }
+                // TrySaveVerified manages SuppressSaveValidation itself and
+                // consults the dirty flag, so a refused save is reported (not
+                // silently lost as a bare Save3's false-negative would be).
+                bool saved = VaultManager.TrySaveVerified(drw);
                 try { SwApp.CloseDoc(drwPath); } catch { }
+                return saved;
             }
-            catch { }
+            catch { return false; }
         }
 
         private void Block(string reason) =>

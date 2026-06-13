@@ -1811,6 +1811,12 @@ namespace PDMLite
             lock (_lock) using (AcquireProcessLock())
             {
                 var doc = LoadOrCreate();
+                // Only fall back to a FILENAME match for history entries when NO
+                // living WIP rival owns this name — otherwise an unrelated same-named
+                // file's timeline could be silently re-pointed. Same FindNameRival
+                // guard the codebase uses everywhere it matches history by basename
+                // (GetFileHistory / GetFileStatusByName / RemoveFileRecord).
+                bool nameRival = FindNameRival(doc, oldName, oldPath) != null;
                 bool changed = false;
                 foreach (var el in doc.Root.Element("Files").Elements("File"))
                 {
@@ -1826,8 +1832,9 @@ namespace PDMLite
                     string ep = (string)en.Element("FilePath") ?? "";
                     if (string.Equals(ep, oldPath,
                             StringComparison.OrdinalIgnoreCase) ||
-                        string.Equals(System.IO.Path.GetFileName(ep), oldName,
-                            StringComparison.OrdinalIgnoreCase))
+                        (!nameRival &&
+                         string.Equals(System.IO.Path.GetFileName(ep), oldName,
+                            StringComparison.OrdinalIgnoreCase)))
                     {
                         en.Element("FilePath").Value = newPath;
                         changed = true;
@@ -2016,7 +2023,7 @@ namespace PDMLite
         // Mirrors the sanitisation in VaultManager.OpenOrCreateDrawing: a config
         // name used as a drawing filename has Windows-illegal characters replaced
         // with '_'. Kept here so config→drawing lookup agrees with creation.
-        private static string SanitizeFileName(string name)
+        internal static string SanitizeFileName(string name)
         {
             if (string.IsNullOrEmpty(name)) return name;
             var invalid = System.IO.Path.GetInvalidFileNameChars();
@@ -2058,8 +2065,18 @@ namespace PDMLite
                         bool coversAll     = string.IsNullOrEmpty(refConfigs);
                         bool coversThis    = !coversAll && refConfigs
                             .Split(',')
-                            .Any(c => string.Equals(c.Trim(), configName,
-                                          StringComparison.OrdinalIgnoreCase));
+                            .Select(c => c.Trim())
+                            .Any(c => string.Equals(c, configName,
+                                          StringComparison.OrdinalIgnoreCase) ||
+                                      // Legacy records (saved before the flat-pattern
+                                      // filter) may store the raw "{config}SM-FLAT-
+                                      // PATTERN" name; tolerate it so the drawing still
+                                      // resolves (self-heals on the next save).
+                                      (c.EndsWith("SM-FLAT-PATTERN",
+                                          StringComparison.OrdinalIgnoreCase) &&
+                                       string.Equals(c.Substring(0, c.Length -
+                                          "SM-FLAT-PATTERN".Length), configName,
+                                          StringComparison.OrdinalIgnoreCase)));
                         if (coversAll || coversThis)
                         {
                             result.Add(fp);

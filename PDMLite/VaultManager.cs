@@ -160,13 +160,17 @@ namespace PDMLite
             // is refused (e.g. unsaved edits) or unavailable.
             if (openDoc != null)
             {
-                // ReloadOrReplace returns a VARIANT_BOOL surfaced as int by this
-                // interop (nonzero = reloaded). Zero-or-threw → fall back.
-                int reloadRc = 0;
+                // ReloadOrReplace returns a swReloadOrReplace STATUS int (this
+                // interop types it int — proven by the int-vs-bool compile error):
+                // 0 == swReloadOkay (reloaded read-write); ANY nonzero value is an
+                // error (write-access denied, not-changed, cancelled, …). So fall
+                // back to close+reopen ONLY when the reload did NOT succeed (nonzero)
+                // or threw — seed the sentinel nonzero so an exception triggers it.
+                int reloadRc = -1;
                 try { reloadRc = openDoc.ReloadOrReplace(false, filePath, true); }
-                catch { reloadRc = 0; }
+                catch { reloadRc = -1; }
 
-                if (reloadRc == 0 && reopenType >= 0)
+                if (reloadRc != 0 && reopenType >= 0)
                 {
                     try
                     {
@@ -1756,7 +1760,7 @@ namespace PDMLite
         // effectively succeeded; still dirty (e.g. file read-only on disk) =
         // genuine failure. EVERY internal Save3 call site must go through
         // this helper, or the false-negative abort bug comes back.
-        private static bool TrySaveVerified(ModelDoc2 doc)
+        internal static bool TrySaveVerified(ModelDoc2 doc)
         {
             bool ok;
             PDMLiteAddin.SuppressSaveValidation = true;
@@ -1918,6 +1922,8 @@ namespace PDMLite
                 foreach (string ap in parents)
                 {
                     string an = Path.GetFileName(ap);
+                    bool openHere = false;
+                    ModelDoc2 asm = null;
                     try
                     {
                         string st = DatabaseManager.GetFileStatus(ap);
@@ -1936,9 +1942,9 @@ namespace PDMLite
                             continue;
                         }
 
-                        bool openHere = PDMLiteAddin.SwApp
+                        openHere = PDMLiteAddin.SwApp
                             .GetOpenDocumentByName(ap) != null;
-                        ModelDoc2 asm = OpenByPath(ap);
+                        asm = OpenByPath(ap);
                         if (asm == null)
                         {
                             skipped.Add(an + " — could not open");
@@ -1982,6 +1988,12 @@ namespace PDMLite
                             }
                         }
 
+                        // Apply the ReferencedConfiguration change(s) so the save
+                        // persists them — without a rebuild SW may write the
+                        // assembly with the repoint NOT applied (silent no-op).
+                        if (fixedCount > 0)
+                            try { asm.EditRebuild3(); } catch { }
+
                         if (fixedCount == 0)
                         {
                             if (!openHere)
@@ -2009,6 +2021,10 @@ namespace PDMLite
                     catch (Exception ex)
                     {
                         skipped.Add(an + " — " + ex.Message);
+                        // Don't leak an assembly THIS method opened (can be
+                        // hundreds of MB) when a COM call threw mid-repair.
+                        if (!openHere && asm != null)
+                            try { PDMLiteAddin.SwApp.CloseDoc(ap); } catch { }
                     }
                 }
 
@@ -2101,6 +2117,12 @@ namespace PDMLite
                     var pcpm = doc.Extension.get_CustomPropertyManager(parent);
                     string[] names = pcpm?.GetNames() as string[];
                     if (names == null) continue;
+                    // Copy the RESOLVED parent value of every property onto the
+                    // derived flat-pattern config. That config is not user-managed
+                    // (its props are stale inherited copies), so mirroring all of
+                    // them — flattening any expression-linked parent prop to its
+                    // current literal — is intended: the flat-pattern sheet's title
+                    // block then shows the parent's current rev/PN/etc.
                     foreach (string p in names)
                         PropertyValidator.SetProperty(doc, p,
                             PropertyValidator.GetProperty(doc, p, parent), cfg);
@@ -2673,10 +2695,10 @@ namespace PDMLite
                             Path.Combine(ExportRoot, "BOM"),
                             pn + "-R" + targetLetter + "_BOM.csv");
                     }
-                    foreach (string dn in rbDrawingNos)
-                        MoveMatching(Path.Combine(ObsFolder, "PDF"),
-                            Path.Combine(ExportRoot, "PDF"),
-                            dn + " REV " + targetLetter + ".pdf");
+                    // The PDF is the DRAWING's deliverable, not the model's — it is
+                    // restored in Step 9 ONLY if the drawing is actually rolled back,
+                    // so a declined drawing rollback can't leave an old-rev PDF in
+                    // EXPORTS beside a new-rev drawing.
                 }
 
                 // ── Step 8: Update database ───────────────────────────────
@@ -2800,6 +2822,15 @@ namespace PDMLite
                             DatabaseManager.LockFile(drwTarget, user);
                             DatabaseManager.SetFileStatus(drwTarget, "Released",
                                 user, "Drawing rolled back to " + targetRev);
+
+                            // Now that the (shared) drawing is rolled back, restore
+                            // ITS target-rev PDF from ARCHIVE so EXPORTS matches the
+                            // drawing's rev (drawingNo = the model's active-config
+                            // DrawingNo = the shared drawing's number).
+                            if (!string.IsNullOrEmpty(drawingNo))
+                                MoveMatching(Path.Combine(ObsFolder, "PDF"),
+                                    Path.Combine(ExportRoot, "PDF"),
+                                    drawingNo + " REV " + targetLetter + ".pdf");
 
                             drwSummary = Path.GetFileName(drwTarget) +
                                 " → " + targetRev;
