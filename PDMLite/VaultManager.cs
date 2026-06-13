@@ -2666,8 +2666,10 @@ namespace PDMLite
                 {
                     foreach (string pn in rbPartNos)
                         CleanupExportsOnRollback(pn.Replace(".", ""), null, pn);
-                    foreach (string dn in rbDrawingNos)
-                        CleanupExportsOnRollback("", dn);
+                    // PDFs are the DRAWING's deliverable — archived AND restored in
+                    // Step 9 ONLY when the drawing is actually rolled back, so a
+                    // drawing that is NOT rolled back keeps its current PDF in EXPORTS
+                    // (archiving them here orphaned them in the warn/no-archive case).
                 }
 
                 // ── Step 7b: RESTORE the target revision's exports ────────
@@ -2827,13 +2829,22 @@ namespace PDMLite
                             DatabaseManager.SetFileStatus(drwTarget, "Released",
                                 user, "Drawing rolled back to " + targetRev);
 
-                            // Restore the drawing's target-rev PDF from ARCHIVE so
-                            // EXPORTS matches the drawing's rev (drawingNo = the
-                            // model's active-config DrawingNo = the shared drawing's).
-                            if (!string.IsNullOrEmpty(drawingNo))
+                            // The drawing is rolled back to the target rev, so bring
+                            // EVERY config's PDF to the target rev too: archive the
+                            // current PDF, then restore the target-rev one. Looping
+                            // rbDrawingNos (each config's DrawingNo) — not the single
+                            // active-config drawingNo — restores a MULTI-config model's
+                            // per-config PDFs, which the scalar missed (review finding).
+                            // Done HERE (not Step 7) so a non-rolled-back drawing keeps
+                            // its current PDF.
+                            foreach (string dn in rbDrawingNos)
+                            {
+                                if (string.IsNullOrEmpty(dn)) continue;
+                                CleanupExportsOnRollback("", dn);   // archive current
                                 MoveMatching(Path.Combine(ObsFolder, "PDF"),
                                     Path.Combine(ExportRoot, "PDF"),
-                                    drawingNo + " REV " + targetLetter + ".pdf");
+                                    dn + " REV " + targetLetter + ".pdf"); // restore target
+                            }
 
                             drwSummary = Path.GetFileName(drwTarget) +
                                 " → " + targetRev;
