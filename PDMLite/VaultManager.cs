@@ -2550,6 +2550,39 @@ namespace PDMLite
                         CleanupExportsOnRollback("", dn);
                 }
 
+                // ── Step 7b: RESTORE the target revision's exports ────────
+                // The revision being rolled back TO was released once — its
+                // deliverables sit in ARCHIVE (moved there when the newer rev
+                // released). They are current again: move them back to
+                // EXPORTS (found in PR-52 testing — rollback otherwise left a
+                // Released file with NO current deliverables). Exact-name
+                // patterns, one move per config identity. For a model, the
+                // PDF restore pairs with the drawing-rollback offer below —
+                // accepting it brings the drawing file to the same rev.
+                if (ext == ".slddrw")
+                {
+                    if (!string.IsNullOrEmpty(drawingNo))
+                        MoveMatching(Path.Combine(ObsFolder, "PDF"),
+                            Path.Combine(ExportRoot, "PDF"),
+                            drawingNo + " REV " + targetRev + ".pdf");
+                }
+                else
+                {
+                    foreach (string pn in rbPartNos)
+                    {
+                        MoveMatching(Path.Combine(ObsFolder, "STEP"),
+                            Path.Combine(ExportRoot, "STEP"),
+                            pn.Replace(".", "") + "-R" + targetRev + ".step");
+                        MoveMatching(Path.Combine(ObsFolder, "BOM"),
+                            Path.Combine(ExportRoot, "BOM"),
+                            pn + "-R" + targetRev + "_BOM.csv");
+                    }
+                    foreach (string dn in rbDrawingNos)
+                        MoveMatching(Path.Combine(ObsFolder, "PDF"),
+                            Path.Combine(ExportRoot, "PDF"),
+                            dn + " REV " + targetRev + ".pdf");
+                }
+
                 // ── Step 8: Update database ───────────────────────────────
                 DatabaseManager.LockFile(filePath, user);
                 DatabaseManager.SetFileStatus(filePath, "Released", user,
