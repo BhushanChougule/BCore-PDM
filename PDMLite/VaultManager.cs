@@ -160,11 +160,13 @@ namespace PDMLite
             // is refused (e.g. unsaved edits) or unavailable.
             if (openDoc != null)
             {
-                bool reloaded = false;
-                try { reloaded = openDoc.ReloadOrReplace(false, filePath, true); }
-                catch { reloaded = false; }
+                // ReloadOrReplace returns a VARIANT_BOOL surfaced as int by this
+                // interop (nonzero = reloaded). Zero-or-threw → fall back.
+                int reloadRc = 0;
+                try { reloadRc = openDoc.ReloadOrReplace(false, filePath, true); }
+                catch { reloadRc = 0; }
 
-                if (!reloaded && reopenType >= 0)
+                if (reloadRc == 0 && reopenType >= 0)
                 {
                     try
                     {
