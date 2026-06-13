@@ -58,18 +58,21 @@ namespace PDMLite
                 else
                 {
                     // Parts AND drawings: check the files THIS document
-                    // references (a part's external/derived references; a
-                    // drawing's referenced model) exist on disk. Read the
-                    // stored dependency tree from the path — the same proven
-                    // primitive GetUnreleasedComponentsByPath uses, which works
-                    // for every document type including drawings.
+                    // DIRECTLY references (a part's external/derived parents; a
+                    // drawing's referenced model) exist on disk.
+                    // traverseFlag=FALSE → TOP-LEVEL references only, NOT the
+                    // whole tree: a drawing's broken-ref is "is my model there?",
+                    // not "is every deep sub-part of my model there?" (that is
+                    // the model's OWN save-gate). Top-level also bounds the cost
+                    // — a drawing of a 5000-component assembly would otherwise
+                    // stat every unique sub-part on every save.
                     string path = doc.GetPathName();
                     if (!string.IsNullOrEmpty(path) &&
                         PDMLiteAddin.SwApp != null)
                     {
                         string selfNorm = Normalize(path);
                         object depsObj = PDMLiteAddin.SwApp
-                            .GetDocumentDependencies2(path, true, true, false);
+                            .GetDocumentDependencies2(path, false, true, false);
                         string[] deps = depsObj as string[];
                         if (deps != null)
                         {
