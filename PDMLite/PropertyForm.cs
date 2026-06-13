@@ -424,10 +424,20 @@ namespace PDMLite
                     Font = _inputFont,
                     Width = S(InputWidth),
                     Location = new Point(S(InputLeft), y),
-                    Format = DateTimePickerFormat.Short,
+                    // Pin the DISPLAY to the house convention too —
+                    // Format.Short rendered the machine locale's short date.
+                    Format = DateTimePickerFormat.Custom,
+                    CustomFormat = "MM/dd/yyyy",
                     Value = DateTime.Today
                 };
-                if (DateTime.TryParse(existing, out DateTime existDate))
+                // The stored value is invariant MM/dd/yyyy; parse it that way
+                // first so dd/MM locales can't swap day and month, with the
+                // old lenient parse kept as a legacy-value fallback.
+                if (DateTime.TryParseExact(existing, "MM/dd/yyyy",
+                        System.Globalization.CultureInfo.InvariantCulture,
+                        System.Globalization.DateTimeStyles.None,
+                        out DateTime existDate) ||
+                    DateTime.TryParse(existing, out existDate))
                     dtp.Value = existDate;
                 input = dtp;
             }
@@ -489,7 +499,12 @@ namespace PDMLite
         {
             if (ctrl is TextBox tb) return tb.Text.Trim();
             if (ctrl is ComboBox cb) return ComboValue(cb);
-            if (ctrl is DateTimePicker dtp) return dtp.Value.ToString("MM/dd/yyyy");
+            // InvariantCulture — "/" in a format string is the CULTURE's date
+            // separator, so a non-US locale wrote "06.13.2026"-style values
+            // into DrawnDate, breaking the MM/dd/yyyy house convention.
+            if (ctrl is DateTimePicker dtp) return dtp.Value.ToString(
+                "MM/dd/yyyy",
+                System.Globalization.CultureInfo.InvariantCulture);
             return "";
         }
 
