@@ -198,10 +198,12 @@ namespace PDMLite
             };
             this.Controls.Add(searchCard);
 
+            // Width leaves room for the Clear (S22) + Search (S48) buttons and
+            // the S(3) gap between them — see the button layout note below.
             _searchBox = new TextBox
             {
                 Font = fLabel,
-                Width = w - S(2) - S(53),
+                Width = w - S(2) - S(78),
                 Height = S(22),
                 Location = new Point(S(2), S(2)),
                 BorderStyle = BorderStyle.None,
@@ -222,13 +224,18 @@ namespace PDMLite
             };
             searchCard.Controls.Add(_searchBox);
 
+            // Clear ends at x+w-S(51); Search starts at x+w-S(48) — a real
+            // S(3) gap. The old positions overlapped by S(18) (Clear spanned
+            // up to x+w-S(30) UNDER Search's left 40%), and Clear, added
+            // first, was on top — so clicks on the left part of "Search"
+            // silently cleared the box instead (audit M12).
             Button btnClear = new Button
             {
                 Text = "✖",
                 Font = new Font("Segoe UI", 3.5f * _scale, FontStyle.Bold),
                 Width = S(22),
                 Height = S(24),
-                Location = new Point(x + w - S(52), y),
+                Location = new Point(x + w - S(73), y),
                 BackColor = cRed,
                 ForeColor = Color.White,
                 FlatStyle = FlatStyle.Flat,
@@ -1213,7 +1220,10 @@ namespace PDMLite
             {
                 string dateStr = "—";
                 if (DateTime.TryParse(entry.ChangedDate, out DateTime dt))
-                    dateStr = dt.ToString("dd/MM/yy HH:mm");
+                    // MM/dd like everywhere else — the panel rendered dd/MM,
+                    // contradicting the project-wide MM/dd/yyyy convention.
+                    dateStr = dt.ToString("MM/dd/yy HH:mm",
+                        System.Globalization.CultureInfo.InvariantCulture);
 
                 _historyPanel.Controls.Add(new Label
                 {
