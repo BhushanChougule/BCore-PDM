@@ -1,2 +1,13 @@
 .vs/
 .vsidx/
+
+# Build artifacts — never commit. Committing obj/ corrupts MSBuild's
+# incremental-build cache on pull (the cache no longer matches the source,
+# so a Build skips recompiling changed files and the stale DLL keeps loading
+# — found in PR-52: a fixed .cs change never reached the running add-in).
+# The compiled PDMLite.dll is a build OUTPUT; the vendored dependency DLLs
+# (PdfSharp.dll, System.Data.SQLite.dll) live at the project root and are
+# copied to bin on build, so they stay tracked there as source.
+PDMLite/obj/
+PDMLite/bin/Debug/PDMLite.dll
+PDMLite/bin/Debug/PDMLite.pdb
