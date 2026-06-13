@@ -60,6 +60,20 @@ namespace PDMLite
             _busy = true;
             this.Enabled = false;
             try { action(); }
+            catch (Exception ex)
+            {
+                // The action runs raw DB/VaultManager I/O (BulkApprove,
+                // RejectRequest, BulkRelease) from a Click handler on
+                // SOLIDWORKS' message loop — an N: blip mid-batch would
+                // otherwise throw unhandled here. One choke point covers every
+                // action button (audit H12).
+                MessageBox.Show(
+                    "The request could not be completed — the vault may be " +
+                    "unavailable.\n\nCheck the N: drive and try again.\n\n" +
+                    "Detail: " + ex.Message,
+                    "BCore PDM — Vault Unavailable",
+                    MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            }
             finally
             {
                 this.Enabled = true;
