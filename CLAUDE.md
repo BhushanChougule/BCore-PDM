@@ -274,6 +274,8 @@ Core vault operations.
 
 \- GetParentAssemblies(filePath) → scans tracked .sldasm files via GetDocumentDependencies2 (reads refs without opening); returns filenames of assemblies that reference the file. Best-effort — depends on stored ref paths matching vault path format
 
+\- GetWhereUsed(filePath) → PUBLIC, on-demand "where used": returns the tracked assemblies that DIRECTLY reference the file (traverse=FALSE → top-level components only, so the DIRECT-parent set — drill up by running it again on a parent), each as a WhereUsedEntry (Path/Name + PartNo/Revision/Status from the parent's vault record). Same disk-walk primitive + best-effort caveat as GetParentAssemblies; no UI/open needed. Used by WhereUsedForm. WhereUsedEntry is a top-level class in VaultManager.cs (like BatchResult).
+
 \- StartDrawingRevisionWith(modelPath, currentRev, nextRev, user) → archives the Released drawing at the old rev (matched pair), returns it to WIP, opens it silently to bump the Revision property to nextRev and save, then closes it. StartNewRevision reopens it if the user had it open. Drawing rev LETTER syncs to model immediately at New Revision time. A failed open, a refused Save3, or a THROWN failure (COM call rejected mid-operation — previously swallowed by an empty catch) is surfaced as a WARNING in the returned summary line (open the drawing and set the rev manually) instead of silently reporting success with a stale rev on disk; the thrown path also best-effort closes the silently-opened drawing.
 
 \- EvaluateAssemblyDrawings(doc, out blockers, out warnings) → per component: Toolbox skipped; drawing exists+not Released → blocker; no drawing + Manufactured → warning; no drawing + Purchased → skipped. Dedupes repeated instances
@@ -490,11 +492,17 @@ DPI-aware Form (S(v)=v\*\_scale, fonts = pt\*\_scale), ALL users (read-only). Op
 
 \- Double-click a row → OpenDeferred(FilePath): sets FileToOpen + DialogResult.OK + closes; the caller (TaskPaneControl.OpenDashboard) then VaultManager.OpenByPath(FileToOpen) AFTER the modal closes (opens the canonical WIP copy, read-only when Released). Deferred-open mirrors OpenRequestsPopup.
 
-\- ROW RIGHT-CLICK MENU (ContextMenuStrip, Grid_MouseDown on MouseButtons.Right): Open · Open Drawing/Open Model · Copy File Path · Open Containing Folder. HitTest finds the row, selects it, and the linked item flips Drawing↔Model by the row's extension. The linked path is resolved IN-MEMORY from \_all (FindLinkedPath, NO per-click DB/disk hit, honouring GetAllFiles' no-disk-per-file design): drawing→model uses the drawing's ReferencedModel link FIRST (so a config-specific {configName}.slddrw — whose basename differs from the model, e.g. DEMO.05.slddrw documenting "FILE 1.sldprt" config DEMO.05 — still resolves), then the shared {basename} convention; model→drawing prefers the shared {basename}.slddrw, else any drawing whose ReferencedModel points back. The item is disabled only when none exists. Open / Open linked go through OpenDeferred (same deferred-open as double-click); Copy File Path → Clipboard.SetText (swallows clipboard-busy); Open Containing Folder → explorer.exe /select,"path" (falls back to the directory, then a message). The menu is styled with a custom flat MenuRenderer + MenuColors (white drop-down, brand-blue hover, no image gutter, house font) instead of the dull grey OS menu. \_rowMenu disposed on FormClosed.
+\- ROW RIGHT-CLICK MENU (ContextMenuStrip, Grid_MouseDown on MouseButtons.Right): Open · Open Drawing/Open Model · Where Used… (models only — opens WhereUsedForm nested-modal showing the direct parent assemblies) · Copy File Path · Open Containing Folder. HitTest finds the row, selects it, and the linked item flips Drawing↔Model by the row's extension. The linked path is resolved IN-MEMORY from \_all (FindLinkedPath, NO per-click DB/disk hit, honouring GetAllFiles' no-disk-per-file design): drawing→model uses the drawing's ReferencedModel link FIRST (so a config-specific {configName}.slddrw — whose basename differs from the model, e.g. DEMO.05.slddrw documenting "FILE 1.sldprt" config DEMO.05 — still resolves), then the shared {basename} convention; model→drawing prefers the shared {basename}.slddrw, else any drawing whose ReferencedModel points back. The item is disabled only when none exists. Open / Open linked go through OpenDeferred (same deferred-open as double-click); Copy File Path → Clipboard.SetText (swallows clipboard-busy); Open Containing Folder → explorer.exe /select,"path" (falls back to the directory, then a message). The menu is styled with a custom flat MenuRenderer + MenuColors (white drop-down, brand-blue hover, no image gutter, house font) instead of the dull grey OS menu. \_rowMenu disposed on FormClosed.
 
 \- OPEN MODEL ON THE DRAWING'S CONFIG: "Open Model" on a config-specific drawing also lands the model on the configuration that drawing documents. DrawingConfigToOpen derives it from the drawing's ReferencedConfigs when that names a SINGLE config, else from a config-specific {configName}.slddrw filename (basename ≠ the model's); a shared/all-config drawing yields null (open at active config). It is carried out of the modal via FileToOpenConfig (alongside FileToOpen); TaskPaneControl.OpenDashboard, after VaultManager.OpenByPath, calls ModelDoc2.ShowConfiguration2(FileToOpenConfig) — best-effort, so a stale/illegal config name simply no-ops.
 
 \- "Export CSV" → SaveFileDialog → dumps the WHOLE filtered \_view (all pages, RFC-4180 Csv helper, headers + CellText per column). "Refresh" → re-runs GetAllFiles. "Close" → closes. Disposed on FormClosed: search debounce Timer, \_cellBold, \_pagerFont, \_summaryFont, \_summaryFontActive, \_summaryTip, \_rowMenu. Placeholder via Win32 EM_SETCUEBANNER (no PlaceholderText on .NET 4.8).
+
+
+
+\### WhereUsedForm.cs
+
+DPI-aware read-only Form (S(v)=v\*\_scale, own palette/CSV escaping per the one-form-one-file convention). Opened from the Vault Dashboard row right-click ("Where Used…", models only) — nested-modal ON TOP of the dashboard. Calls VaultManager.GetWhereUsed(path) in its ctor (on-demand disk walk, always current, no persisted index) and lists the DIRECT parent assemblies in a read-only DataGridView: Assembly / Part No / Rev / Status (Status colour-coded green/maroon/orange/grey). Empty → "Not used by any tracked assembly." Export CSV (RFC-4180 + formula-injection guard). Esc closes; fonts disposed on FormClosed; Fill-grid-first docking (house z-order convention). Drill up by running Where Used on a listed parent.
 
 
 
@@ -829,6 +837,8 @@ GetNextRevision() in VaultManager.cs handles this
 
 
 \## Completed Features
+
+\- Where Used (read-only): right-click a part/sub-assembly in the Vault Dashboard → "Where Used…" lists the assemblies that DIRECTLY reference it (VaultManager.GetWhereUsed — the same on-demand dependency-walk the release gate uses, always current, no persisted index), each with its Part No / Rev / Status; Export CSV for impact analysis; drill up by running it on a parent. (A persisted where-used index for scale is a roadmap follow-up.)
 
 \- Property enforcement on save (blocks save until all fields filled)
 

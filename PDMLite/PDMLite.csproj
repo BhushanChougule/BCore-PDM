@@ -97,6 +97,9 @@
       <SubType>Form</SubType>
     </Compile>
     <Compile Include="VaultManager.cs" />
+    <Compile Include="WhereUsedForm.cs">
+      <SubType>Form</SubType>
+    </Compile>
   </ItemGroup>
   <ItemGroup>
     <Content Include="System.Data.SQLite.dll">
