@@ -342,7 +342,17 @@ DPI-aware read-only Form (S(v)=v\*\_scale, own palette/CSV escaping per the one-
 
 \- DatabaseManager.GetBaselines(asmPath) loads all captured baselines (most recent first). A ComboBox "Release:" selector switches between revisions when an assembly has been released more than once; meta line shows PartNo · REV · ReleasedBy/Date. A read-only DataGridView lists Component / Part No / Rev / Status / Qty (Status colour-coded green/maroon/orange like the rest of the app); parts before sub-assemblies, alphabetical. Empty list → "No baselines captured yet" (assembly not released since the feature shipped).
 
-\- Export CSV (RFC-4180 + Excel formula-injection guard) dumps the selected baseline (assembly header rows + component rows). Esc closes; fonts disposed on FormClosed. Docking resolves by z-order so the Fill grid is added FIRST then the edge panels (house convention, cf. VaultDashboardForm).
+\- Export CSV (RFC-4180 + Excel formula-injection guard) dumps the selected baseline (assembly header rows + component rows). A "Compare…" button (enabled when ≥2 baselines exist) opens BaselineCompareForm. Esc closes; fonts disposed on FormClosed. Docking resolves by z-order so the Fill grid is added FIRST then the edge panels (house convention, cf. VaultDashboardForm).
+
+
+
+\### BaselineCompareForm.cs
+
+DPI-aware read-only Form (own palette/CSV escaping; opened from BaselineViewerForm's "Compare…" button, nested-modal on top of it). Diffs the child set between any TWO captured releases of an assembly — the core engineering-change question ("what changed between ASM-100 REV B and REV C?"). Pure data diff over the snapshots BaselineManager persisted at release (never live-read), so it is exact and always available.
+
+\- Two ComboBoxes (From / To, default From = the older of the two most recent, To = the newest) over DatabaseManager.GetBaselines(asmPath); a "Show unchanged" checkbox (off by default). Components are matched across the two snapshots by Path (filename fallback). Each row is classed Added (green) / Removed (maroon) / Changed (orange — revision and/or Qty differs) / Unchanged (grey), sorted Added→Removed→Changed→Unchanged then by name. Grid columns: Change / Component / Part No / Rev (from) / Rev (to) / Qty (shown "from → to" when it changed). A summary line counts "N added · M removed · K changed · U unchanged". Recompute() re-runs on any picker / checkbox change.
+
+\- Export CSV (RFC-4180 + formula-injection guard) dumps the visible diff (honours "Show unchanged"). Esc closes; fonts disposed on FormClosed; Fill-grid-first docking (house z-order convention).
 
 
 
@@ -856,7 +866,7 @@ GetNextRevision() in VaultManager.cs handles this
 
 \## Completed Features
 
-\- As-Released Baselines (assemblies): every assembly release auto-captures the EXACT resolved child file set + their released revisions into vault.xml <Baselines> (BaselineManager.CaptureAssemblyBaseline, called from ReleaseFile after the status flip; non-fatal like the BOM export). Append-only history — every release is kept, so "the precise file set of ASM-100 REV C" is always reconstructable (closes the biggest functional PDM gap). View read-only from the Vault Dashboard row right-click ("View As-Released Baseline", assembly rows) → BaselineViewerForm: a revision selector + a colour-coded Component/PartNo/Rev/Status/Qty grid + Export CSV. See FEATURE_ROADMAP.md for the sequenced plan that builds on this (reason-for-change, Obsolete state, where-used, indented BOM, property-wide search, check-out, subscriptions).
+\- As-Released Baselines (assemblies): every assembly release auto-captures the EXACT resolved child file set + their released revisions into vault.xml <Baselines> (BaselineManager.CaptureAssemblyBaseline, called from ReleaseFile after the status flip; non-fatal like the BOM export). Append-only history — every release is kept, so "the precise file set of ASM-100 REV C" is always reconstructable (closes the biggest functional PDM gap). View read-only from the Vault Dashboard row right-click ("View As-Released Baseline", assembly rows) → BaselineViewerForm: a revision selector + a colour-coded Component/PartNo/Rev/Status/Qty grid + Export CSV, and a "Compare…" button → BaselineCompareForm which diffs two releases (Added/Removed/Changed/Unchanged, with Rev and Qty deltas + CSV) — answers "what changed between REV B and REV C". See FEATURE_ROADMAP.md for the sequenced plan that builds on this (reason-for-change, Obsolete state, where-used, indented BOM, property-wide search, check-out, subscriptions).
 
 \- Property enforcement on save (blocks save until all fields filled)
 
