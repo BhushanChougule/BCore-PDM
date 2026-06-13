@@ -84,6 +84,9 @@ namespace PDMLite
         // Row right-click menu (Open / Open linked / Copy path / Open folder).
         private ContextMenuStrip _rowMenu;
         private ToolStripMenuItem _miOpen, _miOpenLinked, _miCopyPath, _miOpenFolder;
+        // "Where Used" — shown for models only (parts/sub-assemblies); read-only,
+        // all users. Toggled per-row in Grid_MouseDown.
+        private ToolStripMenuItem _miWhereUsed;
         private int _menuViewIndex = -1;  // ABSOLUTE _view index the menu was opened
                                           // on (not grid-relative): a page change
                                           // while the menu is up can't retarget it
@@ -401,11 +404,12 @@ namespace PDMLite
             };
             _miOpen       = new ToolStripMenuItem("Open", null, (s, e) => MenuOpen());
             _miOpenLinked = new ToolStripMenuItem("Open Drawing", null, (s, e) => MenuOpenLinked());
+            _miWhereUsed  = new ToolStripMenuItem("Where Used…", null, (s, e) => MenuWhereUsed());
             _miCopyPath   = new ToolStripMenuItem("Copy File Path", null, (s, e) => MenuCopyPath());
             _miOpenFolder = new ToolStripMenuItem("Open Containing Folder", null, (s, e) => MenuOpenFolder());
             _rowMenu.Items.AddRange(new ToolStripItem[]
             {
-                _miOpen, _miOpenLinked, new ToolStripSeparator(), _miCopyPath, _miOpenFolder
+                _miOpen, _miOpenLinked, _miWhereUsed, new ToolStripSeparator(), _miCopyPath, _miOpenFolder
             });
             foreach (ToolStripItem it in _rowMenu.Items)
                 it.Padding = new Padding(S(6), S(3), S(18), S(3));
@@ -1273,6 +1277,10 @@ namespace PDMLite
             _miOpenLinked.Text = isDrawing ? "Open Model" : "Open Drawing";
             _miOpenLinked.Enabled = !string.IsNullOrEmpty(_menuLinkedPath);
 
+            // Where Used applies to models only (a drawing isn't a component).
+            string ext = (Path.GetExtension(f.FileName ?? "") ?? "").ToLowerInvariant();
+            _miWhereUsed.Visible = ext == ".sldprt" || ext == ".sldasm";
+
             _rowMenu.Show(_grid, e.Location);
         }
 
@@ -1364,6 +1372,25 @@ namespace PDMLite
         {
             var f = MenuRow();
             if (f != null) OpenDeferred(f.FilePath);
+        }
+
+        // Show which assemblies directly reference this file (read-only, on
+        // demand). Opens ON TOP of the dashboard (nested modal) — not a deferred
+        // open — so the dashboard stays put underneath.
+        private void MenuWhereUsed()
+        {
+            var f = MenuRow();
+            if (f == null) return;
+            try
+            {
+                using (var v = new WhereUsedForm(f.FilePath, f.FileName))
+                    v.ShowDialog(this);
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show("Could not open Where Used:\n" + ex.Message,
+                    "BCore PDM", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            }
         }
 
         private void MenuOpenLinked()
