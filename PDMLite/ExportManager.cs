@@ -40,10 +40,11 @@ namespace PDMLite
             }
             if (docType == (int)swDocumentTypes_e.swDocPART)
             {
-                // Part → STEP + flat pattern DXF (sheet metal only, best-effort)
+                // Part → STEP + flat pattern DXF (sheet metal only, best-effort).
+                // DXF shares the STEP's stamp name ({partNoNoDots}-R{rev}.dxf) so
+                // the archive/rollback/scrap globs mirror STEP exactly.
                 bool ok = ExportFile(doc, Path.Combine(stepFolder, stamp + ".step"));
-                ExportFlatPattern(doc, Path.Combine(dxfFolder,
-                    stamp + "_FLAT.dxf"));
+                ExportFlatPattern(doc, Path.Combine(dxfFolder, stamp + ".dxf"));
                 return ok;
             }
             if (docType == (int)swDocumentTypes_e.swDocASSEMBLY)
@@ -72,7 +73,7 @@ namespace PDMLite
         {
             string dxfFolder = Path.Combine(exportRoot, "DXF");
             Directory.CreateDirectory(dxfFolder);
-            ExportFlatPattern(doc, Path.Combine(dxfFolder, stamp + "_FLAT.dxf"));
+            ExportFlatPattern(doc, Path.Combine(dxfFolder, stamp + ".dxf"));
         }
 
         // ── Top-level BOM (assemblies only) ───────────────────────────────────
@@ -487,35 +488,12 @@ namespace PDMLite
         // DXF and never fails the release (the STEP is the primary part export).
         private static void ExportFlatPattern(ModelDoc2 doc, string outPath)
         {
-            // ── TEMP DIAG (remove after PR-52) ────────────────────────────
-            // The DXF export is best-effort + swallows all errors, so when no
-            // DXF appears we are blind to WHY. This dump surfaces the feature
-            // type names, the sheet-metal detection result, and the
-            // ExportToDWG2 outcome (return value, file-on-disk, or exception).
-            var diagNames = new List<string>();
-            string diagStage = "start";
             try
             {
-                // Walk the full top-level feature tree by hand (FirstFeature/
-                // GetNextFeature) so the dump shows EVERY type name regardless of
-                // how GetFeatures behaves.
-                try
-                {
-                    Feature ft = (Feature)doc.FirstFeature();
-                    while (ft != null)
-                    {
-                        string tn = "";
-                        try { tn = ft.GetTypeName2(); } catch { }
-                        diagNames.Add(tn);
-                        ft = (Feature)ft.GetNextFeature();
-                    }
-                }
-                catch { }
-
                 // Only sheet metal parts have a flat pattern — scan the feature
                 // tree for the SheetMetal feature (same guard as before).
                 object[] features = (object[])doc.FeatureManager.GetFeatures(true);
-                if (features == null) { diagStage = "GetFeatures null"; ShowDxfDiag(diagStage, diagNames, outPath, null, null); return; }
+                if (features == null) return;
 
                 bool hasSheetMetal = false;
                 foreach (object f in features)
@@ -526,10 +504,10 @@ namespace PDMLite
                         break;
                     }
                 }
-                if (!hasSheetMetal) { diagStage = "no SheetMetal feature"; ShowDxfDiag(diagStage, diagNames, outPath, null, null); return; }
+                if (!hasSheetMetal) return;
 
                 PartDoc part = doc as PartDoc;
-                if (part == null) { diagStage = "not a PartDoc"; ShowDxfDiag(diagStage, diagNames, outPath, null, null); return; }
+                if (part == null) return;
 
                 // 12-double alignment (origin + X/Y/Z axes). SOLIDWORKS ignores it
                 // for sheet-metal flat-pattern exports, but the argument must be a
@@ -543,8 +521,7 @@ namespace PDMLite
                 const int FlatPatternGeometry = 1;
                 const int BendLines = 4;
 
-                diagStage = "calling ExportToDWG2";
-                bool ok = part.ExportToDWG2(
+                part.ExportToDWG2(
                     outPath,
                     doc.GetPathName(),
                     (int)swExportToDWG_e.swExportToDWG_ExportSheetMetal,
@@ -554,32 +531,6 @@ namespace PDMLite
                     false,
                     FlatPatternGeometry | BendLines,
                     null);
-                ShowDxfDiag("ExportToDWG2 done", diagNames, outPath, ok, null);
-            }
-            catch (System.Exception ex)
-            {
-                ShowDxfDiag(diagStage + " — EXCEPTION", diagNames, outPath, null, ex.Message);
-            }
-        }
-
-        // TEMP DIAG helper (remove after PR-52).
-        private static void ShowDxfDiag(string stage, List<string> featureNames,
-            string outPath, bool? exportReturn, string exceptionMsg)
-        {
-            try
-            {
-                string msg =
-                    "DXF FLAT-PATTERN DIAG\n\n" +
-                    "Stage: " + stage + "\n\n" +
-                    "Top-level features (" + featureNames.Count + "):\n" +
-                    string.Join(", ", featureNames) + "\n\n" +
-                    "Out path: " + outPath + "\n" +
-                    "ExportToDWG2 returned: " +
-                        (exportReturn.HasValue ? exportReturn.Value.ToString() : "(not called)") + "\n" +
-                    "File exists after: " +
-                        (File.Exists(outPath) ? "YES" : "no") + "\n" +
-                    (exceptionMsg != null ? "Exception: " + exceptionMsg : "");
-                System.Windows.Forms.MessageBox.Show(msg, "BCore PDM — DXF Diagnostics");
             }
             catch { }
         }

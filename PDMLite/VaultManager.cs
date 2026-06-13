@@ -466,6 +466,7 @@ namespace PDMLite
                 string stepExport = Path.Combine(ExportRoot, "STEP");
                 string pdfExport = Path.Combine(ExportRoot, "PDF");
                 string bomExport = Path.Combine(ExportRoot, "BOM");
+                string dxfExport = Path.Combine(ExportRoot, "DXF");
 
                 string partNoClean = (partNo ?? "").Replace(".", "");
                 if (!string.IsNullOrEmpty(partNoClean) &&
@@ -475,6 +476,20 @@ namespace PDMLite
                     foreach (string f in Directory.GetFiles(
                         stepExport, partNoClean + "-R*.step"))
                         if (stepFilter.IsMatch(Path.GetFileName(f)))
+                            MoveToScrap(f);
+                }
+
+                // DXF (sheet-metal flat pattern): {partNoClean}-R{rev}.dxf —
+                // same naming as STEP. Without this a retired sheet-metal part's
+                // flat-pattern DXF was left in EXPORTS forever (same leak the BOM
+                // had before it was scrapped here).
+                if (!string.IsNullOrEmpty(partNoClean) &&
+                    Directory.Exists(dxfExport))
+                {
+                    var dxfFilter = ExportNameFilter(partNoClean, "-R", ".dxf");
+                    foreach (string f in Directory.GetFiles(
+                        dxfExport, partNoClean + "-R*.dxf"))
+                        if (dxfFilter.IsMatch(Path.GetFileName(f)))
                             MoveToScrap(f);
                 }
 
@@ -2319,6 +2334,14 @@ namespace PDMLite
                         fileIdentifier + "-R*.step",
                         ExportNameFilter(fileIdentifier, "-R", ".step"));
 
+                // DXF (sheet-metal flat pattern): {partNoClean}-R{rev}.dxf —
+                // same stamp as the STEP, so the same anchored glob + filter.
+                if (!isDrawing)
+                    MoveMatching(Path.Combine(ExportRoot, "DXF"),
+                        Path.Combine(ObsFolder, "DXF"),
+                        fileIdentifier + "-R*.dxf",
+                        ExportNameFilter(fileIdentifier, "-R", ".dxf"));
+
                 // PDF: {drawingNo} REV {rev}.pdf. fileIdentifier is the
                 // DrawingNo for drawings, dot-stripped PartNo otherwise (a
                 // model's PDF only matches when its DrawingNo equals it).
@@ -2602,6 +2625,9 @@ namespace PDMLite
                         MoveMatching(Path.Combine(ObsFolder, "STEP"),
                             Path.Combine(ExportRoot, "STEP"),
                             pn.Replace(".", "") + "-R" + targetLetter + ".step");
+                        MoveMatching(Path.Combine(ObsFolder, "DXF"),
+                            Path.Combine(ExportRoot, "DXF"),
+                            pn.Replace(".", "") + "-R" + targetLetter + ".dxf");
                         MoveMatching(Path.Combine(ObsFolder, "BOM"),
                             Path.Combine(ExportRoot, "BOM"),
                             pn + "-R" + targetLetter + "_BOM.csv");
@@ -3800,6 +3826,12 @@ namespace PDMLite
                     MoveMatching(Path.Combine(ExportRoot, "STEP"),
                         Path.Combine(ObsFolder, "STEP"), partNoClean + "-R*.step",
                         ExportNameFilter(partNoClean, "-R", ".step"));
+
+                // DXF (sheet-metal flat pattern): {partNoClean}-R{rev}.dxf.
+                if (!string.IsNullOrEmpty(partNoClean))
+                    MoveMatching(Path.Combine(ExportRoot, "DXF"),
+                        Path.Combine(ObsFolder, "DXF"), partNoClean + "-R*.dxf",
+                        ExportNameFilter(partNoClean, "-R", ".dxf"));
 
                 // PDFs matching drawing number: {drawingNo} REV {rev}.pdf.
                 if (!string.IsNullOrEmpty(drawingNo))

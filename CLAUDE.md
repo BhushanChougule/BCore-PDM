@@ -66,11 +66,15 @@ N:\\PDM-SolidWorks\\
 
 \- ARCHIVE\\STEP\\          → archived STEP exports
 
+\- ARCHIVE\\DXF\\           → archived sheet-metal flat-pattern DXFs
+
 \- ARCHIVE\\BOM\\           → archived assembly BOM CSVs
 
 \- EXPORTS\\PDF\\           → current released PDFs
 
 \- EXPORTS\\STEP\\          → current released STEP files
+
+\- EXPORTS\\DXF\\           → current released sheet-metal flat-pattern DXFs ({PartNoNoDots}-R{Rev}.dxf, one per sheet-metal part release)
 
 \- EXPORTS\\BOM\\           → current released assembly BOM CSVs (top-level, one per assembly release)
 
@@ -111,6 +115,8 @@ PartNo, DrawingNo, Description, DrawnBy, DrawnDate, Material1, FinishType, Revis
 \## File Naming Conventions
 
 \- Part STEP: {PartNoNoDots}-R{Rev}.step  e.g. TEST02-RA.step
+
+\- Part flat-pattern DXF (sheet metal): {PartNoNoDots}-R{Rev}.dxf  e.g. TEST02-RA.dxf — SAME stem as the STEP (no "_FLAT" suffix) so it archives/rolls back/scraps via the same globs
 
 \- Drawing PDF: {DrawingNo} REV {Rev}.pdf  e.g. TEST-02 REV A.pdf
 
@@ -288,7 +294,7 @@ Core vault operations.
 
 \- RemoveFromVault(doc) → Master only; retires the active file — MOVES its WIP copy, RELEASED snapshot and exports (STEP + PDF + BOM) to SCRAP (timestamped) and deletes the vault record; BLOCKED while Released (Unlock/New Revision first); MULTI-CONFIG AWARE: exports are scrapped for EVERY configuration's PartNo + DrawingNo (not just the active config's — exports are named per config, so the active numbers alone left other configs' stale "current" deliverables in EXPORTS), and ALL associated drawings are scrapped — the shared {basename}.slddrw (FindDrawingPath) plus every config-specific drawing (GetDrawingsForConfig per config), deduped by filename preferring the canonical WIP path; drawings are ALWAYS scrapped automatically (even if Released — a drawing without its model is blank and useless); when the RETIRED FILE ITSELF is a drawing, its DrawingNo is read from the referenced model via GetDrawingNo (filename fallback) — the drawing's own property is typically empty, which left the retired drawing's released PDF in EXPORTS forever; confirmation dialog lists all drawings AND warns when parent assemblies reference the file (GetParentAssemblies, best-effort — warn not block, same pattern as New Revision/Rollback; removing a referenced component breaks those assemblies on next open); audit-logged per file. Orphans are NOT handled here (can't open a deleted file) — SearchFiles auto-purges them instead
 
-\- MoveToScrap(filePath) → moves one file to SCRAP with a yyyyMMdd_HHmmss suffix (clears read-only first; no-op if missing). ScrapExports(partNo, drawingNo) → moves matching STEP (by dotless partNo) + PDF (by drawingNo) + BOM CSV (by raw partNo) exports to SCRAP, each via anchored glob + ExportNameFilter so retiring TEST02 can never scrap TEST021's deliverables
+\- MoveToScrap(filePath) → moves one file to SCRAP with a yyyyMMdd_HHmmss suffix (clears read-only first; no-op if missing). ScrapExports(partNo, drawingNo) → moves matching STEP (by dotless partNo) + DXF (by dotless partNo, sheet-metal flat pattern) + PDF (by drawingNo) + BOM CSV (by raw partNo) exports to SCRAP, each via anchored glob + ExportNameFilter so retiring TEST02 can never scrap TEST021's deliverables
 
 \- RequestRevision(doc), RequestUnlock(doc), RequestRelease(doc) → Engineer requests with note dialog
 
@@ -314,9 +320,9 @@ Core vault operations.
 
 \- SetReadOnly(path, bool) → sets/removes OS-level FileAttributes.ReadOnly
 
-\- ArchiveOldExports(archiveId, isDrawing, bomIdentifier=null) → moves old STEP (non-drawings), PDF (all), and BOM CSV (non-drawings, by raw PartNo) to archive before release. All three go through MoveMatching as INDEPENDENT operations — a failure archiving one type can never skip the others. Globs are ANCHORED to the export naming conventions ({id}-R*.step, {id} REV *.pdf, {id}-R*_BOM.csv) and paired with an ExportNameFilter regex — a bare "{id}*.step" prefix glob silently archived OTHER parts' current exports whenever one part number started with another (releasing TEST02 swept TEST021's deliverables)
+\- ArchiveOldExports(archiveId, isDrawing, bomIdentifier=null) → moves old STEP (non-drawings), DXF (non-drawings, sheet-metal flat pattern), PDF (all), and BOM CSV (non-drawings, by raw PartNo) to archive before release. All go through MoveMatching as INDEPENDENT operations — a failure archiving one type can never skip the others. Globs are ANCHORED to the export naming conventions ({id}-R*.step, {id}-R*.dxf, {id} REV *.pdf, {id}-R*_BOM.csv) and paired with an ExportNameFilter regex — a bare "{id}*.step" prefix glob silently archived OTHER parts' current exports whenever one part number started with another (releasing TEST02 swept TEST021's deliverables)
 
-\- CleanupExportsOnRollback(partNoClean, drawingNo, rawPartNo=null) → moves all exports (STEP/PDF/BOM) to archive on rollback; same anchored-glob + ExportNameFilter matching as ArchiveOldExports
+\- CleanupExportsOnRollback(partNoClean, drawingNo, rawPartNo=null) → moves all exports (STEP/DXF/PDF/BOM) to archive on rollback; same anchored-glob + ExportNameFilter matching as ArchiveOldExports
 
 \- ExportNameFilter(identifier, sep, suffix) → private helper; builds the exact-name regex "^{id}{sep}[A-Za-z0-9]+{suffix}$" (case-insensitive) paired with every export glob. Even an anchored glob is still a prefix match ("{id}-R*.step" matches part TEST02-R1's "TEST02-R1-RA.step"); pinning the revision token to letters/digits means exactly "{identifier}{sep}{rev}{suffix}" survives and nothing else. Also post-filters RollbackRevision's ARCHIVE scan ("{name} REV *{ext}") so a file named "Bracket" never lists "Bracket REV PLATE"'s archives
 
@@ -330,7 +336,7 @@ Core vault operations.
 
 \- ExportStepOnly(doc, exportRoot, stamp) → exports STEP only; active config at call time = exported geometry. Called once per config in the multi-config release loop. Returns BOOL (same success contract as ExportAll); ReleaseFile collects per-config failures and aborts listing them all
 
-\- ExportFlatPatternOnly(doc, exportRoot, stamp) → exports flat-pattern DXF only; called once for the original active config after the multi-config STEP loop. Both DXF paths (this and ExportAll's part branch) go through ExportFlatPattern, which detects sheet metal (feature tree scan for the "SheetMetal" feature) then exports via the DEDICATED IPartDoc.ExportToDWG2(swExportToDWG_ExportSheetMetal, options=geometry|bendlines) — NOT a generic Extension.SaveAs(".dxf", null), which relied on the machine's last-used DXF options and produced NO flat-pattern DXF in silent mode (found in PR-52 testing). ExportToDWG2 flattens and writes the flat pattern directly (no intermediate drawing, independent of active config + registry settings). Output: EXPORTS\DXF\{stamp}_FLAT.dxf. Best-effort — a DXF failure never fails a release
+\- ExportFlatPatternOnly(doc, exportRoot, stamp) → exports flat-pattern DXF only; called once for the original active config after the multi-config STEP loop. Both DXF paths (this and ExportAll's part branch) go through ExportFlatPattern, which detects sheet metal (feature tree scan for the "SheetMetal" feature) then exports via the DEDICATED IPartDoc.ExportToDWG2(swExportToDWG_ExportSheetMetal, options=geometry|bendlines) — NOT a generic Extension.SaveAs(".dxf", null), which relied on the machine's last-used DXF options and produced NO flat-pattern DXF in silent mode (found in PR-52 testing). ExportToDWG2 flattens and writes the flat pattern directly (no intermediate drawing, independent of active config + registry settings). Output: EXPORTS\DXF\{stamp}.dxf where stamp = {PartNoNoDots}-R{Rev} (SAME stem as the STEP, no "_FLAT" suffix), so the DXF is archived/cleaned/restored/scrapped by the same anchored "{partNoClean}-R*.dxf" globs as the STEP (ArchiveOldExports, CleanupExportsOnRollback, rollback Step 7b restore, ScrapExports all handle DXF alongside STEP). Best-effort — a DXF failure never fails a release
 
 \- ExportDrawingPdf(doc, outPath) → drawing to PDF (all sheets); called by ExportAll which immediately follows with StampWatermark. SUPPRESSES SOLIDWORKS' own "View PDF after publishing" auto-open via ExportPdfData.ViewPdfAfterSaving=false (that setting would launch the viewer on the UN-watermarked file DURING SaveAs, before we can stamp). Preserves all-sheets export by SetSheets(swExportData_ExportAllSheets, GetSheetNames()). Falls back to null export data (original behaviour) if the export data can't be obtained, wrapped in try/catch so the export never fails over this.
 
@@ -806,7 +812,7 @@ blocker dialogs still show.
 
 scan ARCHIVE\\{type}\\ for matching files → show RollbackDialog →
 
-archive current → CLOSE the doc (an open drawing first — it holds a reference; SOLIDWORKS holds the open file's handle, so restoring over the ACTIVE file always failed with a sharing violation; restore retries 5×300ms while SW releases the handle; doc properties are captured BEFORE the close) → restore selected → update RELEASED folder → cleanup exports (PER-CONFIG for models — rollback reverts ALL configurations, so every config's PartNo/DrawingNo exports are archived, not just the active config's; a DRAWING rollback cleans only its PDF, with DrawingNo read from the referenced model like the release export naming — the drawing's own properties are typically empty) → RESTORE the target rev's exports from ARCHIVE back to EXPORTS (exact-name moves per config identity — they were archived when the newer rev released and are current again; without this a rolled-back Released file had NO current deliverables) → SYNC THE RECORD from the restored file (reopen read-only, read PartNo/Description/Revision + per-config entries, UpsertFile with empty Status to preserve Released, close) — record identity fields are written at SAVE time and a rolled-back file is Released (saves blocked), so search/dashboard otherwise showed the PRE-rollback identity forever →
+archive current → CLOSE the doc (an open drawing first — it holds a reference; SOLIDWORKS holds the open file's handle, so restoring over the ACTIVE file always failed with a sharing violation; restore retries 5×300ms while SW releases the handle; doc properties are captured BEFORE the close) → restore selected → update RELEASED folder → cleanup exports (PER-CONFIG for models — rollback reverts ALL configurations, so every config's STEP/DXF/PDF/BOM exports are archived, not just the active config's; a DRAWING rollback cleans only its PDF, with DrawingNo read from the referenced model like the release export naming — the drawing's own properties are typically empty) → RESTORE the target rev's exports from ARCHIVE back to EXPORTS (exact-name moves per config identity: STEP + DXF + BOM by PartNo, PDF by DrawingNo, all at the bare targetLetter — they were archived when the newer rev released and are current again; without this a rolled-back Released file had NO current deliverables) → SYNC THE RECORD from the restored file (reopen read-only, read PartNo/Description/Revision + per-config entries, UpsertFile with empty Status to preserve Released, close) — record identity fields are written at SAVE time and a rolled-back file is Released (saves blocked), so search/dashboard otherwise showed the PRE-rollback identity forever →
 
 set read-only → update DB → if a matching drawing archive exists at the target rev,
 
