@@ -3743,7 +3743,13 @@ namespace PDMLite
                 SolidWorks.Interop.sldworks.View v =
                     (SolidWorks.Interop.sldworks.View)sheet.GetNextView();
                 if (v == null) return "";
-                return v.ReferencedConfiguration ?? "";
+                // A sheet-metal drawing's first view may be the FLAT PATTERN,
+                // which references the auto-generated "{parent}SM-FLAT-PATTERN"
+                // config — that derived config holds a STALE inherited rev/PN, so
+                // resolve it to the real parent config (PR-52: a sheet-metal
+                // drawing released at the model's OLD rev because of this).
+                return PropertyValidator.ParentConfigOf(
+                    v.ReferencedConfiguration ?? "");
             }
             catch { return ""; }
         }
@@ -3791,7 +3797,12 @@ namespace PDMLite
                     (SolidWorks.Interop.sldworks.View)sheet.GetNextView();
                 while (v != null)
                 {
-                    string cfg = v.ReferencedConfiguration;
+                    // Map a flat-pattern view's "{parent}SM-FLAT-PATTERN" config
+                    // to the real parent config so the stored ReferencedConfigs
+                    // stay consistent with GetConfigNames (which filters the
+                    // flat-pattern config out) — drawing↔config mapping keys on it.
+                    string cfg = PropertyValidator.ParentConfigOf(
+                        v.ReferencedConfiguration);
                     if (!string.IsNullOrEmpty(cfg)) configs.Add(cfg);
                     v = (SolidWorks.Interop.sldworks.View)v.GetNextView();
                 }
