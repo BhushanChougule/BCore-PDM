@@ -816,9 +816,7 @@ scan ARCHIVE\\{type}\\ for matching files → show RollbackDialog →
 
 archive current → CLOSE the doc (an open drawing first — it holds a reference; SOLIDWORKS holds the open file's handle, so restoring over the ACTIVE file always failed with a sharing violation; restore retries 5×300ms while SW releases the handle; doc properties are captured BEFORE the close) → restore selected → update RELEASED folder → cleanup exports (PER-CONFIG for models — rollback reverts ALL configurations, so every config's STEP/DXF/PDF/BOM exports are archived, not just the active config's; a DRAWING rollback cleans only its PDF, with DrawingNo read from the referenced model like the release export naming — the drawing's own properties are typically empty) → RESTORE the target rev's exports from ARCHIVE back to EXPORTS (exact-name moves per config identity: STEP + DXF + BOM by PartNo, PDF by DrawingNo, all at the bare targetLetter — they were archived when the newer rev released and are current again; without this a rolled-back Released file had NO current deliverables) → SYNC THE RECORD from the restored file (reopen read-only, read PartNo/Description/Revision + per-config entries, UpsertFile with empty Status to preserve Released, close) — record identity fields are written at SAVE time and a rolled-back file is Released (saves blocked), so search/dashboard otherwise showed the PRE-rollback identity forever →
 
-set read-only → update DB → if a matching drawing archive exists at the target rev,
-
-offer to roll the drawing back too (archives current drawing, restores, updates RELEASED) →
+set read-only → update DB → AUTOMATICALLY roll the matching drawing back too (no prompt — a released model+drawing are one deliverable and BCore couples their rev, same as New Revision's auto-sync): when a drawing archive exists at the target rev, archive the current drawing, restore it, update RELEASED, restore its PDF; when a drawing EXISTS but has NO archive at the target rev, show a WARNING (its rev will not match — fix manually) instead of a silent mismatch; no drawing at all = no-op →
 
 warn about parent assemblies
 
@@ -922,7 +920,7 @@ GetNextRevision() in VaultManager.cs handles this
 
 \- PartType property (Manufactured | Purchased, default Manufactured) on parts and assemblies
 
-\- Drawing/Assembly revision linkage: New Revision auto-starts the matching drawing revision and warns about parent assemblies; Rollback offers to roll the drawing back too
+\- Drawing/Assembly revision linkage: New Revision auto-starts the matching drawing revision and warns about parent assemblies; Rollback AUTOMATICALLY rolls the matching drawing back too (no prompt — keeps part+drawing at the same rev, like New Revision; warns if the drawing has no archive at the target rev rather than leaving a silent mismatch)
 
 \- Assembly drawing-release gate: component drawings must be Released before the assembly (Manufactured-with-no-drawing warns + override; Purchased/Toolbox skipped)
 

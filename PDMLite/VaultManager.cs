@@ -2770,35 +2770,34 @@ namespace PDMLite
                 }
                 catch { }
 
-                // ── Step 9: Offer to roll back the matching drawing ───────
-                // Drawings are archived as a matched pair with the model, so a
-                // drawing archive at the same revision should exist if one was
-                // ever released. Restoring it keeps part + drawing consistent.
-                // Skipped when THIS file is itself a drawing (already restored).
-                string drwSummary = ext == ".slddrw"
-                    ? "n/a (this file is a drawing)"
-                    : "no matching drawing archive found";
+                // ── Step 9: Roll the matching drawing back AUTOMATICALLY ──
+                // A released model + drawing are ONE deliverable and BCore couples
+                // their revision (the part drives the drawing — New Revision already
+                // auto-syncs it with no prompt), so a model rollback rolls its
+                // drawing back too, automatically. The ONLY non-rollback case is "no
+                // archived drawing at the target rev" while a drawing exists — that
+                // can't be auto-synced, so it is surfaced as a WARNING (never a
+                // silent rev mismatch). Skipped when THIS file is itself a drawing
+                // (already restored) or the model simply has no drawing.
+                string drwSummary;
                 string drwArchiveDir = Path.Combine(ObsFolder, "DRAWINGS");
                 string drwArchiveFile = Path.Combine(drwArchiveDir,
                     fileName + " REV " + targetLetter + ".slddrw");
 
-                if (ext != ".slddrw" && File.Exists(drwArchiveFile))
+                if (ext == ".slddrw")
                 {
-                    var drwChoice = MessageBox.Show(
-                        "A matching drawing archive was found:\n" +
-                        Path.GetFileName(drwArchiveFile) + "\n\n" +
-                        "Roll the drawing back to " + targetRev + " as well?",
-                        "BCore PDM — Roll Back Drawing",
-                        MessageBoxButtons.YesNo, MessageBoxIcon.Question);
+                    drwSummary = "n/a (this file is a drawing)";
+                }
+                else
+                {
+                    string drwTarget = FindDrawingPath(filePath) ??
+                        Path.Combine(Path.GetDirectoryName(filePath),
+                            fileName + ".slddrw");
 
-                    if (drwChoice == DialogResult.Yes)
+                    if (File.Exists(drwArchiveFile))
                     {
                         try
                         {
-                            string drwTarget = FindDrawingPath(filePath) ??
-                                Path.Combine(Path.GetDirectoryName(filePath),
-                                    fileName + ".slddrw");
-
                             // Archive the current drawing before overwriting it
                             // (collision-safe, same rationale as the model above).
                             if (File.Exists(drwTarget))
@@ -2828,10 +2827,9 @@ namespace PDMLite
                             DatabaseManager.SetFileStatus(drwTarget, "Released",
                                 user, "Drawing rolled back to " + targetRev);
 
-                            // Now that the (shared) drawing is rolled back, restore
-                            // ITS target-rev PDF from ARCHIVE so EXPORTS matches the
-                            // drawing's rev (drawingNo = the model's active-config
-                            // DrawingNo = the shared drawing's number).
+                            // Restore the drawing's target-rev PDF from ARCHIVE so
+                            // EXPORTS matches the drawing's rev (drawingNo = the
+                            // model's active-config DrawingNo = the shared drawing's).
                             if (!string.IsNullOrEmpty(drawingNo))
                                 MoveMatching(Path.Combine(ObsFolder, "PDF"),
                                     Path.Combine(ExportRoot, "PDF"),
@@ -2842,12 +2840,31 @@ namespace PDMLite
                         }
                         catch (Exception dex)
                         {
-                            drwSummary = "drawing rollback failed: " + dex.Message;
+                            drwSummary = "drawing rollback FAILED: " + dex.Message +
+                                " — roll it back manually";
                         }
+                    }
+                    else if (File.Exists(drwTarget))
+                    {
+                        // A drawing exists but has NO archive at the target rev — it
+                        // would be left at a different rev than the model. Warn (never
+                        // a silent mismatch) so the Master fixes it manually.
+                        drwSummary = "WARNING: no archived drawing at " + targetRev +
+                            " — its revision will NOT match the model (fix manually)";
+                        MessageBox.Show(
+                            "The model was rolled back to " + targetRev +
+                            ", but no archived drawing exists at that revision:\n\n  " +
+                            Path.GetFileName(drwArchiveFile) + "\n\n" +
+                            "Its drawing (" + Path.GetFileName(drwTarget) + ") will " +
+                            "NOT match the model's revision. Open the drawing and set " +
+                            "its revision to " + targetRev + " manually to keep the " +
+                            "pair in sync.",
+                            "BCore PDM — Drawing Revision Mismatch",
+                            MessageBoxButtons.OK, MessageBoxIcon.Warning);
                     }
                     else
                     {
-                        drwSummary = "drawing left unchanged (you declined)";
+                        drwSummary = "n/a (no drawing for this model)";
                     }
                 }
 
