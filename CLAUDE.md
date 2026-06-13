@@ -204,7 +204,7 @@ Methods:
 
 \- Initialize, UpsertFile (audit-logs Create vs Save; matches the existing record by FilePath CASE-INSENSITIVELY — a casing difference like n:\\ vs N:\\, which SOLIDWORKS can produce, used to miss the record, create a duplicate, and the wasCreate purge then wiped the file's whole history. CREATE-TIME RIVAL GUARD: on create, when another tracked WIP file already uses the same file name (FindNameRival — the shared private core of FindFileNameConflict and the quarantine, so all three can never disagree) NO record is created at all and the history purge is skipped: Rule 2.6's pre-save check and the post-save insert run in separate lock acquisitions, so two machines first-saving the same name within seconds can both get here; a second record corrupts every name-keyed lookup and PurgeHistoryFor (FILENAME-matched) would wipe the LIVING rival's timeline. Audit-logged "DuplicateNameDetected" — the note says to DELETE THE DUPLICATE FILE IN EXPLORER, never "Remove from Vault" (record removal matches by filename and would take the ORIGINAL's record/history too); rewrites the per-config <Configurations> block from the live doc on every save — but ONLY when the incoming list is non-empty: every real part/assembly has ≥1 config, so an empty list means GetConfigNames failed transiently and the existing block is PRESERVED rather than wiped, so a transient enumeration failure can't collapse a multi-config file to a single phantom config), GetFileStatus, SetFileStatus
 
-\- SetBrokenRefFlag, LockFile, UnlockFile, GetLockInfo
+\- SetBrokenRefFlag, LockFile, UnlockFile, GetLockInfo. LEGACY-RECORD SAFE (audit M11): every write to an existing record goes through SetOrAdd (UpsertFile's identity fields, Status, HasBrokenRefs, LockedBy/LockedDate, User Role, session OpenedDate) — the old `.Element(x).Value = …` NRE'd on a hand-repaired/legacy record missing the element. GetLockInfo TryParses LockedDate (the file's only unguarded DateTime.Parse — a bad date broke every caller incl. the task-pane refresh; unparseable reads MinValue, the lock still reports). Search scans (SearchFiles, GetReleasableFiles, the task-pane card matching) use ToLowerInvariant — culture-sensitive ToLower broke matching under special-casing locales (Turkish dotless I)
 
 \- RemoveFileRecord(filePath) → removes vault.xml record(s) for a file (matches FilePath then FileName for dupes/RELEASED-copy entries) AND purges that file's RevisionHistory entries via PurgeHistoryFor (so a new file of the same name never inherits the removed file's timeline); DB record ONLY, never touches files on disk; returns count of File records removed
 
@@ -385,6 +385,8 @@ Open Drawing button label when a drawing is active: VaultManager.GetDrawingOpenL
 8\. Send Test Email button (all users) — calls EmailManager.SendTestEmail, shows success/error in MessageBox
 
 9\. Remove from Vault button (Masters only, cSwRed — muted SOLIDWORKS red) — DoAction("remove") → VaultManager.RemoveFromVault on the active file (moves to SCRAP + deletes record; blocked if Released)
+
+NETWORK-BLIP GUARDS (audit H12): DoAction wraps the WHOLE dispatch (DoActionCore) in try/catch — every task-pane button runs raw network I/O through VaultManager/DatabaseManager, and an N: blip mid-click was an unhandled exception on SOLIDWORKS' message loop; a friendly "vault unavailable" dialog shows instead. Refresh's GetLockInfo/GetUserRole reads are individually guarded too (the network can drop BETWEEN the DB calls of one refresh — the status read was already guarded). Same treatment in PendingRequestsForm (LoadRequests + per-card GetFileRecord + ApproveAllPending) and BulkReleaseForm (LoadFiles renders a red "Vault unavailable" line, like the task-pane search).
 
 Search results are capped at 50; when SearchFiles reports truncated=true a "Showing first N — refine your search" hint is rendered below the cards. SECOND cap at the CARD level (MaxCards=50 in RunSearch): SearchFiles caps at 50 FILES, but a multi-config part expands to one card PER configuration, so the card list is trimmed to MaxCards and truncated is forced true (the same hint shows) — prevents hundreds of cards freezing the panel even when only a few files matched.
 
@@ -891,6 +893,8 @@ GetNextRevision() in VaultManager.cs handles this
 \- Search results capped at 50 with a "refine your search" hint (prevents UI freeze rendering thousands of cards at 50k-file scale)
 
 \- Orphaned records auto-purged by search when the file is gone on disk (network-down guarded so a transient outage never deletes records; audit-logged)
+
+\- DB/UI hardening (audit M11 + H12 + culture part of M9): legacy-record-safe DB writes (SetOrAdd everywhere — `.Element(x).Value` NRE'd on schema drift), GetLockInfo TryParses LockedDate, search matching is ToLowerInvariant, and every UI entry point that hits the DB from a Click/Tick handler is guarded (task-pane DoAction choke point, Refresh's lock/role reads, PendingRequestsForm load/per-card/approve-all, BulkReleaseForm load) so an N:-drive blip shows "vault unavailable" instead of an unhandled exception inside SOLIDWORKS
 
 \- Remove from Vault (Master, active file, blocked if Released) — MOVES the file + RELEASED snapshot + STEP + PDF exports to SCRAP and deletes the record; matching drawing always scrapped automatically (no prompt, Released drawing is not exempt — blank without its model)
 
