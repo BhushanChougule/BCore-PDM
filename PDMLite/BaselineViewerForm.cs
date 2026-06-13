@@ -29,6 +29,7 @@ namespace PDMLite
         private Button _btnExport;
         private Button _btnExportAll;
         private Button _btnExpandAll, _btnCollapseAll, _btnFlatten;
+        private Button _btnCompare;
 
         // Double-click a row to open that component (deferred — see the dashboard
         // caller); null when the viewer is just closed.
@@ -241,9 +242,17 @@ namespace PDMLite
             _btnExportAll.Width = S(124);
             _btnExportAll.Click += (s, e) => ExportAllXlsx();
 
-            // Anchor to the bottom-right; lay out on resize (Close | CSV | All).
+            // "Compare…" — diff two releases. Needs at least two captured
+            // baselines; greyed otherwise.
+            _btnCompare = MakeButton("Compare…", cBrandDark, Color.White);
+            _btnCompare.Enabled = _baselines.Count >= 2;
+            _btnCompare.Click += (s, e) => OpenCompare();
+
+            // Anchor to the bottom-right; lay out on resize
+            // (Close | CSV | All | Compare).
             bottom.Controls.Add(_btnExport);
             bottom.Controls.Add(_btnExportAll);
+            bottom.Controls.Add(_btnCompare);
             bottom.Controls.Add(btnClose);
             bottom.Resize += (s, e) => LayoutBottomButtons(bottom, btnClose);
 
@@ -708,7 +717,8 @@ namespace PDMLite
                 c => Array.IndexOf(invalid, c) >= 0 ? '_' : c).ToArray());
         }
 
-        // Right-align Close, then Export CSV, then Export All Revs (right→left).
+        // Right-align Close, then Export CSV, then Export All Revs, then
+        // Compare (right→left).
         private void LayoutBottomButtons(Panel bottom, Button btnClose)
         {
             btnClose.Location = new Point(
@@ -717,6 +727,8 @@ namespace PDMLite
                 btnClose.Left - _btnExport.Width - S(8), S(9));
             _btnExportAll.Location = new Point(
                 _btnExport.Left - _btnExportAll.Width - S(8), S(9));
+            _btnCompare.Location = new Point(
+                _btnExportAll.Left - _btnCompare.Width - S(8), S(9));
         }
 
         // Export EVERY captured baseline to one .xlsx — a worksheet per release
@@ -788,6 +800,21 @@ namespace PDMLite
                         "BCore PDM — Export Failed",
                         MessageBoxButtons.OK, MessageBoxIcon.Error);
                 }
+            }
+        }
+
+        // Open the two-release comparison (nested-modal on top of the viewer).
+        private void OpenCompare()
+        {
+            try
+            {
+                using (var c = new BaselineCompareForm(_asmPath, _asmName))
+                    c.ShowDialog(this);
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show("Could not open the comparison:\n" + ex.Message,
+                    "BCore PDM", MessageBoxButtons.OK, MessageBoxIcon.Warning);
             }
         }
 
