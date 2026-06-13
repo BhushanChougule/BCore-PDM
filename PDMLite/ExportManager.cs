@@ -293,9 +293,16 @@ namespace PDMLite
 
         // Minimal RFC-4180 CSV escaping (mirrors AuditLogger.Csv): quote fields
         // containing a comma, quote, or newline; double any embedded quotes.
+        // Also neutralises spreadsheet formula injection (the BOM is opened
+        // directly in Excel, which EXECUTES fields starting with = + - @):
+        // such fields get a leading apostrophe so Excel renders them as text.
         private static string Csv(string field)
         {
             if (string.IsNullOrEmpty(field)) return "";
+            char c0 = field[0];
+            if (c0 == '=' || c0 == '+' || c0 == '-' || c0 == '@' ||
+                c0 == '\t' || c0 == '\r')
+                field = "'" + field;
             if (field.IndexOf(',') >= 0 || field.IndexOf('"') >= 0 ||
                 field.IndexOf('\n') >= 0 || field.IndexOf('\r') >= 0)
                 return "\"" + field.Replace("\"", "\"\"") + "\"";
