@@ -15,6 +15,13 @@ namespace PDMLite
         public string Description { get; set; }
         public string DrawingNo   { get; set; }
         public string Revision    { get; set; }
+        // Extra indexed properties for property-wide search (Material/DrawnBy/
+        // PartType/Finish). Captured per config at save time; empty on legacy
+        // records until re-saved. Not part of the file's identity.
+        public string Material    { get; set; }
+        public string FinishType  { get; set; }
+        public string DrawnBy     { get; set; }
+        public string PartType    { get; set; }
     }
 
     public class VaultFile
@@ -493,7 +500,11 @@ namespace PDMLite
                     new XElement("PartNo",       c.PartNo      ?? ""),
                     new XElement("Description",  c.Description ?? ""),
                     new XElement("DrawingNo",    c.DrawingNo   ?? ""),
-                    new XElement("Revision",     c.Revision    ?? "")
+                    new XElement("Revision",     c.Revision    ?? ""),
+                    new XElement("Material",     c.Material    ?? ""),
+                    new XElement("FinishType",   c.FinishType  ?? ""),
+                    new XElement("DrawnBy",      c.DrawnBy     ?? ""),
+                    new XElement("PartType",     c.PartType    ?? "")
                 ));
             return el;
         }
@@ -516,7 +527,11 @@ namespace PDMLite
                         PartNo      = (string)c.Element("PartNo")      ?? "",
                         Description = (string)c.Element("Description") ?? "",
                         DrawingNo   = (string)c.Element("DrawingNo")   ?? "",
-                        Revision    = (string)c.Element("Revision")    ?? ""
+                        Revision    = (string)c.Element("Revision")    ?? "",
+                        Material    = (string)c.Element("Material")    ?? "",
+                        FinishType  = (string)c.Element("FinishType")  ?? "",
+                        DrawnBy     = (string)c.Element("DrawnBy")     ?? "",
+                        PartType    = (string)c.Element("PartType")    ?? ""
                     });
                 return list;
             }
@@ -1172,8 +1187,15 @@ namespace PDMLite
                         {
                             foreach (var c in cfgEl.Elements("Config"))
                             {
+                                // Property-wide search: PN + Description PLUS the
+                                // indexed Material / Finish / DrawnBy / PartType
+                                // (empty on legacy records until re-saved).
                                 if (((string)c.Element("PartNo")      ?? "").ToLower().Contains(term) ||
-                                    ((string)c.Element("Description") ?? "").ToLower().Contains(term))
+                                    ((string)c.Element("Description") ?? "").ToLower().Contains(term) ||
+                                    ((string)c.Element("Material")    ?? "").ToLower().Contains(term) ||
+                                    ((string)c.Element("FinishType")  ?? "").ToLower().Contains(term) ||
+                                    ((string)c.Element("DrawnBy")     ?? "").ToLower().Contains(term) ||
+                                    ((string)c.Element("PartType")    ?? "").ToLower().Contains(term))
                                 {
                                     matchFound = true;
                                     break;

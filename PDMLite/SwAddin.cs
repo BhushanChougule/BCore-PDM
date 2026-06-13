@@ -919,7 +919,13 @@ namespace PDMLite
                             PartNo      = PropertyValidator.GetProperty(doc, "PartNo",      cfgName),
                             Description = PropertyValidator.GetProperty(doc, "Description", cfgName),
                             DrawingNo   = PropertyValidator.GetProperty(doc, "DrawingNo",   cfgName),
-                            Revision    = PropertyValidator.GetProperty(doc, "Revision",    cfgName)
+                            Revision    = PropertyValidator.GetProperty(doc, "Revision",    cfgName),
+                            // Indexed for property-wide search (Material/Finish/
+                            // DrawnBy/PartType). Stored, not part of identity.
+                            Material    = PropertyValidator.GetProperty(doc, "Material1",   cfgName),
+                            FinishType  = PropertyValidator.GetProperty(doc, "FinishType",  cfgName),
+                            DrawnBy     = PropertyValidator.GetProperty(doc, "DrawnBy",     cfgName),
+                            PartType    = PropertyValidator.GetProperty(doc, "PartType",    cfgName)
                         });
                     }
                     vf.Configurations = configs;
