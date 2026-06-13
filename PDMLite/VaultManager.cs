@@ -648,7 +648,12 @@ namespace PDMLite
         // suppressPrompts skips the confirm + success dialogs (used when this
         // file is being released as part of a chained drawing+model release so
         // the Master only confirms once). Validation/blocker dialogs still show.
-        public static void ReleaseFile(ModelDoc2 doc, bool suppressPrompts = false)
+        // reason = the reason-for-change; an interactive release with none
+        // supplied prompts for one (required) in the Core, and the chained
+        // drawing→model release passes the drawing's reason down so the pair
+        // shares one reason.
+        public static void ReleaseFile(ModelDoc2 doc, bool suppressPrompts = false,
+            string reason = null)
         {
             string user = PDMLiteAddin.CurrentUser;
             string filePath = doc.GetPathName();
@@ -693,7 +698,7 @@ namespace PDMLite
             if (!BeginVaultOperation(filePath, user, "Release")) return;
             try
             {
-                ReleaseFileCore(doc, suppressPrompts);
+                ReleaseFileCore(doc, suppressPrompts, reason);
             }
             finally
             {
@@ -703,7 +708,8 @@ namespace PDMLite
 
         // The release flow proper. All Master/saved/status/lock/claim guards
         // live in the public wrapper above; this method assumes them done.
-        private static void ReleaseFileCore(ModelDoc2 doc, bool suppressPrompts)
+        private static void ReleaseFileCore(ModelDoc2 doc, bool suppressPrompts,
+            string reason)
         {
             string user = PDMLiteAddin.CurrentUser;
             string filePath = doc.GetPathName();
@@ -718,6 +724,26 @@ namespace PDMLite
             // Hoisted to function scope so the close block can reference it.
             // Set inside the isDrawing gate below.
             string referencedModel = null;
+
+            // ── Reason for change (interactive releases only) ─────────────
+            // Captured up front so a chained drawing→model release shares one
+            // reason. A bulk/chained-internal release receives it via the
+            // parameter; only the user-facing release prompts, and the reason
+            // is REQUIRED (Cancel aborts the whole release).
+            if (reason == null && !suppressPrompts)
+            {
+                while (true)
+                {
+                    reason = ShowNoteDialog("Release — Reason for Change",
+                        "Describe the reason for this release (required):");
+                    if (reason == null) return; // cancelled → abort release
+                    if (!string.IsNullOrWhiteSpace(reason)) break;
+                    MessageBox.Show(
+                        "A reason for the release is required.",
+                        "BCore PDM — Reason Required",
+                        MessageBoxButtons.OK, MessageBoxIcon.Information);
+                }
+            }
 
             // ── Drawing: check referenced part is Released first ──────────
             if (isDrawing)
@@ -788,8 +814,10 @@ namespace PDMLite
 
                         // Release through the normal path — all validations apply,
                         // but suppress its confirm/success dialogs: the Master
-                        // already confirmed both files in the prompt above.
-                        ReleaseFile(refDoc, suppressPrompts: true);
+                        // already confirmed both files in the prompt above. The
+                        // drawing's reason-for-change is passed down so the model
+                        // release records the SAME reason (no second prompt).
+                        ReleaseFile(refDoc, suppressPrompts: true, reason: reason);
 
                         // If the model release was blocked by a validation issue
                         // (missing properties, broken refs, unreleased children),
@@ -1466,10 +1494,12 @@ namespace PDMLite
             // A second entry would cause duplicate search results and false
             // part-number conflict warnings.
             DatabaseManager.LockFile(filePath, user);
-            DatabaseManager.SetFileStatus(filePath, "Released", user,
-                "Released REV " + rev);
+            string relNote = string.IsNullOrWhiteSpace(reason)
+                ? "Released REV " + rev
+                : "Released REV " + rev + " — " + reason;
+            DatabaseManager.SetFileStatus(filePath, "Released", user, relNote);
             AuditLogger.Log("Release", user, Path.GetFileName(filePath),
-                partNo, rev);
+                partNo, rev, reason ?? "");
 
             // ── Capture the as-released baseline (assemblies only) ────────
             // Snapshot the EXACT resolved child file set + their released
@@ -1593,7 +1623,10 @@ namespace PDMLite
         // (BulkApprove / ApproveRequest) must gate on this, NOT on a
         // GetFileStatus()=="WIP" re-read, which false-positives whenever the
         // file was ALREADY WIP before a failed attempt.
-        public static bool StartNewRevision(ModelDoc2 doc, bool suppressPrompts = false)
+        // reason = the reason-for-change for this bump; an interactive New
+        // Revision with none supplied prompts for one (required) in the Core.
+        public static bool StartNewRevision(ModelDoc2 doc, bool suppressPrompts = false,
+            string reason = null)
         {
             string user = PDMLiteAddin.CurrentUser;
             if (!IsMaster(user)) { NotMaster(); return false; }
@@ -1621,7 +1654,7 @@ namespace PDMLite
             if (!BeginVaultOperation(opPath, user, "New Revision")) return false;
             try
             {
-                return StartNewRevisionCore(doc, suppressPrompts);
+                return StartNewRevisionCore(doc, suppressPrompts, reason);
             }
             finally
             {
@@ -1631,7 +1664,8 @@ namespace PDMLite
 
         // The revision flow proper. Master/saved/lock/claim guards live in the
         // public wrapper above; this method assumes them done.
-        private static bool StartNewRevisionCore(ModelDoc2 doc, bool suppressPrompts)
+        private static bool StartNewRevisionCore(ModelDoc2 doc, bool suppressPrompts,
+            string reason)
         {
             string user = PDMLiteAddin.CurrentUser;
             string filePath   = doc.GetPathName();
@@ -1708,6 +1742,23 @@ namespace PDMLite
                         MessageBoxIcon.Question);
 
                     if (confirm != DialogResult.Yes) return false;
+                }
+            }
+
+            // ── Reason for change (interactive New Revision only) ─────────
+            // REQUIRED; Cancel aborts before anything is archived or bumped.
+            if (reason == null && !suppressPrompts)
+            {
+                while (true)
+                {
+                    reason = ShowNoteDialog("New Revision — Reason for Change",
+                        "Describe the reason for this revision (required):");
+                    if (reason == null) return false; // cancelled → abort
+                    if (!string.IsNullOrWhiteSpace(reason)) break;
+                    MessageBox.Show(
+                        "A reason for the new revision is required.",
+                        "BCore PDM — Reason Required",
+                        MessageBoxButtons.OK, MessageBoxIcon.Information);
                 }
             }
 
@@ -1865,10 +1916,12 @@ namespace PDMLite
 
             // Reset to WIP — source path only (no separate entry for RELEASED copy)
             DatabaseManager.UnlockFile(filePath);
-            DatabaseManager.SetFileStatus(filePath, "WIP", user,
-                "New revision started: REV " + nextRev);
+            string snrNote = string.IsNullOrWhiteSpace(reason)
+                ? "New revision started: REV " + nextRev
+                : "New revision started: REV " + nextRev + " — " + reason;
+            DatabaseManager.SetFileStatus(filePath, "WIP", user, snrNote);
             AuditLogger.Log("NewRevision", user, Path.GetFileName(filePath),
-                partNo, nextRev);
+                partNo, nextRev, reason ?? "");
 
             // ── Auto-start the associated drawing revision (Option B) ─────
             // Done AFTER the model is writable/bumped so the drawing reopens
