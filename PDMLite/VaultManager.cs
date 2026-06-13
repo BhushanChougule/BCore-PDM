@@ -2416,6 +2416,14 @@ namespace PDMLite
                 targetRev = dialog.SelectedRevision;
             }
 
+            // SelectedRevision is "REV A" (kept verbose for the dialogs below);
+            // the export-name patterns ({id}-R{letter}.step, {dn} REV {letter}.pdf)
+            // and the drawing-archive lookup need the BARE letter — using the
+            // verbose form built "{id}-RREV A.step", which matched nothing, so
+            // Step 7b silently restored zero exports (found in PR-52 testing).
+            string targetLetter = targetRev
+                .Replace("REV", "").Replace("rev", "").Trim();
+
             // Final confirmation
             var confirm = MessageBox.Show(
                 "Confirm Rollback?\n\n" +
@@ -2564,7 +2572,7 @@ namespace PDMLite
                     if (!string.IsNullOrEmpty(drawingNo))
                         MoveMatching(Path.Combine(ObsFolder, "PDF"),
                             Path.Combine(ExportRoot, "PDF"),
-                            drawingNo + " REV " + targetRev + ".pdf");
+                            drawingNo + " REV " + targetLetter + ".pdf");
                 }
                 else
                 {
@@ -2572,15 +2580,15 @@ namespace PDMLite
                     {
                         MoveMatching(Path.Combine(ObsFolder, "STEP"),
                             Path.Combine(ExportRoot, "STEP"),
-                            pn.Replace(".", "") + "-R" + targetRev + ".step");
+                            pn.Replace(".", "") + "-R" + targetLetter + ".step");
                         MoveMatching(Path.Combine(ObsFolder, "BOM"),
                             Path.Combine(ExportRoot, "BOM"),
-                            pn + "-R" + targetRev + "_BOM.csv");
+                            pn + "-R" + targetLetter + "_BOM.csv");
                     }
                     foreach (string dn in rbDrawingNos)
                         MoveMatching(Path.Combine(ObsFolder, "PDF"),
                             Path.Combine(ExportRoot, "PDF"),
-                            dn + " REV " + targetRev + ".pdf");
+                            dn + " REV " + targetLetter + ".pdf");
                 }
 
                 // ── Step 8: Update database ───────────────────────────────
@@ -2655,8 +2663,6 @@ namespace PDMLite
                 string drwSummary = ext == ".slddrw"
                     ? "n/a (this file is a drawing)"
                     : "no matching drawing archive found";
-                string targetLetter = targetRev
-                    .Replace("REV", "").Replace("rev", "").Trim();
                 string drwArchiveDir = Path.Combine(ObsFolder, "DRAWINGS");
                 string drwArchiveFile = Path.Combine(drwArchiveDir,
                     fileName + " REV " + targetLetter + ".slddrw");
