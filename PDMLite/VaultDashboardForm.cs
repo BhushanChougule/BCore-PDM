@@ -1261,6 +1261,11 @@ namespace PDMLite
         // Click "Broken Refs" → toggle the broken-references-only view.
         private void ToggleBrokenFilter()
         {
+            // Turning ON a zero-count filter would blank the grid (no broken-ref
+            // rows) and dead-end — make the "0" link inert, exactly like the
+            // Status quick filters above (the guard was there but not here —
+            // found in PR-52 testing). Turning it OFF is always allowed.
+            if (!_brokenRefsOnly && _cntBrk == 0) return;
             _brokenRefsOnly = !_brokenRefsOnly;
             ApplyFilter();
         }
