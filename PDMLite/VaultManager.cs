@@ -559,15 +559,18 @@ namespace PDMLite
             // Re-releasing a Released file would double-run the exports and
             // archives and re-stamp history with no change on disk. BulkRelease
             // and BulkApprove pre-check too; this guards the task-pane button
-            // and every direct call.
+            // and every direct call. The info dialog is shown only for an
+            // interactive release — a bulk/chained caller (suppressPrompts)
+            // already pre-skips Released files, so it stays silent.
             if (string.Equals(DatabaseManager.GetFileStatus(filePath),
                     "Released", StringComparison.OrdinalIgnoreCase))
             {
-                MessageBox.Show(
-                    Path.GetFileName(filePath) + " is already Released.\n\n" +
-                    "Use Unlock or New Revision to edit it again.",
-                    "BCore PDM — Already Released",
-                    MessageBoxButtons.OK, MessageBoxIcon.Information);
+                if (!suppressPrompts)
+                    MessageBox.Show(
+                        Path.GetFileName(filePath) + " is already Released.\n\n" +
+                        "Use Unlock or New Revision to edit it again.",
+                        "BCore PDM — Already Released",
+                        MessageBoxButtons.OK, MessageBoxIcon.Information);
                 return;
             }
 
