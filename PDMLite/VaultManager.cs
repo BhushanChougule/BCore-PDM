@@ -1227,6 +1227,23 @@ namespace PDMLite
             AuditLogger.Log("Release", user, Path.GetFileName(filePath),
                 partNo, rev);
 
+            // ── Capture the as-released baseline (assemblies only) ────────
+            // Snapshot the EXACT resolved child file set + their released
+            // revisions at this instant, so the precise file set of
+            // "<partNo> REV <rev>" can always be reconstructed (the biggest
+            // functional PDM gap a per-file RELEASED snapshot leaves open).
+            // The release gate above already guaranteed every tracked child
+            // is Released, so each child record carries its released rev.
+            // Non-fatal — wrapped internally like the BOM export, so it can
+            // never block a release.
+            if (docType == (int)swDocumentTypes_e.swDocASSEMBLY)
+            {
+                string baselineCfg = (doc.GetActiveConfiguration()
+                    as SolidWorks.Interop.sldworks.Configuration)?.Name ?? "";
+                BaselineManager.CaptureAssemblyBaseline(filePath, partNo, rev,
+                    baselineCfg, user);
+            }
+
             if (chainedRelease)
             {
                 // One combined dialog for the model + drawing released together.
