@@ -155,6 +155,11 @@ namespace PDMLite
                         swComponentSuppressionState_e.swComponentSuppressed)
                         continue;
 
+                    // Honour the component's "Exclude from BOM" flag — SW's
+                    // own BOM tables omit these (jigs, reference geometry,
+                    // packaging), so ours must too.
+                    try { if (comp.ExcludeFromBOM) continue; } catch { }
+
                     string path = "";
                     try { path = comp.GetPathName(); } catch { }
                     if (string.IsNullOrEmpty(path)) continue;
@@ -211,11 +216,32 @@ namespace PDMLite
                         Csv(r.Material), Csv(r.PartType), r.Qty.ToString()));
                 }
 
+                // FileSafe: a PartNo containing a filename-illegal char (e.g.
+                // a slash) made this WriteAllText throw — swallowed by the
+                // outer catch, so the BOM silently never appeared. The archive
+                // and scrap globs build their patterns through the same helper
+                // so they keep matching the sanitised name.
                 File.WriteAllText(
-                    Path.Combine(bomFolder, partNo + "-R" + rev + "_BOM.csv"),
+                    Path.Combine(bomFolder,
+                        FileSafe(partNo) + "-R" + rev + "_BOM.csv"),
                     sb.ToString());
             }
             catch { } // a BOM failure must never block a release
+        }
+
+        // Replace Windows-illegal filename characters with '_'. Mirrors
+        // DatabaseManager.SanitizeFileName (config-drawing names); shared here
+        // for export names so the WRITE side (ExportBom) and the glob side
+        // (ArchiveOldExports / ScrapExports in VaultManager) can never
+        // disagree about what the file on disk is called.
+        public static string FileSafe(string name)
+        {
+            if (string.IsNullOrEmpty(name)) return name;
+            var invalid = Path.GetInvalidFileNameChars();
+            var sb = new StringBuilder(name.Length);
+            foreach (char c in name)
+                sb.Append(System.Array.IndexOf(invalid, c) >= 0 ? '_' : c);
+            return sb.ToString();
         }
 
         // Returns a ModelDoc2 whose custom properties can be read, even for a
@@ -497,15 +523,21 @@ namespace PDMLite
         {
             try
             {
-                // Only sheet metal parts have a flat pattern — scan the feature
-                // tree for the SheetMetal feature (same guard as before).
-                object[] features = (object[])doc.FeatureManager.GetFeatures(true);
+                // GetFeatures(FALSE) = the whole feature list INCLUDING
+                // sub-features. The old top-level-only scan (true) missed
+                // multibody sheet metal, where each body's SheetMetal feature
+                // nests inside its body folder — those parts silently never
+                // exported a flat DXF. (Detection is independent of the
+                // ExportToDWG2 export mechanism below.)
+                object[] features = (object[])doc.FeatureManager.GetFeatures(false);
                 if (features == null) return;
 
                 bool hasSheetMetal = false;
                 foreach (object f in features)
                 {
-                    if (((Feature)f).GetTypeName2() == "SheetMetal")
+                    string ft = "";
+                    try { ft = ((Feature)f).GetTypeName2(); } catch { }
+                    if (ft == "SheetMetal")
                     {
                         hasSheetMetal = true;
                         break;
