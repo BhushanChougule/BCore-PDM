@@ -214,7 +214,7 @@ Methods:
 
 \- GetUserRole, AddUser
 
-\- SearchFiles(term) / SearchFiles(term, out truncated) → searches PartNumber + Description + FileName (all statuses); returns canonical WIP path; dedupes by filename; capped at MaxSearchResults=50 (truncated=true when more matched, so UI can prompt to refine — prevents rendering thousands of cards at 50k scale); AUTO-PURGES orphaned records whose file is missing on disk, but ONLY when the WIP root is reachable (network-down guard so a transient outage never deletes records) AND the cross-machine lock was actually acquired (a degraded-mode search is a READ and must never write a stale snapshot back); auto-purges are audit-logged as "AutoPurgeOrphan"
+\- SearchFiles(term) / SearchFiles(term, out truncated) → PROPERTY-WIDE search: matches the file-level PartNumber + Description + FileName AND, per configuration, PartNo + Description + Material + FinishType + DrawnBy + PartType (all statuses) — so a part is findable by its material, finish, drafter or Manufactured/Purchased type, not just its number. The extra fields are indexed in the <Config> block (captured at save time — see ConfigEntry / OnFileSavePost); legacy records carry empties until re-saved. Returns canonical WIP path; dedupes by filename; capped at MaxSearchResults=50 (truncated=true when more matched, so UI can prompt to refine — prevents rendering thousands of cards at 50k scale); AUTO-PURGES orphaned records whose file is missing on disk, but ONLY when the WIP root is reachable (network-down guard so a transient outage never deletes records) AND the cross-machine lock was actually acquired (a degraded-mode search is a READ and must never write a stale snapshot back); auto-purges are audit-logged as "AutoPurgeOrphan"
 
 \- FindPartNumberConflict(partNo, excludeFilePath) → returns filename of another file using same PartNo (case-insensitive, trimmed), or null. Excludes the file being saved so it never conflicts with itself.
 
@@ -829,6 +829,8 @@ GetNextRevision() in VaultManager.cs handles this
 
 
 \## Completed Features
+
+\- Property-wide search: the task-pane search now matches Material, FinishType, DrawnBy and PartType (Manufactured/Purchased) in addition to PartNo/Description/FileName. These four are indexed per configuration in vault.xml's <Config> block (ConfigEntry gained Material/FinishType/DrawnBy/PartType; captured in OnFileSavePost via GetProperty, round-tripped by BuildConfigsElement/ReadConfigs, matched in SearchFiles). Legacy records carry empties until re-saved (graceful). Closes the PART-2 "search on Material/DrawnBy/PartType" gap. (Surfacing these as dedicated Vault Dashboard columns/filters is a roadmap follow-up — the data is now stored for it.)
 
 \- Property enforcement on save (blocks save until all fields filled)
 
