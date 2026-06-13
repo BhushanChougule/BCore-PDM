@@ -160,17 +160,22 @@ namespace PDMLite
             // is refused (e.g. unsaved edits) or unavailable.
             if (openDoc != null)
             {
-                // ReloadOrReplace returns a swReloadOrReplace STATUS int (this
-                // interop types it int — proven by the int-vs-bool compile error):
-                // 0 == swReloadOkay (reloaded read-write); ANY nonzero value is an
-                // error (write-access denied, not-changed, cancelled, …). So fall
-                // back to close+reopen ONLY when the reload did NOT succeed (nonzero)
-                // or threw — seed the sentinel nonzero so an exception triggers it.
-                int reloadRc = -1;
-                try { reloadRc = openDoc.ReloadOrReplace(false, filePath, true); }
-                catch { reloadRc = -1; }
+                // ReloadOrReplace(readOnly:false) is the File>Reload API. CALLING it
+                // re-reads the now-writable file and promotes the open doc (and any
+                // assembly-held component) to read-write as a SIDE EFFECT — that is
+                // what clears [Read-only], NOT the return value. The status int's
+                // polarity is interop/scenario-dependent and unreliable (a successful
+                // assembly-held reload returns NONZERO in this shop's build), so we do
+                // NOT gate on it: gating on nonzero made unlock needlessly close+reopen
+                // the part and yank its window away (PR-52 follow-up). Fall back to
+                // close+reopen ONLY when the call THROWS (method genuinely unavailable)
+                // — that alone can't promote an assembly-held component, but is the
+                // best last resort for a standalone doc and keeps unlock non-fatal.
+                bool reloadThrew = false;
+                try { openDoc.ReloadOrReplace(false, filePath, true); }
+                catch { reloadThrew = true; }
 
-                if (reloadRc != 0 && reopenType >= 0)
+                if (reloadThrew && reopenType >= 0)
                 {
                     try
                     {
