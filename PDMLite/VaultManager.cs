@@ -1784,6 +1784,208 @@ namespace PDMLite
         // reference paths stored inside each assembly matching the vault path
         // format. GetDocumentDependencies2 reads the file from disk WITHOUT
         // opening it in the UI.
+        // DIRECT parents only (traverse=false), full PATHS — used by the
+        // post-rename reference repair, which must open each candidate; the
+        // traversing variant below would also list grandparents that contain
+        // the part only through a subassembly (nothing to repoint there).
+        internal static List<string> GetDirectParentAssemblyPaths(string filePath)
+        {
+            var parents = new List<string>();
+            try
+            {
+                string target;
+                try { target = Path.GetFullPath(filePath); }
+                catch { target = filePath; }
+
+                foreach (string asmPath in
+                         DatabaseManager.GetTrackedFilePathsByExtension(".sldasm"))
+                {
+                    try
+                    {
+                        if (string.Equals(Path.GetFullPath(asmPath), target,
+                                StringComparison.OrdinalIgnoreCase))
+                            continue; // skip self
+                    }
+                    catch { }
+                    if (!File.Exists(asmPath)) continue;
+
+                    object depsObj = PDMLiteAddin.SwApp.GetDocumentDependencies2(
+                        asmPath, false, true, false); // direct deps only
+                    string[] deps = depsObj as string[];
+                    if (deps == null) continue;
+
+                    for (int i = 1; i < deps.Length; i += 2)
+                    {
+                        if (string.IsNullOrEmpty(deps[i])) continue;
+                        string depPath;
+                        try { depPath = Path.GetFullPath(deps[i]); }
+                        catch { depPath = deps[i]; }
+                        if (string.Equals(depPath, target,
+                                StringComparison.OrdinalIgnoreCase))
+                        {
+                            parents.Add(asmPath);
+                            break;
+                        }
+                    }
+                }
+            }
+            catch { }
+            return parents;
+        }
+
+        // ── Deferred follow-up to Rule 3.6's Rename & Save ────────────
+        // Parent assemblies reference the renamed configs BY NAME. Offer to
+        // repair them AFTER the part's save completed (never inside the save
+        // event — parents can be large and slow to open). Per-parent rules:
+        // Released/Locked → skip + report (frozen history; fix at its next
+        // revision). Open by ANOTHER user → skip + report (their session
+        // would be overwritten). Open in THIS session → repoint in memory,
+        // DO NOT save (the user's working file — they save it). Closed WIP →
+        // open silently, repoint, save (validation suppressed), close (the
+        // save's post-notify upsert audit-logs it as a normal Save).
+        internal static void RepairParentConfigRefs(
+            string modelPath, List<string[]> renames)
+        {
+            try
+            {
+                if (renames == null || renames.Count == 0) return;
+                var parents = GetDirectParentAssemblyPaths(modelPath);
+                if (parents.Count == 0) return;
+
+                var confirm = MessageBox.Show(
+                    parents.Count + " assembl" +
+                    (parents.Count == 1 ? "y references" : "ies reference") +
+                    " this part, possibly by the OLD configuration name" +
+                    (renames.Count == 1 ? "" : "s") + ".\n\n" +
+                    "Update their component references now?\n\n" +
+                    "(Released/locked assemblies and ones open on another " +
+                    "machine are skipped and reported. Assemblies open in " +
+                    "YOUR session are updated but left for you to save.)",
+                    "BCore PDM — Update Parent Assemblies",
+                    MessageBoxButtons.YesNo, MessageBoxIcon.Question);
+                if (confirm != DialogResult.Yes) return;
+
+                string user = PDMLiteAddin.CurrentUser;
+                var updated = new List<string>();
+                var inSession = new List<string>();
+                var skipped = new List<string>();
+
+                foreach (string ap in parents)
+                {
+                    string an = Path.GetFileName(ap);
+                    try
+                    {
+                        string st = DatabaseManager.GetFileStatus(ap);
+                        if (st == "Released" || st == "Locked")
+                        {
+                            skipped.Add(an + " — " + st +
+                                " (fix at its next revision)");
+                            continue;
+                        }
+
+                        var others = DatabaseManager.GetOtherOpenSessions(
+                            ap, user);
+                        if (others != null && others.Count > 0)
+                        {
+                            skipped.Add(an + " — open by " + others[0].User);
+                            continue;
+                        }
+
+                        bool openHere = PDMLiteAddin.SwApp
+                            .GetOpenDocumentByName(ap) != null;
+                        ModelDoc2 asm = OpenByPath(ap);
+                        if (asm == null)
+                        {
+                            skipped.Add(an + " — could not open");
+                            continue;
+                        }
+
+                        int fixedCount = 0;
+                        var acfg = asm.GetActiveConfiguration()
+                            as SolidWorks.Interop.sldworks.Configuration;
+                        var root = acfg?.GetRootComponent3(true);
+                        object[] children = root?.GetChildren() as object[];
+                        if (children != null)
+                        {
+                            foreach (object o in children)
+                            {
+                                var comp = o as Component2;
+                                if (comp == null) continue;
+                                string cp = "";
+                                try { cp = comp.GetPathName() ?? ""; }
+                                catch { }
+                                if (!string.Equals(cp, modelPath,
+                                        StringComparison.OrdinalIgnoreCase))
+                                    continue;
+                                string rc = "";
+                                try
+                                { rc = comp.ReferencedConfiguration ?? ""; }
+                                catch { }
+                                foreach (var rn in renames)
+                                {
+                                    if (!string.Equals(rc, rn[0],
+                                            StringComparison.OrdinalIgnoreCase))
+                                        continue;
+                                    try
+                                    {
+                                        comp.ReferencedConfiguration = rn[1];
+                                        fixedCount++;
+                                    }
+                                    catch { }
+                                    break;
+                                }
+                            }
+                        }
+
+                        if (fixedCount == 0)
+                        {
+                            if (!openHere)
+                                try { PDMLiteAddin.SwApp.CloseDoc(ap); }
+                                catch { }
+                            skipped.Add(an + " — no stale references found");
+                        }
+                        else if (openHere)
+                        {
+                            inSession.Add(an + " — " + fixedCount +
+                                " reference(s) updated IN YOUR OPEN SESSION " +
+                                "— save it");
+                        }
+                        else
+                        {
+                            if (TrySaveVerified(asm))
+                                updated.Add(an + " — " + fixedCount +
+                                    " reference(s) updated and saved");
+                            else
+                                skipped.Add(an + " — updated but the save " +
+                                    "FAILED (open it and save manually)");
+                            try { PDMLiteAddin.SwApp.CloseDoc(ap); } catch { }
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        skipped.Add(an + " — " + ex.Message);
+                    }
+                }
+
+                var msg = new System.Text.StringBuilder();
+                if (updated.Count > 0)
+                    msg.AppendLine("Updated and saved:")
+                       .AppendLine("  • " + string.Join("\n  • ", updated))
+                       .AppendLine();
+                if (inSession.Count > 0)
+                    msg.AppendLine("Updated in your open session — SAVE them:")
+                       .AppendLine("  • " + string.Join("\n  • ", inSession))
+                       .AppendLine();
+                if (skipped.Count > 0)
+                    msg.AppendLine("Skipped:")
+                       .AppendLine("  • " + string.Join("\n  • ", skipped));
+                MessageBox.Show(msg.ToString().TrimEnd(),
+                    "BCore PDM — Parent Assemblies",
+                    MessageBoxButtons.OK, MessageBoxIcon.Information);
+            }
+            catch { }
+        }
+
         internal static List<string> GetParentAssemblies(string filePath)
         {
             var parents = new List<string>();

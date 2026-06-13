@@ -113,11 +113,11 @@ namespace PDMLite
                         "assembly references them):", fBody, cTextDark);
                     Add(string.Join("\n", renamePreview), fBold, cBrandDark);
                     if (parentAsmCount > 0)
-                        Add("CAUTION: this part is used by " + parentAsmCount +
+                        Add("This part is used by " + parentAsmCount +
                             " assembl" + (parentAsmCount == 1 ? "y" : "ies") +
-                            " — if any of them reference these configs BY " +
-                            "NAME, renaming breaks that reference.",
-                            fBody, cOrange);
+                            " that may reference these configs BY NAME — " +
+                            "after the save you will be offered an automatic " +
+                            "update of those references.", fBody, cOrange);
                 }
                 // ALWAYS show the skip reasons — previously they were only
                 // rendered when at least one config WAS renameable, so a

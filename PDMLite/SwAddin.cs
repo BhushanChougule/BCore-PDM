@@ -829,6 +829,7 @@ namespace PDMLite
                                     ConfigHealthDialog.Choice.Rename)
                                 {
                                     var failed = new List<string>();
+                                    var performed = new List<string[]>();
                                     foreach (var m in renameable)
                                     {
                                         // ORDER: drawing file + record first
@@ -865,6 +866,8 @@ namespace PDMLite
                                         if (m[2] != null)
                                             RepointDrawingViews(
                                                 m[3], m[0], m[1]);
+                                        performed.Add(
+                                            new[] { m[0], m[1] });
                                     }
                                     if (failed.Count > 0)
                                         SwApp.SendMsgToUser2(
@@ -875,6 +878,21 @@ namespace PDMLite
                                             string.Join("\n  • ", failed),
                                             (int)swMessageBoxIcon_e.swMbWarning,
                                             (int)swMessageBoxBtn_e.swMbOk);
+                                    // Parent assemblies reference these
+                                    // configs BY NAME — offer the repair
+                                    // AFTER the save completes (deferred via
+                                    // the task pane's BeginInvoke; opening
+                                    // big assemblies inside the save event
+                                    // would freeze it).
+                                    if (performed.Count > 0)
+                                    {
+                                        string fpCap = filePath;
+                                        var perfCap = performed;
+                                        _taskPane?.RunDeferred(() =>
+                                            VaultManager
+                                                .RepairParentConfigRefs(
+                                                    fpCap, perfCap));
+                                    }
                                     // Fall through: THIS save persists the
                                     // new names, and the post-save upsert
                                     // refreshes the per-config DB block.
