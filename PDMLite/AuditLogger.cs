@@ -1,5 +1,6 @@
 using System;
 using System.IO;
+using System.Text;
 using System.Threading;
 
 namespace PDMLite
@@ -72,31 +73,79 @@ namespace PDMLite
             AppendWithRetry(Header + Environment.NewLine);
         }
 
-        // Append entries that previously failed to reach audit.csv. Only when
-        // the whole spill content lands is the spill file deleted; on any
-        // failure it simply stays for the next attempt. Caller holds _lock.
+        // Append entries that previously failed to reach audit.csv. Reads and
+        // truncates under ONE exclusive (FileShare.None) handle so a SECOND
+        // SOLIDWORKS process on the same machine+user (the spill is in per-user
+        // %LOCALAPPDATA%, which the in-process _lock does NOT serialise across
+        // processes) cannot append a line BETWEEN our read and our clear and
+        // have it dropped. Read → write to audit.csv → TRUNCATE (not delete):
+        // because no other process can hold the file during this window, the
+        // truncate removes exactly what we read, never a line appended since.
+        // Only truncates when the content actually landed in audit.csv; on any
+        // failure the spill is left intact for the next attempt. Caller holds
+        // the in-process _lock.
         private static void FlushSpill()
         {
             try
             {
                 if (!File.Exists(SpillFile)) return;
-                string pending = File.ReadAllText(SpillFile);
-                if (pending.Length == 0 || AppendWithRetry(pending))
-                    File.Delete(SpillFile);
+                using (var fs = OpenSpillExclusive(FileMode.Open))
+                {
+                    if (fs == null) return; // briefly held by another process — next Log
+                    if (fs.Length == 0) return;
+                    var buf = new byte[fs.Length];
+                    int read = 0;
+                    while (read < buf.Length)
+                    {
+                        int n = fs.Read(buf, read, buf.Length - read);
+                        if (n <= 0) break;
+                        read += n;
+                    }
+                    string pending = Encoding.UTF8.GetString(buf, 0, read);
+                    if (pending.Length == 0 || AppendWithRetry(pending))
+                        fs.SetLength(0); // landed (or empty) — clear, handle still held
+                }
             }
             catch { } // spill stays; retried on the next Log call
         }
 
-        // Save one line locally because audit.csv could not be written.
+        // Save one line locally because audit.csv could not be written. Appends
+        // under the same exclusive handle so it can never interleave with
+        // another process's FlushSpill read+truncate.
         private static void Spill(string text)
         {
             try
             {
                 string dir = Path.GetDirectoryName(SpillFile);
                 if (!string.IsNullOrEmpty(dir)) Directory.CreateDirectory(dir);
-                File.AppendAllText(SpillFile, text);
+                using (var fs = OpenSpillExclusive(FileMode.OpenOrCreate))
+                {
+                    if (fs == null) return; // best-effort — see class summary
+                    fs.Seek(0, SeekOrigin.End);
+                    byte[] bytes = Encoding.UTF8.GetBytes(text);
+                    fs.Write(bytes, 0, bytes.Length);
+                }
             }
             catch { } // even the spill failed — nothing more we can do
+        }
+
+        // Exclusive (FileShare.None) open of the spill, briefly retried so a
+        // flush/append by a second same-machine SOLIDWORKS process is ridden
+        // out rather than colliding. Returns null if the handle can't be got
+        // (best-effort: a dropped spill line is the documented worst case).
+        private static FileStream OpenSpillExclusive(FileMode mode)
+        {
+            for (int attempt = 0; attempt < 5; attempt++)
+            {
+                try
+                {
+                    return new FileStream(SpillFile, mode,
+                        FileAccess.ReadWrite, FileShare.None);
+                }
+                catch (IOException) { Thread.Sleep(50); }
+                catch (UnauthorizedAccessException) { Thread.Sleep(50); }
+            }
+            return null;
         }
 
         // Open for append with an exclusive write lock (FileShare.Read lets
