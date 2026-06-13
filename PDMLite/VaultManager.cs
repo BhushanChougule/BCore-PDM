@@ -40,6 +40,17 @@ namespace PDMLite
         }
     }
 
+    // One assembly that directly references a given file (where-used row).
+    // Status/Revision/PartNo come from the parent's vault record.
+    public class WhereUsedEntry
+    {
+        public string Path     { get; set; }
+        public string Name     { get; set; }
+        public string PartNo   { get; set; }
+        public string Revision { get; set; }
+        public string Status   { get; set; }
+    }
+
     public static class VaultManager
     {
         private const string WipFolder = @"N:\PDM-SolidWorks\WIP";
@@ -2705,6 +2716,85 @@ namespace PDMLite
                 }
             }
             catch { }
+        }
+
+        // ── WHERE USED ─────────────────────────────────────────────────────
+        // Public, on-demand: returns the tracked assemblies that DIRECTLY
+        // reference the given file (the immediate parents), each enriched with
+        // PartNo/Revision/Status from its vault record. Reads dependencies from
+        // disk via GetDocumentDependencies2 (traverse=FALSE → top-level
+        // components only, so the result is the DIRECT-parent set; drill up by
+        // running Where Used again on a parent). No UI/open required — same
+        // primitive GetParentAssemblies uses. Best-effort: depends on the stored
+        // reference paths matching the vault path format (same caveat as
+        // GetParentAssemblies). Used by WhereUsedForm.
+        public static List<WhereUsedEntry> GetWhereUsed(string filePath)
+        {
+            var result = new List<WhereUsedEntry>();
+            if (string.IsNullOrEmpty(filePath)) return result;
+            var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            try
+            {
+                string target;
+                try { target = Path.GetFullPath(filePath); }
+                catch { target = filePath; }
+
+                foreach (string asmPath in
+                         DatabaseManager.GetTrackedFilePathsByExtension(".sldasm"))
+                {
+                    string asmFull;
+                    try { asmFull = Path.GetFullPath(asmPath); }
+                    catch { asmFull = asmPath; }
+                    if (string.Equals(asmFull, target,
+                            StringComparison.OrdinalIgnoreCase)) continue; // self
+                    if (!File.Exists(asmPath)) continue;
+
+                    // traverse=false → DIRECT children only.
+                    object depsObj = PDMLiteAddin.SwApp.GetDocumentDependencies2(
+                        asmPath, false, true, false);
+                    string[] deps = depsObj as string[];
+                    if (deps == null) continue;
+
+                    bool referencesTarget = false;
+                    for (int i = 1; i < deps.Length; i += 2)
+                    {
+                        if (string.IsNullOrEmpty(deps[i])) continue;
+                        string depPath;
+                        try { depPath = Path.GetFullPath(deps[i]); }
+                        catch { depPath = deps[i]; }
+                        if (string.Equals(depPath, target,
+                                StringComparison.OrdinalIgnoreCase))
+                        {
+                            referencesTarget = true;
+                            break;
+                        }
+                    }
+                    if (!referencesTarget) continue;
+                    if (!seen.Add(asmFull)) continue;
+
+                    var entry = new WhereUsedEntry
+                    {
+                        Path = asmPath,
+                        Name = Path.GetFileName(asmPath)
+                    };
+                    try
+                    {
+                        var rec = DatabaseManager.GetFileRecord(asmPath);
+                        if (rec != null)
+                        {
+                            entry.PartNo   = rec.PartNumber;
+                            entry.Revision = rec.Revision;
+                            entry.Status   = rec.Status;
+                        }
+                    }
+                    catch { }
+                    result.Add(entry);
+                }
+            }
+            catch { }
+            result.Sort((a, b) => string.Compare(a.Name, b.Name,
+                StringComparison.OrdinalIgnoreCase));
+            return result;
         }
 
         // When a part/assembly starts a new revision, its drawing (same

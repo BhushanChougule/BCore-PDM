@@ -87,6 +87,9 @@ namespace PDMLite
         private ContextMenuStrip _rowMenu;
         private ToolStripMenuItem _miOpen, _miOpenLinked, _miCopyPath, _miOpenFolder;
         private ToolStripMenuItem _miBaseline; // "View As-Released Baseline" (assembly rows)
+        // "Where Used" — shown for models only (parts/sub-assemblies); read-only,
+        // all users. Toggled per-row in Grid_MouseDown.
+        private ToolStripMenuItem _miWhereUsed;
         // Master-only lifecycle items — constructed ONLY for a Master (see
         // _isMaster) so engineers never see them or a dangling separator.
         private ToolStripMenuItem _miObsolete, _miReinstate;
@@ -422,11 +425,14 @@ namespace PDMLite
             // baseline = the exact child file/rev set the assembly was last
             // released against. Opens read-only on top of the dashboard.
             _miBaseline   = new ToolStripMenuItem("View As-Released Baseline", null, (s, e) => MenuViewBaseline());
+            // Where Used: models only (toggled in Grid_MouseDown). Read-only,
+            // all users; opens nested-modal on top of the dashboard.
+            _miWhereUsed  = new ToolStripMenuItem("Where Used…", null, (s, e) => MenuWhereUsed());
             _miCopyPath   = new ToolStripMenuItem("Copy File Path", null, (s, e) => MenuCopyPath());
             _miOpenFolder = new ToolStripMenuItem("Open Containing Folder", null, (s, e) => MenuOpenFolder());
             var menuItems = new List<ToolStripItem>
             {
-                _miOpen, _miOpenLinked, _miBaseline, new ToolStripSeparator(), _miCopyPath, _miOpenFolder
+                _miOpen, _miOpenLinked, _miBaseline, _miWhereUsed, new ToolStripSeparator(), _miCopyPath, _miOpenFolder
             };
             // Master-only lifecycle actions (Grid_MouseDown shows exactly one per
             // row by status). Built only for Masters → engineers never see them
@@ -1394,6 +1400,10 @@ namespace PDMLite
             _miBaseline.Visible = (f.FileName ?? "")
                 .EndsWith(".sldasm", StringComparison.OrdinalIgnoreCase);
 
+            // Where Used applies to models only (a drawing isn't a component).
+            string ext = (Path.GetExtension(f.FileName ?? "") ?? "").ToLowerInvariant();
+            _miWhereUsed.Visible = ext == ".sldprt" || ext == ".sldasm";
+
             // Master lifecycle items. Mark Obsolete shows on every row — on an
             // already-Obsolete row it relabels to "Update Obsolete Details…" so a
             // Master can set/change the reason or replacement after the fact
@@ -1522,6 +1532,25 @@ namespace PDMLite
             if (f == null) return;
             VaultManager.ReinstateFromObsolete(f.FilePath);
             LoadData();
+        }
+
+        // Show which assemblies directly reference this file (read-only, on
+        // demand). Opens ON TOP of the dashboard (nested modal) — not a deferred
+        // open — so the dashboard stays put underneath.
+        private void MenuWhereUsed()
+        {
+            var f = MenuRow();
+            if (f == null) return;
+            try
+            {
+                using (var v = new WhereUsedForm(f.FilePath, f.FileName))
+                    v.ShowDialog(this);
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show("Could not open Where Used:\n" + ex.Message,
+                    "BCore PDM", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            }
         }
 
         // Show the assembly's captured as-released baselines (read-only). Opens
