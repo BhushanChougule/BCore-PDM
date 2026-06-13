@@ -696,12 +696,23 @@ namespace PDMLite
         private void BuildPager()
         {
             if (_bottomPanel == null || _pagerFont == null) return;
-            foreach (var c in _pagerControls)
+            // DEFER the old buttons' disposal — BuildPager is reached from a
+            // pager button's OWN Click handler, and disposing a control while
+            // its Click event is still on the stack is a latent intermittent
+            // ObjectDisposedException (same fix as VaultDashboardForm).
+            if (_pagerControls.Count > 0)
             {
-                _bottomPanel.Controls.Remove(c);
-                c.Dispose();
+                var old = new List<Control>(_pagerControls);
+                _pagerControls.Clear();
+                foreach (var c in old) _bottomPanel.Controls.Remove(c);
+                Action disposeOld = () =>
+                {
+                    foreach (var c in old)
+                        try { c.Dispose(); } catch { }
+                };
+                if (IsHandleCreated) BeginInvoke(disposeOld);
+                else disposeOld();
             }
-            _pagerControls.Clear();
 
             int total = PageCount;
             int current = _page + 1; // 1-based for display
