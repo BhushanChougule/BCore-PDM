@@ -64,6 +64,9 @@
     <Compile Include="AuditReportForm.cs">
       <SubType>Form</SubType>
     </Compile>
+    <Compile Include="BaselineCompareForm.cs">
+      <SubType>Form</SubType>
+    </Compile>
     <Compile Include="BaselineManager.cs" />
     <Compile Include="BaselineViewerForm.cs">
       <SubType>Form</SubType>

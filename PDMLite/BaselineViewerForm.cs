@@ -26,6 +26,7 @@ namespace PDMLite
         private DataGridView _grid;
         private Label _countLabel;
         private Button _btnExport;
+        private Button _btnCompare;
 
         private float _scale = 1f;
         private int S(float v) => (int)(v * _scale);
@@ -162,16 +163,17 @@ namespace PDMLite
             _btnExport = MakeButton("Export CSV", cBrand, Color.White);
             _btnExport.Click += (s, e) => ExportCsv();
 
-            // Anchor both to the bottom-right; lay out on resize.
+            // "Compare…" — diff two releases. Needs at least two captured
+            // baselines; greyed otherwise.
+            _btnCompare = MakeButton("Compare…", cBrandDark, Color.White);
+            _btnCompare.Enabled = _baselines.Count >= 2;
+            _btnCompare.Click += (s, e) => OpenCompare();
+
+            // Anchor to the bottom-right; lay out on resize.
             bottom.Controls.Add(_btnExport);
+            bottom.Controls.Add(_btnCompare);
             bottom.Controls.Add(btnClose);
-            bottom.Resize += (s, e) =>
-            {
-                btnClose.Location = new Point(
-                    bottom.Width - btnClose.Width - S(14), S(9));
-                _btnExport.Location = new Point(
-                    btnClose.Left - _btnExport.Width - S(8), S(9));
-            };
+            bottom.Resize += (s, e) => LayoutBottomButtons(bottom, btnClose);
 
             // ── Component grid (fills the middle) ─────────────────────
             _grid = new DataGridView
@@ -219,10 +221,7 @@ namespace PDMLite
 
             // Initial button layout (the Resize handler covers later resizes;
             // 'bottom' now has its docked width).
-            btnClose.Location = new Point(
-                bottom.Width - btnClose.Width - S(14), S(9));
-            _btnExport.Location = new Point(
-                btnClose.Left - _btnExport.Width - S(8), S(9));
+            LayoutBottomButtons(bottom, btnClose);
 
             this.FormClosed += (s, e) =>
             {
@@ -385,6 +384,32 @@ namespace PDMLite
             var invalid = Path.GetInvalidFileNameChars();
             return new string(name.Select(
                 c => Array.IndexOf(invalid, c) >= 0 ? '_' : c).ToArray());
+        }
+
+        // Right-align Close, then Export, then Compare (right→left).
+        private void LayoutBottomButtons(Panel bottom, Button btnClose)
+        {
+            btnClose.Location = new Point(
+                bottom.Width - btnClose.Width - S(14), S(9));
+            _btnExport.Location = new Point(
+                btnClose.Left - _btnExport.Width - S(8), S(9));
+            _btnCompare.Location = new Point(
+                _btnExport.Left - _btnCompare.Width - S(8), S(9));
+        }
+
+        // Open the two-release comparison (nested-modal on top of the viewer).
+        private void OpenCompare()
+        {
+            try
+            {
+                using (var c = new BaselineCompareForm(_asmPath, _asmName))
+                    c.ShowDialog(this);
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show("Could not open the comparison:\n" + ex.Message,
+                    "BCore PDM", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            }
         }
 
         private Button MakeButton(string text, Color back, Color fore)
