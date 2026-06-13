@@ -1528,10 +1528,18 @@ namespace PDMLite
             }
         }
 
-        // Minimal RFC-4180 CSV escaping (mirrors AuditLogger.Csv).
+        // Minimal RFC-4180 CSV escaping (mirrors AuditLogger.Csv), incl. its
+        // formula-injection guard: the export is opened in Excel, which
+        // EXECUTES fields starting with = + - @ — a Description crafted that
+        // way would run on whoever opens the export. Leading apostrophe makes
+        // Excel render the value as text.
         private static string Csv(string field)
         {
             if (string.IsNullOrEmpty(field)) return "";
+            char c0 = field[0];
+            if (c0 == '=' || c0 == '+' || c0 == '-' || c0 == '@' ||
+                c0 == '\t' || c0 == '\r')
+                field = "'" + field;
             if (field.IndexOf(',') >= 0 || field.IndexOf('"') >= 0 ||
                 field.IndexOf('\n') >= 0 || field.IndexOf('\r') >= 0)
                 return "\"" + field.Replace("\"", "\"\"") + "\"";
