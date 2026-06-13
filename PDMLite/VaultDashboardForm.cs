@@ -84,6 +84,7 @@ namespace PDMLite
         // Row right-click menu (Open / Open linked / Copy path / Open folder).
         private ContextMenuStrip _rowMenu;
         private ToolStripMenuItem _miOpen, _miOpenLinked, _miCopyPath, _miOpenFolder;
+        private ToolStripMenuItem _miBaseline;
         private int _menuViewIndex = -1;  // ABSOLUTE _view index the menu was opened
                                           // on (not grid-relative): a page change
                                           // while the menu is up can't retarget it
@@ -401,11 +402,15 @@ namespace PDMLite
             };
             _miOpen       = new ToolStripMenuItem("Open", null, (s, e) => MenuOpen());
             _miOpenLinked = new ToolStripMenuItem("Open Drawing", null, (s, e) => MenuOpenLinked());
+            // Assembly rows only (toggled in Grid_MouseDown): the as-released
+            // baseline = the exact child file/rev set the assembly was last
+            // released against. Opens read-only on top of the dashboard.
+            _miBaseline   = new ToolStripMenuItem("View As-Released Baseline", null, (s, e) => MenuViewBaseline());
             _miCopyPath   = new ToolStripMenuItem("Copy File Path", null, (s, e) => MenuCopyPath());
             _miOpenFolder = new ToolStripMenuItem("Open Containing Folder", null, (s, e) => MenuOpenFolder());
             _rowMenu.Items.AddRange(new ToolStripItem[]
             {
-                _miOpen, _miOpenLinked, new ToolStripSeparator(), _miCopyPath, _miOpenFolder
+                _miOpen, _miOpenLinked, _miBaseline, new ToolStripSeparator(), _miCopyPath, _miOpenFolder
             });
             foreach (ToolStripItem it in _rowMenu.Items)
                 it.Padding = new Padding(S(6), S(3), S(18), S(3));
@@ -1273,6 +1278,10 @@ namespace PDMLite
             _miOpenLinked.Text = isDrawing ? "Open Model" : "Open Drawing";
             _miOpenLinked.Enabled = !string.IsNullOrEmpty(_menuLinkedPath);
 
+            // Baselines are an assembly-only concept (the resolved child set).
+            _miBaseline.Visible = (f.FileName ?? "")
+                .EndsWith(".sldasm", StringComparison.OrdinalIgnoreCase);
+
             _rowMenu.Show(_grid, e.Location);
         }
 
@@ -1364,6 +1373,25 @@ namespace PDMLite
         {
             var f = MenuRow();
             if (f != null) OpenDeferred(f.FilePath);
+        }
+
+        // Show the assembly's captured as-released baselines (read-only). Opens
+        // ON TOP of the dashboard (nested modal) rather than via OpenDeferred —
+        // it is not a file to open, so the dashboard stays put underneath.
+        private void MenuViewBaseline()
+        {
+            var f = MenuRow();
+            if (f == null) return;
+            try
+            {
+                using (var v = new BaselineViewerForm(f.FilePath, f.FileName))
+                    v.ShowDialog(this);
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show("Could not open the baseline viewer:\n" + ex.Message,
+                    "BCore PDM", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            }
         }
 
         private void MenuOpenLinked()

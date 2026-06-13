@@ -2026,5 +2026,152 @@ namespace PDMLite
             }
             return new List<ConfigEntry>();
         }
+
+        // ── As-Released Baselines ─────────────────────────────────────────
+        // A point-in-time snapshot of the exact resolved child file set (and
+        // their revisions) an assembly was released against, stored under a
+        // lazily-created <Baselines> section. Append-only HISTORY: every
+        // release adds a <Baseline> so the whole release lineage survives; a
+        // re-release of the SAME assembly+rev+config replaces just that one
+        // entry (so it never duplicates). Each component's PartNo/Revision/
+        // Status is read HERE, from this single load — at release time every
+        // tracked child is Released, so its record carries the released rev.
+        // This is a user-initiated mutation (part of Release), so it SAVES
+        // even in degraded-lock mode, exactly like SetFileStatus/UpsertFile.
+        public static void SaveAssemblyBaseline(string asmPath, string asmName,
+            string partNo, string rev, string config, string user,
+            List<BaselineComponent> components)
+        {
+            if (string.IsNullOrEmpty(asmPath)) return;
+            lock (_lock) using (AcquireProcessLock())
+            {
+                var doc = LoadOrCreate();
+                var root = doc.Root;
+
+                var baselines = root.Element("Baselines");
+                if (baselines == null)
+                {
+                    baselines = new XElement("Baselines");
+                    root.Add(baselines);
+                }
+
+                // Replace any prior baseline for the SAME release identity
+                // (assembly path + revision + config); otherwise this is a new
+                // historical entry kept alongside every earlier release.
+                baselines.Elements("Baseline")
+                    .Where(b =>
+                        string.Equals((string)b.Attribute("AssemblyPath"), asmPath,
+                            StringComparison.OrdinalIgnoreCase) &&
+                        string.Equals((string)b.Attribute("Revision") ?? "",
+                            rev ?? "", StringComparison.OrdinalIgnoreCase) &&
+                        string.Equals((string)b.Attribute("Config") ?? "",
+                            config ?? "", StringComparison.OrdinalIgnoreCase))
+                    .ToList()
+                    .ForEach(b => b.Remove());
+
+                var bEl = new XElement("Baseline",
+                    new XAttribute("AssemblyPath", asmPath),
+                    new XAttribute("AssemblyName", asmName ?? ""),
+                    new XAttribute("PartNo", partNo ?? ""),
+                    new XAttribute("Revision", rev ?? ""),
+                    new XAttribute("Config", config ?? ""),
+                    new XAttribute("ReleasedBy", user ?? ""),
+                    new XAttribute("ReleasedDate",
+                        DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss")));
+
+                var files = root.Element("Files");
+                foreach (var comp in components ?? new List<BaselineComponent>())
+                {
+                    string cPartNo = comp.PartNo ?? "";
+                    string cRev    = comp.Revision ?? "";
+                    string cStatus = comp.Status ?? "";
+
+                    // Enrich the un-filled fields from the child's File record
+                    // (same load, no extra lock acquisition).
+                    if ((string.IsNullOrEmpty(cPartNo) || string.IsNullOrEmpty(cRev)
+                         || string.IsNullOrEmpty(cStatus)) && files != null)
+                    {
+                        var fr = files.Elements("File").FirstOrDefault(f =>
+                            string.Equals((string)f.Element("FilePath"), comp.Path,
+                                StringComparison.OrdinalIgnoreCase));
+                        if (fr != null)
+                        {
+                            if (string.IsNullOrEmpty(cPartNo))
+                                cPartNo = (string)fr.Element("PartNumber") ?? "";
+                            if (string.IsNullOrEmpty(cRev))
+                                cRev = (string)fr.Element("Revision") ?? "";
+                            if (string.IsNullOrEmpty(cStatus))
+                                cStatus = (string)fr.Element("Status") ?? "";
+                        }
+                    }
+
+                    bEl.Add(new XElement("Component",
+                        new XAttribute("Path", comp.Path ?? ""),
+                        new XAttribute("Name", comp.Name ?? ""),
+                        new XAttribute("PartNo", cPartNo),
+                        new XAttribute("Revision", cRev),
+                        new XAttribute("Status",
+                            string.IsNullOrEmpty(cStatus) ? "Untracked" : cStatus),
+                        new XAttribute("Qty", comp.Qty)));
+                }
+
+                baselines.Add(bEl);
+                Save(doc);
+            }
+        }
+
+        // Returns every captured baseline for an assembly path, MOST RECENT
+        // FIRST. Read-only — never writes, never purges. Empty list if the
+        // assembly has never been released (or vault.xml has no <Baselines>).
+        public static List<AssemblyBaseline> GetBaselines(string asmPath)
+        {
+            var result = new List<AssemblyBaseline>();
+            if (string.IsNullOrEmpty(asmPath)) return result;
+            lock (_lock) using (AcquireProcessLock())
+            {
+                var doc = LoadOrCreate();
+                var baselines = doc.Root.Element("Baselines");
+                if (baselines == null) return result;
+
+                foreach (var b in baselines.Elements("Baseline"))
+                {
+                    if (!string.Equals((string)b.Attribute("AssemblyPath"), asmPath,
+                            StringComparison.OrdinalIgnoreCase))
+                        continue;
+
+                    var ab = new AssemblyBaseline
+                    {
+                        AssemblyPath = (string)b.Attribute("AssemblyPath") ?? "",
+                        AssemblyName = (string)b.Attribute("AssemblyName") ?? "",
+                        PartNo       = (string)b.Attribute("PartNo")       ?? "",
+                        Revision     = (string)b.Attribute("Revision")     ?? "",
+                        Config       = (string)b.Attribute("Config")       ?? "",
+                        ReleasedBy   = (string)b.Attribute("ReleasedBy")   ?? "",
+                        ReleasedDate = (string)b.Attribute("ReleasedDate") ?? ""
+                    };
+                    foreach (var c in b.Elements("Component"))
+                    {
+                        int qty;
+                        int.TryParse((string)c.Attribute("Qty"), out qty);
+                        ab.Components.Add(new BaselineComponent
+                        {
+                            Path     = (string)c.Attribute("Path")     ?? "",
+                            Name     = (string)c.Attribute("Name")     ?? "",
+                            PartNo   = (string)c.Attribute("PartNo")   ?? "",
+                            Revision = (string)c.Attribute("Revision") ?? "",
+                            Status   = (string)c.Attribute("Status")   ?? "",
+                            Qty      = qty
+                        });
+                    }
+                    result.Add(ab);
+                }
+            }
+            // ReleasedDate is "yyyy-MM-dd HH:mm:ss" → ordinal compare IS
+            // chronological. Newest release first.
+            result.Sort((a, b) =>
+                string.Compare(b.ReleasedDate, a.ReleasedDate,
+                    StringComparison.Ordinal));
+            return result;
+        }
     }
 }
