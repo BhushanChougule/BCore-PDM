@@ -2077,12 +2077,6 @@ namespace PDMLite
             return parents;
         }
 
-        // When a part/assembly starts a new revision, its drawing (same
-        // basename) must follow (Option B — automatic). The drawing's revision
-        // LETTER syncs to the model at drawing-release time, so here we only
-        // archive the released drawing at the OLD rev and return it to WIP for
-        // editing. Returns a human-readable summary line, or null if there is
-        // no drawing at all.
         // SOLIDWORKS' auto-generated flat-pattern config ("{parent}SM-FLAT-PATTERN")
         // keeps its OWN stale copy of the parent config's custom properties — SW
         // copies them when the derived config is created and never updates them
@@ -2115,7 +2109,16 @@ namespace PDMLite
             catch { }
         }
 
+        // When a part/assembly starts a new revision, its drawing (same
+        // basename) must follow (Option B — automatic). The drawing's revision
+        // LETTER syncs to the model at drawing-release time, so here we only
+        // archive the released drawing at the OLD rev and return it to WIP for
+        // editing. Returns a human-readable summary line, or null if there is
+        // no drawing at all.
         private static string StartDrawingRevisionWith(
+            string modelPath, string currentRev, string nextRev, string user,
+            string explicitDrwPath = null)
+        {
             string drwPath = explicitDrwPath ?? FindDrawingPath(modelPath);
             if (drwPath == null) return null; // no drawing — nothing to do
 
