@@ -133,8 +133,9 @@ namespace PDMLite
             AuditLogger.Log("Unlock", PDMLiteAddin.CurrentUser,
                 Path.GetFileName(filePath));
 
-            // Check if the file is open before showing the message so we can
-            // close-and-reopen it after the user clicks OK.
+            // Capture the open doc (if any) BEFORE the message so we can refresh
+            // SOLIDWORKS' cached read-only state after the user clicks OK. The
+            // COM ref stays valid across the modal (nothing closes the doc).
             ModelDoc2 openDoc = PDMLiteAddin.SwApp
                 ?.GetOpenDocumentByName(filePath) as ModelDoc2;
             int reopenType = openDoc != null ? openDoc.GetType() : -1;
@@ -145,18 +146,36 @@ namespace PDMLite
                 MessageBoxButtons.OK,
                 MessageBoxIcon.Information);
 
-            // Close and reopen so SOLIDWORKS discards its cached read-only state.
-            if (reopenType >= 0)
+            // SOLIDWORKS caches the read-only state from the moment a file is
+            // opened, so clearing the disk attribute above is not enough — the
+            // open document (and any open PARENT ASSEMBLY holding it as a
+            // component) keeps showing [Read-only]. ReloadOrReplace(readOnly:false)
+            // is the API behind File > Reload: it re-reads the now-writable file
+            // from disk and promotes it to read-write EVEN when an assembly holds
+            // the component. A plain close+reopen can't do that — CloseDoc is a
+            // no-op while the assembly references the doc, so the cached read-only
+            // document survives and is handed straight back on reopen (found in
+            // PR-52 testing: unlock a Released component with its assembly open →
+            // part stayed [Read-only]). Fall back to close+reopen when the reload
+            // is refused (e.g. unsaved edits) or unavailable.
+            if (openDoc != null)
             {
-                try
+                bool reloaded = false;
+                try { reloaded = openDoc.ReloadOrReplace(false, filePath, true); }
+                catch { reloaded = false; }
+
+                if (!reloaded && reopenType >= 0)
                 {
-                    PDMLiteAddin.SwApp.CloseDoc(filePath);
-                    int errs = 0, warnings = 0;
-                    PDMLiteAddin.SwApp.OpenDoc6(filePath, reopenType,
-                        (int)swOpenDocOptions_e.swOpenDocOptions_Silent,
-                        "", ref errs, ref warnings);
+                    try
+                    {
+                        PDMLiteAddin.SwApp.CloseDoc(filePath);
+                        int errs = 0, warnings = 0;
+                        PDMLiteAddin.SwApp.OpenDoc6(filePath, reopenType,
+                            (int)swOpenDocOptions_e.swOpenDocOptions_Silent,
+                            "", ref errs, ref warnings);
+                    }
+                    catch { }
                 }
-                catch { }
             }
         }
 
