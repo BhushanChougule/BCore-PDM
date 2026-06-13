@@ -477,7 +477,10 @@ namespace PDMLite
 
                 string dateStr = "—";
                 if (DateTime.TryParse(req.RequestDate, out DateTime dt))
-                    dateStr = dt.ToString("dd/MM/yy HH:mm");
+                    // MM/dd like everywhere else — the card rendered dd/MM,
+                    // contradicting the project-wide MM/dd/yyyy convention.
+                    dateStr = dt.ToString("MM/dd/yy HH:mm",
+                        System.Globalization.CultureInfo.InvariantCulture);
                 card.Controls.Add(new Label
                 {
                     Text = dateStr,

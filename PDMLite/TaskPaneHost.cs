@@ -21,9 +21,13 @@ namespace PDMLite
                 // The icon path is optional — we pass empty string for default icon
                 _taskPaneView = swApp.CreateTaskpaneView2(CreateIcon(), "BCore PDM");
 
-                // Display our control inside the Task Pane
+                // Display our control inside the Task Pane.
+                // unchecked 64→32 truncation, NOT Handle.ToInt32(): HWNDs on
+                // 64-bit Windows always fit in 32 BITS, but a value above
+                // 0x7FFFFFFF makes ToInt32() throw OverflowException — the
+                // truncation keeps the bit pattern the API expects.
                 _taskPaneView.DisplayWindowFromHandle(
-                    _taskPaneControl.Handle.ToInt32());
+                    unchecked((int)_taskPaneControl.Handle.ToInt64()));
 
                 // Hook active document change to refresh the panel
                 ((SldWorks)swApp).ActiveDocChangeNotify += OnActiveDocChange;
