@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.IO;
 using System.Net;
 using System.Net.Mail;
@@ -36,7 +37,7 @@ namespace PDMLite
         private static string ToEmail(string username, string domain) =>
             username.ToLower() + "@" + domain;
 
-        // ── Notify both Masters: a request was submitted ─────────────────
+        // ── Notify every Master: a request was submitted ──────────────────
         public static void NotifyRequestSubmitted(string requestType, string fileName,
             string partNo, string rev, string requester, string note)
         {
@@ -53,7 +54,15 @@ namespace PDMLite
                 (string.IsNullOrEmpty(note)   ? "" : $"Note      : {note}\r\n") +
                 "\r\nOpen SOLIDWORKS and click PENDING REQUESTS in BCore PDM to approve or reject.";
 
-            string[] masters = { "bchougule", "rkramarz" };
+            // Masters come from the live role list, not a hardcoded pair — a
+            // Master added via the vault (or roles.config) gets the request
+            // emails without a code change. The original pair stays as a
+            // last-resort fallback when the role source is unreadable.
+            List<string> masters = null;
+            try { masters = DatabaseManager.GetMasterUsernames(); } catch { }
+            if (masters == null || masters.Count == 0)
+                masters = new List<string> { "bchougule", "rkramarz" };
+
             foreach (string m in masters)
                 TrySend(cfg, ToEmail(m, cfg.EmailDomain), subject, body);
         }
@@ -133,6 +142,14 @@ namespace PDMLite
             if (string.IsNullOrWhiteSpace(cfg.SenderPassword))
                 return "SenderPassword is blank in email.config.\n\n" +
                        "Contact IT for the Mailgun SMTP password.";
+            if (!IsTrustedSmtpServer(cfg.SmtpServer))
+                return "SmtpServer is \"" + cfg.SmtpServer + "\" — BCore PDM " +
+                       "only sends through *.mailgun.org (the company's " +
+                       "provider).\n\n" +
+                       "This pin protects the SMTP password: email.config is " +
+                       "on a shared drive, and a tampered server entry would " +
+                       "receive the credential. Fix <SmtpServer> in:\n" +
+                       ConfigPath;
 
             // Send to the logged-in user's own address — same derivation used
             // for real notifications — so they actually receive it and can
@@ -173,24 +190,50 @@ namespace PDMLite
                    "\n\nCheck that inbox to confirm it arrived.";
         }
 
-        // ── Internal send — never throws, always fire-and-forget ─────────
+        // ── SMTP host pin (audit H6) ──────────────────────────────────────
+        // email.config lives on a share every engineer can WRITE, so a
+        // tampered <SmtpServer> would hand the SMTP password to an attacker's
+        // server on the next send (the credential is transmitted to whatever
+        // host is configured). Hard-pin in CODE — a config-side allowlist
+        // would be editable by the same attacker. Only the company's provider
+        // (Mailgun) ever receives the credential; moving providers is a
+        // deliberate code change. SendTestEmail surfaces a clear message when
+        // the pin blocks a send.
+        private static bool IsTrustedSmtpServer(string server)
+        {
+            string s = (server ?? "").Trim();
+            return s.Equals("mailgun.org", StringComparison.OrdinalIgnoreCase)
+                || s.EndsWith(".mailgun.org", StringComparison.OrdinalIgnoreCase);
+        }
+
+        // ── Internal send — never throws, never blocks the UI ────────────
+        // The actual SMTP work runs on a BACKGROUND thread: SmtpClient.Send
+        // blocks up to Timeout (10s) per recipient and every Notify* call
+        // happens inside a Click handler on SOLIDWORKS' UI thread — a request
+        // submission froze SOLIDWORKS for up to ~20s (2 Masters × 10s) when
+        // Mailgun was unreachable. Failure stays swallowed (non-fatal), so
+        // backgrounding changes nothing about error handling.
         private static void TrySend(EmailConfig cfg, string to,
             string subject, string body)
         {
-            try
+            if (!IsTrustedSmtpServer(cfg.SmtpServer)) return; // see pin above
+            System.Threading.ThreadPool.QueueUserWorkItem(_ =>
             {
-                using (var client = new SmtpClient(cfg.SmtpServer, cfg.SmtpPort))
+                try
                 {
-                    client.EnableSsl = true;
-                    client.Credentials = new NetworkCredential(
-                        cfg.SenderEmail, cfg.SenderPassword);
-                    client.Timeout = 10000;
+                    using (var client = new SmtpClient(cfg.SmtpServer, cfg.SmtpPort))
+                    {
+                        client.EnableSsl = true;
+                        client.Credentials = new NetworkCredential(
+                            cfg.SenderEmail, cfg.SenderPassword);
+                        client.Timeout = 10000;
 
-                    using (var msg = new MailMessage(cfg.SenderEmail, to, subject, body))
-                        client.Send(msg);
+                        using (var msg = new MailMessage(cfg.SenderEmail, to, subject, body))
+                            client.Send(msg);
+                    }
                 }
-            }
-            catch { /* non-fatal — email failure never blocks workflow */ }
+                catch { /* non-fatal — email failure never blocks workflow */ }
+            });
         }
 
         // ── Create a template config file for first-time setup ───────────
