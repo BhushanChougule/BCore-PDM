@@ -652,7 +652,7 @@ namespace PDMLite
             // showing THAT config's own PartNo / Description / Revision (never the
             // active config's). A drawing result maps back to its model and is
             // skipped if that model also matched (it is expanded there instead).
-            var cards = BuildConfigCards(results, term.ToLower());
+            var cards = BuildConfigCards(results, term.ToLowerInvariant());
 
             // Cap the rendered cards. SearchFiles caps at 50 FILES, but a
             // multi-config part expands to ONE card per configuration, so 50
@@ -996,8 +996,8 @@ namespace PDMLite
             string fileName = string.IsNullOrEmpty(model.FileName)
                 ? Path.GetFileName(model.FilePath) : model.FileName;
             string baseName = Path.GetFileNameWithoutExtension(fileName);
-            string ext = Path.GetExtension(fileName).ToLower();
-            bool nameMatched = baseName.ToLower().Contains(termL);
+            string ext = Path.GetExtension(fileName).ToLowerInvariant();
+            bool nameMatched = baseName.ToLowerInvariant().Contains(termL);
 
             var configs = model.Configurations;
             if (configs == null || configs.Count == 0)
@@ -1010,8 +1010,8 @@ namespace PDMLite
             foreach (var c in configs)
             {
                 bool match = total <= 1 || nameMatched
-                          || (c.PartNo ?? "").ToLower().Contains(termL)
-                          || (c.Description ?? "").ToLower().Contains(termL);
+                          || (c.PartNo ?? "").ToLowerInvariant().Contains(termL)
+                          || (c.Description ?? "").ToLowerInvariant().Contains(termL);
                 if (match) shown.Add(c);
             }
             if (shown.Count == 0) shown = configs; // never drop a matched file
@@ -1126,8 +1126,13 @@ namespace PDMLite
 
             string partNo = PropertyValidator.GetProperty(doc, "PartNo");
 
-            bool isMaster = DatabaseManager.GetUserRole(
-                PDMLiteAddin.CurrentUser) == "Master";
+            bool isMaster = false;
+            try
+            {
+                isMaster = DatabaseManager.GetUserRole(
+                    PDMLiteAddin.CurrentUser) == "Master";
+            }
+            catch { }
             bool isDrawing = doc.GetType() ==
                 (int)swDocumentTypes_e.swDocDRAWING;
             // A drawing's revision is DRIVEN BY THE MODEL it documents (the part is
@@ -1298,7 +1303,26 @@ namespace PDMLite
         }
 
         // ── Button Actions ────────────────────────────────────────────
+        // The single choke point for every task-pane button. The whole
+        // dispatch is guarded: VaultManager / DatabaseManager calls do raw
+        // network I/O, and an N:-drive blip mid-click would otherwise throw
+        // unhandled on SOLIDWORKS' message loop (the search and refresh paths
+        // are guarded individually; this covers the action buttons).
         private void DoAction(string action)
+        {
+            try { DoActionCore(action); }
+            catch (Exception ex)
+            {
+                MessageBox.Show(
+                    "The action could not be completed — the vault may be " +
+                    "unavailable.\n\nCheck the N: drive and try again.\n\n" +
+                    "Detail: " + ex.Message,
+                    "BCore PDM — Vault Unavailable",
+                    MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            }
+        }
+
+        private void DoActionCore(string action)
         {
             ModelDoc2 doc = PDMLiteAddin.SwApp?.ActiveDoc as ModelDoc2;
             if (doc == null)

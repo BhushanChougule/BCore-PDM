@@ -661,14 +661,17 @@ namespace PDMLite
                 }
                 else if (existing != null)
                 {
-                    existing.Element("FileName").Value    = f.FileName;
-                    existing.Element("PartNumber").Value  = f.PartNumber  ?? "";
-                    existing.Element("Description").Value = f.Description ?? "";
-                    existing.Element("ModifiedBy").Value  = f.ModifiedBy  ?? "";
-                    existing.Element("ModifiedDate").Value = f.ModifiedDate.ToString("o");
+                    // SetOrAdd throughout — a legacy/hand-repaired record
+                    // missing any of these elements NRE'd the whole upsert
+                    // (.Element(x).Value on a null element).
+                    SetOrAdd(existing, "FileName",     f.FileName);
+                    SetOrAdd(existing, "PartNumber",   f.PartNumber  ?? "");
+                    SetOrAdd(existing, "Description",  f.Description ?? "");
+                    SetOrAdd(existing, "ModifiedBy",   f.ModifiedBy  ?? "");
+                    SetOrAdd(existing, "ModifiedDate", f.ModifiedDate.ToString("o"));
 
                     if (!string.IsNullOrEmpty(f.Status))
-                        existing.Element("Status").Value = f.Status;
+                        SetOrAdd(existing, "Status", f.Status);
 
                     // Revision (may not exist in old records — add if missing).
                     SetOrAdd(existing, "Revision", f.Revision ?? "");
@@ -760,7 +763,7 @@ namespace PDMLite
                     if (string.Equals((string)el.Element("FilePath"), filePath,
                             StringComparison.OrdinalIgnoreCase))
                     {
-                        el.Element("Status").Value = status;
+                        SetOrAdd(el, "Status", status); // legacy-safe (no NRE)
                         break;
                     }
                 }
@@ -789,8 +792,8 @@ namespace PDMLite
                     if (string.Equals((string)el.Element("FilePath"), filePath,
                             StringComparison.OrdinalIgnoreCase))
                     {
-                        el.Element("HasBrokenRefs").Value =
-                            hasBroken ? "true" : "false";
+                        SetOrAdd(el, "HasBrokenRefs",   // legacy-safe (no NRE)
+                            hasBroken ? "true" : "false");
                         break;
                     }
                 }
@@ -906,8 +909,10 @@ namespace PDMLite
                     if (string.Equals((string)el.Element("FilePath"), filePath,
                             StringComparison.OrdinalIgnoreCase))
                     {
-                        el.Element("LockedBy").Value = lockedBy;
-                        el.Element("LockedDate").Value = DateTime.Now.ToString("o");
+                        // SetOrAdd, not .Element(x).Value: a legacy/hand-
+                        // repaired record missing the element NRE'd here.
+                        SetOrAdd(el, "LockedBy", lockedBy);
+                        SetOrAdd(el, "LockedDate", DateTime.Now.ToString("o"));
                         break;
                     }
                 }
@@ -925,8 +930,8 @@ namespace PDMLite
                     if (string.Equals((string)el.Element("FilePath"), filePath,
                             StringComparison.OrdinalIgnoreCase))
                     {
-                        el.Element("LockedBy").Value = "";
-                        el.Element("LockedDate").Value = "";
+                        SetOrAdd(el, "LockedBy", "");
+                        SetOrAdd(el, "LockedDate", "");
                         break;
                     }
                 }
@@ -947,12 +952,21 @@ namespace PDMLite
                         string lockedBy = (string)el.Element("LockedBy") ?? "";
                         if (!string.IsNullOrEmpty(lockedBy))
                         {
+                            // TryParse — a hand-edited/legacy LockedDate used to
+                            // THROW out of DateTime.Parse (it was the only
+                            // unguarded date parse in the file) and break every
+                            // caller, task-pane refresh included. An
+                            // unparseable date reads as MinValue; the lock
+                            // itself still reports correctly.
+                            DateTime lockedDate;
+                            DateTime.TryParse(
+                                (string)el.Element("LockedDate"),
+                                out lockedDate);
                             return new LockInfo
                             {
                                 IsLocked = true,
                                 LockedBy = lockedBy,
-                                LockedDate = DateTime.Parse(
-                                    (string)el.Element("LockedDate"))
+                                LockedDate = lockedDate
                             };
                         }
                     }
@@ -1015,7 +1029,8 @@ namespace PDMLite
 
                 if (mine != null)
                 {
-                    mine.Element("OpenedDate").Value = DateTime.Now.ToString("o");
+                    SetOrAdd(mine, "OpenedDate",        // legacy-safe (no NRE)
+                        DateTime.Now.ToString("o"));
                 }
                 else
                 {
@@ -1501,7 +1516,10 @@ namespace PDMLite
             var results = new List<VaultFile>();
             if (string.IsNullOrWhiteSpace(searchTerm)) return results;
 
-            string term = searchTerm.ToLower().Trim();
+            // ToLowerInvariant throughout the scan: culture-sensitive ToLower
+            // breaks matching on locales with special casing (Turkish dotless
+            // I turns "FIle" ≠ "file") and rebinds the culture per call.
+            string term = searchTerm.ToLowerInvariant().Trim();
             var seenFileNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             var purged = new List<VaultFile>();
 
@@ -1532,9 +1550,9 @@ namespace PDMLite
                     // Match the term against the file-level PN/desc/name, AND
                     // against every configuration's PN and description so a
                     // multi-config part is findable by any of its part numbers.
-                    bool matchFound = partNoRaw.ToLower().Contains(term)
-                                   || descRaw.ToLower().Contains(term)
-                                   || fileName.ToLower().Contains(term);
+                    bool matchFound = partNoRaw.ToLowerInvariant().Contains(term)
+                                   || descRaw.ToLowerInvariant().Contains(term)
+                                   || fileName.ToLowerInvariant().Contains(term);
 
                     if (!matchFound)
                     {
@@ -1543,8 +1561,8 @@ namespace PDMLite
                         {
                             foreach (var c in cfgEl.Elements("Config"))
                             {
-                                if (((string)c.Element("PartNo")      ?? "").ToLower().Contains(term) ||
-                                    ((string)c.Element("Description") ?? "").ToLower().Contains(term))
+                                if (((string)c.Element("PartNo")      ?? "").ToLowerInvariant().Contains(term) ||
+                                    ((string)c.Element("Description") ?? "").ToLowerInvariant().Contains(term))
                                 {
                                     matchFound = true;
                                     break;
@@ -1773,7 +1791,8 @@ namespace PDMLite
         {
             truncated = false;
             var results = new List<VaultFile>();
-            string term = (filter ?? "").ToLower().Trim();
+            // ToLowerInvariant — same culture-safety as SearchFiles.
+            string term = (filter ?? "").ToLowerInvariant().Trim();
             var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
             lock (_lock) using (AcquireProcessLock())
@@ -1791,9 +1810,9 @@ namespace PDMLite
                     string descRaw   = (string)el.Element("Description") ?? "";
 
                     if (term.Length > 0 &&
-                        !(partNoRaw.ToLower().Contains(term) ||
-                          descRaw.ToLower().Contains(term) ||
-                          fileName.ToLower().Contains(term)))
+                        !(partNoRaw.ToLowerInvariant().Contains(term) ||
+                          descRaw.ToLowerInvariant().Contains(term) ||
+                          fileName.ToLowerInvariant().Contains(term)))
                         continue;
 
                     string filePath = (string)el.Element("FilePath") ?? "";
