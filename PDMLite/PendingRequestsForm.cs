@@ -44,6 +44,29 @@ namespace PDMLite
         // programmatic checks don't recurse.
         private bool _syncing;
 
+        // Re-entrancy guard for the approve/reject/batch actions. A running
+        // batch pumps messages through its dialogs (confirm boxes, blocker
+        // popups, SOLIDWORKS work), so without this a second click on any
+        // action button started a SECOND batch inside the first one.
+        private bool _busy;
+
+        // Run one action exclusively: ignore clicks while a previous action is
+        // still pumping, and grey the form so the busy state is visible. Modal
+        // dialogs opened by the action still work (they don't need the form
+        // enabled).
+        private void RunExclusive(Action action)
+        {
+            if (_busy) return;
+            _busy = true;
+            this.Enabled = false;
+            try { action(); }
+            finally
+            {
+                this.Enabled = true;
+                _busy = false;
+            }
+        }
+
         // Card fonts, created once: PopulateSection runs 3× per LoadRequests
         // (and LoadRequests after every approve/reject), and a Font assigned
         // to a control is not owned by it — per-call fonts leaked a GDI
@@ -206,7 +229,8 @@ namespace PDMLite
                 };
                 btnSel.FlatAppearance.BorderSize = 0;
                 int idx = i;
-                btnSel.Click += (s, e) => ApproveSelectedColumn(idx);
+                btnSel.Click += (s, e) =>
+                    RunExclusive(() => ApproveSelectedColumn(idx));
                 this.Controls.Add(btnSel);
             }
 
@@ -243,7 +267,7 @@ namespace PDMLite
                 Cursor = Cursors.Hand
             };
             btnApproveAll.FlatAppearance.BorderSize = 0;
-            btnApproveAll.Click += (s, e) => ApproveAllPending();
+            btnApproveAll.Click += (s, e) => RunExclusive(ApproveAllPending);
             this.Controls.Add(btnApproveAll);
 
             Button btnBulkRelease = new Button
@@ -259,11 +283,11 @@ namespace PDMLite
                 Cursor = Cursors.Hand
             };
             btnBulkRelease.FlatAppearance.BorderSize = 0;
-            btnBulkRelease.Click += (s, e) =>
+            btnBulkRelease.Click += (s, e) => RunExclusive(() =>
             {
                 using (var f = new BulkReleaseForm(_scale)) f.ShowDialog(this);
                 LoadRequests();
-            };
+            });
             this.Controls.Add(btnBulkRelease);
         }
 
@@ -479,11 +503,11 @@ namespace PDMLite
                     Cursor = Cursors.Hand
                 };
                 btnApprove.FlatAppearance.BorderSize = 0;
-                btnApprove.Click += (s, e) =>
+                btnApprove.Click += (s, e) => RunExclusive(() =>
                 {
                     ApproveSingle(capturedReq, type);
                     LoadRequests();
-                };
+                });
                 card.Controls.Add(btnApprove);
 
                 Button btnReject = new Button
@@ -499,11 +523,11 @@ namespace PDMLite
                     Cursor = Cursors.Hand
                 };
                 btnReject.FlatAppearance.BorderSize = 0;
-                btnReject.Click += (s, e) =>
+                btnReject.Click += (s, e) => RunExclusive(() =>
                 {
                     VaultManager.RejectRequest(capturedReq);
                     LoadRequests();
-                };
+                });
                 card.Controls.Add(btnReject);
 
                 card.Controls.Add(new Panel

@@ -107,6 +107,9 @@ namespace PDMLite
                 return;
             }
 
+            // Never silently steal another Master's existing hard lock.
+            if (BlockedByOthersLock(filePath, user, "lock the file")) return;
+
             DatabaseManager.LockFile(filePath, user);
             DatabaseManager.SetFileStatus(filePath, "Locked", user,
                 "File locked by Master");
@@ -120,43 +123,82 @@ namespace PDMLite
         }
 
         // ── UNLOCK ────────────────────────────────────────────────────────
-        public static void UnlockFile(string filePath)
+        // Returns TRUE only when the unlock actually ran — request-approval
+        // callers must not resolve a request (or email "approved") for an
+        // unlock that was declined or blocked by an in-flight operation.
+        public static bool UnlockFile(string filePath)
         {
-            if (!IsMaster(PDMLiteAddin.CurrentUser)) { NotMaster(); return; }
+            string user = PDMLiteAddin.CurrentUser;
+            if (!IsMaster(user)) { NotMaster(); return false; }
 
-            // Remove OS-level read-only protection
-            SetReadOnly(filePath, false);
-
-            DatabaseManager.UnlockFile(filePath);
-            DatabaseManager.SetFileStatus(filePath, "WIP",
-                PDMLiteAddin.CurrentUser, "Unlocked by Master");
-            AuditLogger.Log("Unlock", PDMLiteAddin.CurrentUser,
-                Path.GetFileName(filePath));
-
-            // Check if the file is open before showing the message so we can
-            // close-and-reopen it after the user clicks OK.
-            ModelDoc2 openDoc = PDMLiteAddin.SwApp
-                ?.GetOpenDocumentByName(filePath) as ModelDoc2;
-            int reopenType = openDoc != null ? openDoc.GetType() : -1;
-
-            MessageBox.Show(
-                "File unlocked and returned to WIP.\nEngineers can now edit it.",
-                "BCore PDM — Unlocked",
-                MessageBoxButtons.OK,
-                MessageBoxIcon.Information);
-
-            // Close and reopen so SOLIDWORKS discards its cached read-only state.
-            if (reopenType >= 0)
+            // Unlock IS the designated way to release another Master's hard
+            // lock — allowed, but explicitly confirmed, never silent.
+            try
             {
-                try
+                if (string.Equals(DatabaseManager.GetFileStatus(filePath),
+                        "Locked", StringComparison.OrdinalIgnoreCase))
                 {
-                    PDMLiteAddin.SwApp.CloseDoc(filePath);
-                    int errs = 0, warnings = 0;
-                    PDMLiteAddin.SwApp.OpenDoc6(filePath, reopenType,
-                        (int)swOpenDocOptions_e.swOpenDocOptions_Silent,
-                        "", ref errs, ref warnings);
+                    var li = DatabaseManager.GetLockInfo(filePath);
+                    if (li != null && li.IsLocked &&
+                        !string.Equals(li.LockedBy, user,
+                            StringComparison.OrdinalIgnoreCase))
+                    {
+                        if (MessageBox.Show(
+                                "This file is LOCKED by " + li.LockedBy + ".\n\n" +
+                                "File : " + Path.GetFileName(filePath) + "\n\n" +
+                                "Unlock it anyway?",
+                                "BCore PDM — Locked by " + li.LockedBy,
+                                MessageBoxButtons.YesNo, MessageBoxIcon.Warning)
+                            != DialogResult.Yes)
+                            return false;
+                    }
                 }
-                catch { }
+            }
+            catch { } // DB unreadable — the calls below surface the real error
+
+            // Exclusive claim: an unlock racing a Release/Rollback would strip
+            // read-only out from under the snapshot being published.
+            if (!BeginVaultOperation(filePath, user, "Unlock")) return false;
+            try
+            {
+                // Remove OS-level read-only protection
+                SetReadOnly(filePath, false);
+
+                DatabaseManager.UnlockFile(filePath);
+                DatabaseManager.SetFileStatus(filePath, "WIP",
+                    user, "Unlocked by Master");
+                AuditLogger.Log("Unlock", user, Path.GetFileName(filePath));
+
+                // Check if the file is open before showing the message so we can
+                // close-and-reopen it after the user clicks OK.
+                ModelDoc2 openDoc = PDMLiteAddin.SwApp
+                    ?.GetOpenDocumentByName(filePath) as ModelDoc2;
+                int reopenType = openDoc != null ? openDoc.GetType() : -1;
+
+                MessageBox.Show(
+                    "File unlocked and returned to WIP.\nEngineers can now edit it.",
+                    "BCore PDM — Unlocked",
+                    MessageBoxButtons.OK,
+                    MessageBoxIcon.Information);
+
+                // Close and reopen so SOLIDWORKS discards its cached read-only state.
+                if (reopenType >= 0)
+                {
+                    try
+                    {
+                        PDMLiteAddin.SwApp.CloseDoc(filePath);
+                        int errs = 0, warnings = 0;
+                        PDMLiteAddin.SwApp.OpenDoc6(filePath, reopenType,
+                            (int)swOpenDocOptions_e.swOpenDocOptions_Silent,
+                            "", ref errs, ref warnings);
+                    }
+                    catch { }
+                }
+                return true;
+            }
+            finally
+            {
+                EndVaultOperation(filePath, user);
             }
         }
 
@@ -206,6 +248,29 @@ namespace PDMLite
                 return;
             }
 
+            // A hard Master Lock held by someone else must not be dissolved by
+            // deleting the record out from under it.
+            if (BlockedByOthersLock(filePath, user, "remove the file")) return;
+
+            // Exclusive claim for the whole flow (confirm dialog included) so a
+            // second Master can't release/revise this file while it is being
+            // retired.
+            if (!BeginVaultOperation(filePath, user, "Remove from Vault")) return;
+            try
+            {
+                RemoveFromVaultCore(doc, user, filePath, fileName, status);
+            }
+            finally
+            {
+                EndVaultOperation(filePath, user);
+            }
+        }
+
+        // The remove flow proper. Master/saved/status/lock/claim guards live in
+        // the public wrapper above; this method assumes them done.
+        private static void RemoveFromVaultCore(ModelDoc2 doc, string user,
+            string filePath, string fileName, string status)
+        {
             // Capture properties NOW — the doc is closed before files are moved.
             string ext = Path.GetExtension(filePath).ToLower();
             bool isDrawing = ext == ".slddrw";
@@ -477,17 +542,6 @@ namespace PDMLite
         {
             string user = PDMLiteAddin.CurrentUser;
             string filePath = doc.GetPathName();
-            int docType = doc.GetType();
-            bool isDrawing = docType == (int)swDocumentTypes_e.swDocDRAWING;
-
-            // Set when a WIP referenced model was released alongside this drawing
-            // (see the drawing gate below). Suppresses this drawing's own confirm
-            // dialog and swaps the success message for a combined one.
-            bool chainedRelease = false;
-            string chainedModelName = null;
-            // Hoisted to function scope so the close block can reference it.
-            // Set inside the isDrawing gate below.
-            string referencedModel = null;
 
             if (!IsMaster(user)) { NotMaster(); return; }
 
@@ -501,6 +555,56 @@ namespace PDMLite
                     MessageBoxIcon.Stop);
                 return;
             }
+
+            // Re-releasing a Released file would double-run the exports and
+            // archives and re-stamp history with no change on disk. BulkRelease
+            // and BulkApprove pre-check too; this guards the task-pane button
+            // and every direct call.
+            if (string.Equals(DatabaseManager.GetFileStatus(filePath),
+                    "Released", StringComparison.OrdinalIgnoreCase))
+            {
+                MessageBox.Show(
+                    Path.GetFileName(filePath) + " is already Released.\n\n" +
+                    "Use Unlock or New Revision to edit it again.",
+                    "BCore PDM — Already Released",
+                    MessageBoxButtons.OK, MessageBoxIcon.Information);
+                return;
+            }
+
+            // A hard Master Lock held by someone else must not be silently
+            // stolen by the release's final LockFile/SetFileStatus.
+            if (BlockedByOthersLock(filePath, user, "release the file")) return;
+
+            // Exclusive claim for the WHOLE flow (dialogs included) so a second
+            // Master can't start a conflicting operation on this file mid-release.
+            if (!BeginVaultOperation(filePath, user, "Release")) return;
+            try
+            {
+                ReleaseFileCore(doc, suppressPrompts);
+            }
+            finally
+            {
+                EndVaultOperation(filePath, user);
+            }
+        }
+
+        // The release flow proper. All Master/saved/status/lock/claim guards
+        // live in the public wrapper above; this method assumes them done.
+        private static void ReleaseFileCore(ModelDoc2 doc, bool suppressPrompts)
+        {
+            string user = PDMLiteAddin.CurrentUser;
+            string filePath = doc.GetPathName();
+            int docType = doc.GetType();
+            bool isDrawing = docType == (int)swDocumentTypes_e.swDocDRAWING;
+
+            // Set when a WIP referenced model was released alongside this drawing
+            // (see the drawing gate below). Suppresses this drawing's own confirm
+            // dialog and swaps the success message for a combined one.
+            bool chainedRelease = false;
+            string chainedModelName = null;
+            // Hoisted to function scope so the close block can reference it.
+            // Set inside the isDrawing gate below.
+            string referencedModel = null;
 
             // ── Drawing: check referenced part is Released first ──────────
             if (isDrawing)
@@ -1348,6 +1452,31 @@ namespace PDMLite
                 return false;
             }
 
+            string opPath = doc.GetPathName();
+
+            // A hard Master Lock held by someone else must not be bypassed —
+            // New Revision sets the file WIP, silently dissolving their lock.
+            if (BlockedByOthersLock(opPath, user, "start a new revision"))
+                return false;
+
+            // Exclusive claim for the whole flow (picker + confirm dialogs
+            // included) so two Masters can't double-bump the same file.
+            if (!BeginVaultOperation(opPath, user, "New Revision")) return false;
+            try
+            {
+                return StartNewRevisionCore(doc, suppressPrompts);
+            }
+            finally
+            {
+                EndVaultOperation(opPath, user);
+            }
+        }
+
+        // The revision flow proper. Master/saved/lock/claim guards live in the
+        // public wrapper above; this method assumes them done.
+        private static bool StartNewRevisionCore(ModelDoc2 doc, bool suppressPrompts)
+        {
+            string user = PDMLiteAddin.CurrentUser;
             string filePath   = doc.GetPathName();
             // The file's status BEFORE anything is touched — the abort paths
             // must restore THIS state, not assume Released: New Revision is
@@ -2107,14 +2236,12 @@ namespace PDMLite
         public static void RollbackRevision(ModelDoc2 doc)
         {
             string user = PDMLiteAddin.CurrentUser;
-            string filePath = doc.GetPathName();
-            string fileName = Path.GetFileNameWithoutExtension(filePath);
-            string ext = Path.GetExtension(filePath).ToLower();
+            string opPath = doc.GetPathName();
 
             if (!IsMaster(user)) { NotMaster(); return; }
 
             // Check file has been saved to disk
-            if (string.IsNullOrEmpty(filePath))
+            if (string.IsNullOrEmpty(opPath))
             {
                 MessageBox.Show(
                     "Please save the file before releasing it.",
@@ -2123,6 +2250,33 @@ namespace PDMLite
                     MessageBoxIcon.Stop);
                 return;
             }
+
+            // A hard Master Lock held by someone else must not be overwritten
+            // by the rollback's final LockFile/SetFileStatus.
+            if (BlockedByOthersLock(opPath, user, "roll back the file")) return;
+
+            // Exclusive claim for the whole flow (archive picker + confirm
+            // dialogs included) so a second Master can't release/revise/remove
+            // this file while the rollback is mid-restore.
+            if (!BeginVaultOperation(opPath, user, "Rollback")) return;
+            try
+            {
+                RollbackRevisionCore(doc);
+            }
+            finally
+            {
+                EndVaultOperation(opPath, user);
+            }
+        }
+
+        // The rollback flow proper. Master/saved/lock/claim guards live in the
+        // public wrapper above; this method assumes them done.
+        private static void RollbackRevisionCore(ModelDoc2 doc)
+        {
+            string user = PDMLiteAddin.CurrentUser;
+            string filePath = doc.GetPathName();
+            string fileName = Path.GetFileNameWithoutExtension(filePath);
+            string ext = Path.GetExtension(filePath).ToLower();
 
             // Find correct archive subfolder
             string subFolder = ext == ".sldprt" ? "PARTS"
@@ -3180,21 +3334,49 @@ namespace PDMLite
 
             var list = (requests ?? Enumerable.Empty<RevisionRequest>()).ToList();
 
-            // 1) Unlocks — pure DB/read-only ops, always succeed.
+            // The popup's request list is a SNAPSHOT — another Master may have
+            // approved/rejected any of these since it loaded. Re-check each
+            // request at action time and skip the already-handled ones instead
+            // of double-executing (double bump / double release).
+            Func<RevisionRequest, bool> stillPending = r =>
+            {
+                try { return DatabaseManager.IsRequestPending(r.Id); }
+                catch { return true; } // DB hiccup — let the action surface it
+            };
+
+            // 1) Unlocks — resolve ONLY when the unlock actually ran (it can
+            // be declined at the locked-by-other confirm, or blocked by an
+            // in-flight operation claim).
             foreach (var r in list.Where(r => r.RequestType == "Unlock"))
             {
-                UnlockFile(r.FilePath);
-                DatabaseManager.ResolveRequest(r.Id, "Approved");
-                EmailManager.NotifyRequestApproved("Unlock", r.FileName, r.RequestedBy);
-                AuditLogger.Log("ApproveRequest", user, r.FileName, "", "",
-                    "bulk unlock (requested by " + r.RequestedBy + ")");
-                result.Succeeded.Add(r.FileName + "  (unlock)");
+                if (!stillPending(r))
+                {
+                    result.Skipped.Add(r.FileName + " — already handled by another Master");
+                    continue;
+                }
+                if (UnlockFile(r.FilePath))
+                {
+                    DatabaseManager.ResolveRequest(r.Id, "Approved");
+                    EmailManager.NotifyRequestApproved("Unlock", r.FileName, r.RequestedBy);
+                    AuditLogger.Log("ApproveRequest", user, r.FileName, "", "",
+                        "bulk unlock (requested by " + r.RequestedBy + ")");
+                    result.Succeeded.Add(r.FileName + "  (unlock)");
+                }
+                else
+                {
+                    result.Skipped.Add(r.FileName + " — unlock did not run");
+                }
             }
 
             // 2) Revisions.
             foreach (var r in list.Where(r => r.RequestType == "Revision" ||
                                               string.IsNullOrEmpty(r.RequestType)))
             {
+                if (!stillPending(r))
+                {
+                    result.Skipped.Add(r.FileName + " — already handled by another Master");
+                    continue;
+                }
                 ModelDoc2 doc = OpenByPath(r.FilePath);
                 if (doc == null)
                 {
@@ -3223,6 +3405,23 @@ namespace PDMLite
             foreach (var r in list.Where(r => r.RequestType == "Release")
                                   .OrderBy(r => ReleaseOrderKey(r.FilePath)))
             {
+                if (!stillPending(r))
+                {
+                    result.Skipped.Add(r.FileName + " — already handled by another Master");
+                    continue;
+                }
+                // Already Released (e.g. via Bulk Release, or by the other
+                // Master outside this request): the request's goal is met —
+                // resolve it instead of leaving it pending forever.
+                if (DatabaseManager.GetFileStatus(r.FilePath) == "Released")
+                {
+                    DatabaseManager.ResolveRequest(r.Id, "Approved");
+                    EmailManager.NotifyRequestApproved("Release", r.FileName, r.RequestedBy);
+                    AuditLogger.Log("ApproveRequest", user, r.FileName, "", "",
+                        "already Released (requested by " + r.RequestedBy + ")");
+                    result.Succeeded.Add(r.FileName + "  (already Released)");
+                    continue;
+                }
                 ModelDoc2 doc = OpenByPath(r.FilePath);
                 if (doc == null)
                 {
@@ -3245,38 +3444,27 @@ namespace PDMLite
             return result;
         }
 
-        // ── APPROVE REQUEST — Master approves and starts new revision ─
-        // Note: PendingRequestsForm now routes all single-card approvals through
-        // BulkApprove. This method is kept for any direct call sites and mirrors
-        // the same success-gated logic: auto-open, act, resolve only on success.
+        // ── APPROVE REQUEST — Master approves a single request ─────────
+        // Routes through BulkApprove so the action matches the request's TYPE
+        // (Unlock → UnlockFile, Revision → StartNewRevision, Release →
+        // ReleaseFile) with the same success-gated resolution. Previously this
+        // ran StartNewRevision for EVERY type — a Release request approved
+        // here was revision-bumped instead of released, and the engineer was
+        // then emailed "Release approved". No current UI path calls this
+        // (PendingRequestsForm routes through BulkApprove directly); kept
+        // type-correct for any direct call site.
         public static void ApproveRequest(RevisionRequest request)
         {
             string user = PDMLiteAddin.CurrentUser;
             if (!IsMaster(user)) { NotMaster(); return; }
+            if (request == null) return;
 
-            ModelDoc2 doc = OpenByPath(request.FilePath);
-            if (doc == null)
-            {
-                MessageBox.Show(
-                    "Could not open:\n" + request.FileName +
-                    "\n\nVerify the file exists in the vault.",
-                    "BCore PDM — Approve Request",
-                    MessageBoxButtons.OK, MessageBoxIcon.Warning);
-                return;
-            }
-
-            // Only resolve when the revision actually completed — gate on the
-            // return, not a status re-read (already-WIP files false-positive).
-            if (StartNewRevision(doc))
-            {
-                DatabaseManager.ResolveRequest(request.Id, "Approved");
-                EmailManager.NotifyRequestApproved(
-                    string.IsNullOrEmpty(request.RequestType) ? "Revision"
-                                                              : request.RequestType,
-                    request.FileName, request.RequestedBy);
-                AuditLogger.Log("ApproveRequest", user, request.FileName, "", "",
-                    "requested by " + request.RequestedBy);
-            }
+            var result = BulkApprove(new[] { request });
+            MessageBox.Show(result.BuildSummary("Approve complete."),
+                "BCore PDM — Approve Request",
+                MessageBoxButtons.OK,
+                result.Skipped.Count > 0 ? MessageBoxIcon.Warning
+                                         : MessageBoxIcon.Information);
         }
 
         // ── REJECT REQUEST — Master rejects the request ───────────────
@@ -3298,7 +3486,18 @@ namespace PDMLite
 
             if (reason == null) return; // cancelled
 
-            DatabaseManager.ResolveRequest(request.Id, "Rejected");
+            // ResolveRequest only flips a still-Pending request — if the other
+            // Master approved/rejected it while this dialog was open, don't
+            // email the engineer a contradictory rejection.
+            if (!DatabaseManager.ResolveRequest(request.Id, "Rejected"))
+            {
+                MessageBox.Show(
+                    "This request was already handled by another Master — " +
+                    "nothing to reject.",
+                    "BCore PDM — Request Already Handled",
+                    MessageBoxButtons.OK, MessageBoxIcon.Information);
+                return;
+            }
             EmailManager.NotifyRequestRejected(
                 reqType, request.FileName, request.RequestedBy, reason);
             AuditLogger.Log("RejectRequest", user, request.FileName, "", "",
@@ -3540,6 +3739,91 @@ namespace PDMLite
                     baseName + "_" + snap + " REV " + rev + ext);
             }
             return dest;
+        }
+
+        // ════════════════════════════════════════════════════════════════
+        //  Cross-machine operation claims + hard-lock ownership guards
+        // ════════════════════════════════════════════════════════════════
+
+        // Claim filePath for an exclusive Master operation (Release / New
+        // Revision / Rollback / Remove / Unlock). Every long flow is a
+        // check-then-act with dialogs open for minutes, and the DB lock is
+        // never held across SOLIDWORKS work — so without a claim two Masters
+        // could interleave operations on the same file (double release, lock
+        // steal, remove-during-release). FALSE = another user/machine holds a
+        // live claim; the standard "file busy" dialog has already been shown.
+        // Callers MUST release the claim via EndVaultOperation in a finally.
+        private static bool BeginVaultOperation(string filePath, string user,
+            string operation)
+        {
+            DatabaseManager.ActiveOperation holder;
+            try
+            {
+                if (DatabaseManager.TryBeginOperation(filePath, user,
+                        Environment.MachineName, operation, out holder))
+                    return true;
+            }
+            catch
+            {
+                // DB unreachable — the operation's own first DB call will
+                // surface the real error; never block on the claim itself.
+                return true;
+            }
+
+            MessageBox.Show(
+                "FILE BUSY — " + Path.GetFileName(filePath) + " is in the " +
+                "middle of a " + holder.Operation + " by " + holder.User +
+                " on " + holder.Machine + " (started " +
+                holder.StartedDate.ToString("HH:mm") + ").\n\n" +
+                "Wait for that operation to finish, then try again. A claim " +
+                "left behind by a crash clears itself within 30 minutes (or " +
+                "when that PC's SOLIDWORKS restarts).",
+                "BCore PDM — File In Use",
+                MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            return false;
+        }
+
+        private static void EndVaultOperation(string filePath, string user)
+        {
+            try
+            {
+                DatabaseManager.EndOperation(filePath, user,
+                    Environment.MachineName);
+            }
+            catch { } // stale claim self-expires; never fail the operation here
+        }
+
+        // A file whose status is "Locked" belongs to whoever set the hard
+        // Master Lock — every OTHER user is blocked from operating on it
+        // (previously Release / New Revision / Remove silently stole the
+        // lock). Released files are intentionally NOT guarded here: their
+        // lock record merely names the releaser, and Unlock / New Revision
+        // by any Master are the designated paths to edit them again.
+        private static bool BlockedByOthersLock(string filePath, string user,
+            string actionLabel)
+        {
+            try
+            {
+                if (!string.Equals(DatabaseManager.GetFileStatus(filePath),
+                        "Locked", StringComparison.OrdinalIgnoreCase))
+                    return false;
+                var li = DatabaseManager.GetLockInfo(filePath);
+                if (li == null || !li.IsLocked ||
+                    string.Equals(li.LockedBy, user,
+                        StringComparison.OrdinalIgnoreCase))
+                    return false;
+
+                MessageBox.Show(
+                    "Cannot " + actionLabel + " — the file is LOCKED by " +
+                    li.LockedBy + ".\n\n" +
+                    "File : " + Path.GetFileName(filePath) + "\n\n" +
+                    "Ask " + li.LockedBy + " to unlock it first.",
+                    "BCore PDM — File Locked",
+                    MessageBoxButtons.OK, MessageBoxIcon.Stop);
+                return true;
+            }
+            catch { return false; } // DB unreadable — let the operation's own
+                                    // DB calls surface the real error
         }
     }
 }
