@@ -23,6 +23,21 @@ namespace PDMLite
         private const string Header =
             "Timestamp,User,Action,FileName,PartNo,Revision,Note";
 
+        // Local per-machine SPILL file for entries that could not reach
+        // audit.csv (the design explicitly invites a Master to open the log
+        // in Excel, whose write lock can hold for HOURS — the old 5×100ms
+        // retry then dropped the event forever). Spilled lines are flushed
+        // back to audit.csv at the start of the next successful Log call, so
+        // events are delayed, never lost. Local %LOCALAPPDATA% on purpose:
+        // when the NETWORK is the problem, a network-side spill would fail
+        // for the same reason. Flushed lines keep their original timestamps,
+        // so they may land slightly out of file order — the Audit Report
+        // sorts by Timestamp, so the VIEW stays chronological.
+        private static readonly string SpillFile = Path.Combine(
+            Environment.GetFolderPath(
+                Environment.SpecialFolder.LocalApplicationData),
+            "BCorePDM", "audit.pending.csv");
+
         // Guards same-process threads; cross-process collisions are handled by
         // the exclusive-open retry loop in AppendWithRetry.
         private static readonly object _lock = new object();
@@ -40,7 +55,9 @@ namespace PDMLite
                 lock (_lock)
                 {
                     EnsureFile();
-                    AppendWithRetry(line + Environment.NewLine);
+                    FlushSpill();
+                    if (!AppendWithRetry(line + Environment.NewLine))
+                        Spill(line + Environment.NewLine);
                 }
             }
             catch { } // logging must never break a workflow
@@ -55,13 +72,40 @@ namespace PDMLite
             AppendWithRetry(Header + Environment.NewLine);
         }
 
+        // Append entries that previously failed to reach audit.csv. Only when
+        // the whole spill content lands is the spill file deleted; on any
+        // failure it simply stays for the next attempt. Caller holds _lock.
+        private static void FlushSpill()
+        {
+            try
+            {
+                if (!File.Exists(SpillFile)) return;
+                string pending = File.ReadAllText(SpillFile);
+                if (pending.Length == 0 || AppendWithRetry(pending))
+                    File.Delete(SpillFile);
+            }
+            catch { } // spill stays; retried on the next Log call
+        }
+
+        // Save one line locally because audit.csv could not be written.
+        private static void Spill(string text)
+        {
+            try
+            {
+                string dir = Path.GetDirectoryName(SpillFile);
+                if (!string.IsNullOrEmpty(dir)) Directory.CreateDirectory(dir);
+                File.AppendAllText(SpillFile, text);
+            }
+            catch { } // even the spill failed — nothing more we can do
+        }
+
         // Open for append with an exclusive write lock (FileShare.Read lets
         // someone view the log, but no other writer in). If another machine
         // holds the write lock, wait briefly and retry — 5 × 100ms easily
-        // covers a 10-engineer team. If it still fails (e.g. the file is open
-        // in Excel with a write lock), the entry is dropped silently rather
-        // than blocking the user.
-        private static void AppendWithRetry(string text)
+        // covers a 10-engineer team. Returns FALSE when every attempt failed
+        // (e.g. the file is open in Excel with a write lock) so the caller
+        // can SPILL the entry locally instead of dropping it forever.
+        private static bool AppendWithRetry(string text)
         {
             for (int attempt = 0; attempt < 5; attempt++)
             {
@@ -73,7 +117,7 @@ namespace PDMLite
                     {
                         sw.Write(text);
                     }
-                    return;
+                    return true;
                 }
                 catch (IOException)
                 {
@@ -84,13 +128,24 @@ namespace PDMLite
                     Thread.Sleep(100);
                 }
             }
+            return false;
         }
 
         // Minimal RFC-4180 CSV escaping: quote fields containing a comma,
-        // quote, or newline; double any embedded quotes.
+        // quote, or newline; double any embedded quotes. Also neutralises
+        // spreadsheet FORMULA INJECTION — the log is designed to be opened
+        // directly in Excel, which EXECUTES a field starting with = + - @
+        // (a request note of "=HYPERLINK(...)" would run on the Master's
+        // machine). Such fields get a leading apostrophe: Excel renders them
+        // as text. The apostrophe is visible in raw text viewers — the
+        // accepted cost of opening untrusted CSV safely.
         private static string Csv(string field)
         {
             if (string.IsNullOrEmpty(field)) return "";
+            char c0 = field[0];
+            if (c0 == '=' || c0 == '+' || c0 == '-' || c0 == '@' ||
+                c0 == '\t' || c0 == '\r')
+                field = "'" + field;
             if (field.IndexOf(',') >= 0 || field.IndexOf('"') >= 0 ||
                 field.IndexOf('\n') >= 0 || field.IndexOf('\r') >= 0)
                 return "\"" + field.Replace("\"", "\"\"") + "\"";

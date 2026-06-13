@@ -511,6 +511,17 @@ namespace PDMLite
         // RFC-4180 CSV parser: handles quoted fields, escaped quotes (""), commas
         // and newlines INSIDE quotes (the Note field can contain them). Mirrors
         // the escaping AuditLogger.Csv writes.
+        //
+        // UNTERMINATED-QUOTE RECOVERY (audit H10): a writer that crashed (or a
+        // read racing a mid-append truncation — the file is opened
+        // FileShare.ReadWrite) can leave a dangling opening quote mid-file.
+        // A strict parser then swallows EVERYTHING after it into one giant
+        // field — the rest of the log silently vanishes from the report.
+        // Every real record starts "yyyy-MM-dd HH:mm:ss," — so inside quotes,
+        // a newline followed by exactly that shape is treated as the record
+        // boundary the writer intended. (A quoted multi-line Note whose inner
+        // line begins with exactly a timestamp+comma would split — vanishingly
+        // rare, and it misparses ONE note instead of losing the whole tail.)
         private static List<string[]> ParseCsv(string text)
         {
             var records = new List<string[]>();
@@ -530,6 +541,17 @@ namespace PDMLite
                     {
                         if (i + 1 < n && text[i + 1] == '"') { field.Append('"'); i++; }
                         else inQuotes = false;
+                    }
+                    else if (c == '\n' && LooksLikeRecordStart(text, i + 1))
+                    {
+                        // Recover from a dangling quote: close the field and
+                        // end the record here (see method summary). Drop the
+                        // trailing \r the verbatim append already collected.
+                        if (field.Length > 0 && field[field.Length - 1] == '\r')
+                            field.Length--;
+                        inQuotes = false;
+                        fields.Add(field.ToString()); field.Clear();
+                        records.Add(fields.ToArray()); fields.Clear();
                     }
                     else field.Append(c); // commas / newlines kept verbatim
                     continue;
@@ -552,6 +574,29 @@ namespace PDMLite
                 records.Add(fields.ToArray());
             }
             return records;
+        }
+
+        // Does text starting at i look like the beginning of a NEW audit
+        // record, i.e. exactly "yyyy-MM-dd HH:mm:ss," (AuditLogger's stamp)?
+        // Char-by-char check — runs once per newline inside a quoted field.
+        private static bool LooksLikeRecordStart(string t, int i)
+        {
+            if (i + 20 > t.Length) return false;
+            for (int k = 0; k < 20; k++)
+            {
+                char c = t[i + k];
+                switch (k)
+                {
+                    case 4:
+                    case 7: if (c != '-') return false; break;
+                    case 10: if (c != ' ') return false; break;
+                    case 13:
+                    case 16: if (c != ':') return false; break;
+                    case 19: if (c != ',') return false; break;
+                    default: if (c < '0' || c > '9') return false; break;
+                }
+            }
+            return true;
         }
 
         private void DebouncedFilter()
@@ -1211,10 +1256,17 @@ namespace PDMLite
             }
         }
 
-        // Minimal RFC-4180 CSV escaping (mirrors AuditLogger.Csv).
+        // Minimal RFC-4180 CSV escaping (mirrors AuditLogger.Csv), incl. its
+        // formula-injection guard: the export is opened in Excel, which
+        // EXECUTES fields starting with = + - @. Leading apostrophe makes
+        // Excel render the value as text.
         private static string Csv(string field)
         {
             if (string.IsNullOrEmpty(field)) return "";
+            char c0 = field[0];
+            if (c0 == '=' || c0 == '+' || c0 == '-' || c0 == '@' ||
+                c0 == '\t' || c0 == '\r')
+                field = "'" + field;
             if (field.IndexOf(',') >= 0 || field.IndexOf('"') >= 0 ||
                 field.IndexOf('\n') >= 0 || field.IndexOf('\r') >= 0)
                 return "\"" + field.Replace("\"", "\"\"") + "\"";
