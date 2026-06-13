@@ -475,11 +475,22 @@ namespace PDMLite
             catch { }
         }
 
-        // Sheet metal flat pattern DXF
+        // Sheet metal flat pattern DXF.
+        // Uses the DEDICATED IPartDoc.ExportToDWG2 flat-pattern API rather than a
+        // generic Extension.SaveAs(".dxf", exportData:null): that generic save
+        // relied on the machine's last-used DXF/DWG output options and did NOT
+        // reliably export the FLAT PATTERN in silent mode (it produced no DXF at
+        // all on release — found in PR-52 testing). ExportToDWG2 with
+        // swExportToDWG_ExportSheetMetal flattens and exports the flat pattern
+        // directly (no intermediate drawing, independent of the active config and
+        // of the registry export settings). Best-effort: any failure leaves no
+        // DXF and never fails the release (the STEP is the primary part export).
         private static void ExportFlatPattern(ModelDoc2 doc, string outPath)
         {
             try
             {
+                // Only sheet metal parts have a flat pattern — scan the feature
+                // tree for the SheetMetal feature (same guard as before).
                 object[] features = (object[])doc.FeatureManager.GetFeatures(true);
                 if (features == null) return;
 
@@ -492,17 +503,33 @@ namespace PDMLite
                         break;
                     }
                 }
-
                 if (!hasSheetMetal) return;
 
-                int errors = 0, warnings = 0;
-                doc.Extension.SaveAs(
+                PartDoc part = doc as PartDoc;
+                if (part == null) return;
+
+                // 12-double alignment (origin + X/Y/Z axes). SOLIDWORKS ignores it
+                // for sheet-metal flat-pattern exports, but the argument must be a
+                // valid 12-element array.
+                double[] alignment = new double[12]
+                    { 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1 };
+
+                // Sheet-metal options bitmask: 1 = flat-pattern geometry,
+                // 4 = bend lines (→ 5). Geometry is the essential bit; bend lines
+                // are the standard shop deliverable.
+                const int FlatPatternGeometry = 1;
+                const int BendLines = 4;
+
+                part.ExportToDWG2(
                     outPath,
-                    (int)swSaveAsVersion_e.swSaveAsCurrentVersion,
-                    (int)swSaveAsOptions_e.swSaveAsOptions_Silent,
-                    null,
-                    ref errors,
-                    ref warnings);
+                    doc.GetPathName(),
+                    (int)swExportToDWG_e.swExportToDWG_ExportSheetMetal,
+                    true,            // export to a single file
+                    alignment,
+                    false,
+                    false,
+                    FlatPatternGeometry | BendLines,
+                    null);
             }
             catch { }
         }
