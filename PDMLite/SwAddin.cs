@@ -395,6 +395,19 @@ namespace PDMLite
                     return 1;
                 }
 
+                // Rule 2b: Obsolete file — superseded, kept for reference but
+                // not editable. It is read-only on disk; this gives a clear
+                // message (and is belt-and-suspenders if read-only was cleared).
+                if (status == "Obsolete")
+                {
+                    Block("This file is OBSOLETE (superseded).\n\n" +
+                          "Obsolete files are kept for reference but cannot be " +
+                          "edited.\n\nA Master can Reinstate it (Vault Dashboard " +
+                          "→ right-click the row → Reinstate) to return it to " +
+                          "WIP for editing.\n\nSave blocked.");
+                    return 1;
+                }
+
                 // Rule 2.5: vault files must live under a WIP division subfolder.
                 // Every file has one canonical home in N:\PDM-SolidWorks\WIP\<Division>.
                 // Saving elsewhere (Desktop, local drive) breaks SOLIDWORKS references

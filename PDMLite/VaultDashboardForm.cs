@@ -84,6 +84,10 @@ namespace PDMLite
         // Row right-click menu (Open / Open linked / Copy path / Open folder).
         private ContextMenuStrip _rowMenu;
         private ToolStripMenuItem _miOpen, _miOpenLinked, _miCopyPath, _miOpenFolder;
+        // Master-only lifecycle items (constructed only when the current user is a
+        // Master, so engineers never see them — see _isMaster).
+        private ToolStripMenuItem _miObsolete, _miReinstate;
+        private bool _isMaster;
         private int _menuViewIndex = -1;  // ABSOLUTE _view index the menu was opened
                                           // on (not grid-relative): a page change
                                           // while the menu is up can't retarget it
@@ -135,6 +139,14 @@ namespace PDMLite
         public VaultDashboardForm(float scale)
         {
             _scale = scale;
+            // Role decides whether the Master-only lifecycle menu items exist.
+            try
+            {
+                _isMaster = string.Equals(
+                    DatabaseManager.GetUserRole(System.Environment.UserName),
+                    "Master", StringComparison.OrdinalIgnoreCase);
+            }
+            catch { _isMaster = false; }
             BuildForm();
             LoadData();
         }
@@ -403,10 +415,22 @@ namespace PDMLite
             _miOpenLinked = new ToolStripMenuItem("Open Drawing", null, (s, e) => MenuOpenLinked());
             _miCopyPath   = new ToolStripMenuItem("Copy File Path", null, (s, e) => MenuCopyPath());
             _miOpenFolder = new ToolStripMenuItem("Open Containing Folder", null, (s, e) => MenuOpenFolder());
-            _rowMenu.Items.AddRange(new ToolStripItem[]
+            var menuItems = new List<ToolStripItem>
             {
                 _miOpen, _miOpenLinked, new ToolStripSeparator(), _miCopyPath, _miOpenFolder
-            });
+            };
+            // Master-only lifecycle actions (one shows per row in Grid_MouseDown
+            // by the row's status). Built only for Masters so engineers never see
+            // them or a dangling separator.
+            if (_isMaster)
+            {
+                _miObsolete  = new ToolStripMenuItem("Mark Obsolete…", null, (s, e) => MenuMarkObsolete());
+                _miReinstate = new ToolStripMenuItem("Reinstate from Obsolete", null, (s, e) => MenuReinstate());
+                menuItems.Add(new ToolStripSeparator());
+                menuItems.Add(_miObsolete);
+                menuItems.Add(_miReinstate);
+            }
+            _rowMenu.Items.AddRange(menuItems.ToArray());
             foreach (ToolStripItem it in _rowMenu.Items)
                 it.Padding = new Padding(S(6), S(3), S(18), S(3));
             // VirtualMode providers — the grid pulls value / colour / tooltip for
@@ -1236,6 +1260,7 @@ namespace PDMLite
             if (Eq(status, "Released")) return cGreen;
             if (Eq(status, "Locked"))   return cMaroon;
             if (Eq(status, "WIP"))      return cOrange;
+            if (Eq(status, "Obsolete")) return Color.FromArgb(120, 120, 120);
             return cTextGray;
         }
 
@@ -1272,6 +1297,15 @@ namespace PDMLite
                 ? DrawingConfigToOpen(f, _menuLinkedPath) : null;
             _miOpenLinked.Text = isDrawing ? "Open Model" : "Open Drawing";
             _miOpenLinked.Enabled = !string.IsNullOrEmpty(_menuLinkedPath);
+
+            // Master lifecycle items: show exactly one per row by current status.
+            if (_miObsolete != null)
+            {
+                bool isObsolete = (f.Status ?? "")
+                    .Equals("Obsolete", StringComparison.OrdinalIgnoreCase);
+                _miObsolete.Visible = !isObsolete;
+                _miReinstate.Visible = isObsolete;
+            }
 
             _rowMenu.Show(_grid, e.Location);
         }
@@ -1347,6 +1381,26 @@ namespace PDMLite
             int idx = _menuViewIndex; // absolute index captured at right-click time
             if (idx < 0 || idx >= _view.Count) return null;
             return _view[idx];
+        }
+
+        // ── Master lifecycle actions (Obsolete) ─────────────────────────────
+        // Act on the right-clicked file by path (no open needed), then refresh
+        // the snapshot so the row's new status shows. VaultManager confirms,
+        // prompts for a reason and re-checks the Master role itself.
+        private void MenuMarkObsolete()
+        {
+            var f = MenuRow();
+            if (f == null) return;
+            VaultManager.MarkObsolete(f.FilePath);
+            LoadData();
+        }
+
+        private void MenuReinstate()
+        {
+            var f = MenuRow();
+            if (f == null) return;
+            VaultManager.ReinstateFromObsolete(f.FilePath);
+            LoadData();
         }
 
         // Defer the open to the caller (OpenByPath runs after this modal closes).
