@@ -1,7 +1,0 @@
-D:\06 SOLIDWORKS_Automation\08_Documentation\PDMLite_CL\PDMLite\PDMLite\obj\Debug\PDMLite.csproj.AssemblyReference.cache
-D:\06 SOLIDWORKS_Automation\08_Documentation\PDMLite_CL\PDMLite\PDMLite\obj\Debug\PDMLite.csproj.CoreCompileInputs.cache
-D:\06 SOLIDWORKS_Automation\08_Documentation\PDMLite_CL\PDMLite\PDMLite\bin\Debug\PDMLite.dll
-D:\06 SOLIDWORKS_Automation\08_Documentation\PDMLite_CL\PDMLite\PDMLite\bin\Debug\PDMLite.pdb
-D:\06 SOLIDWORKS_Automation\08_Documentation\PDMLite_CL\PDMLite\PDMLite\bin\Debug\System.Data.SQLite.dll
-D:\06 SOLIDWORKS_Automation\08_Documentation\PDMLite_CL\PDMLite\PDMLite\obj\Debug\PDMLite.dll
-D:\06 SOLIDWORKS_Automation\08_Documentation\PDMLite_CL\PDMLite\PDMLite\obj\Debug\PDMLite.pdb

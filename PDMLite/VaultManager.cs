@@ -133,8 +133,9 @@ namespace PDMLite
             AuditLogger.Log("Unlock", PDMLiteAddin.CurrentUser,
                 Path.GetFileName(filePath));
 
-            // Check if the file is open before showing the message so we can
-            // close-and-reopen it after the user clicks OK.
+            // Capture the open doc (if any) BEFORE the message so we can refresh
+            // SOLIDWORKS' cached read-only state after the user clicks OK. The
+            // COM ref stays valid across the modal (nothing closes the doc).
             ModelDoc2 openDoc = PDMLiteAddin.SwApp
                 ?.GetOpenDocumentByName(filePath) as ModelDoc2;
             int reopenType = openDoc != null ? openDoc.GetType() : -1;
@@ -145,18 +146,47 @@ namespace PDMLite
                 MessageBoxButtons.OK,
                 MessageBoxIcon.Information);
 
-            // Close and reopen so SOLIDWORKS discards its cached read-only state.
-            if (reopenType >= 0)
+            // SOLIDWORKS caches the read-only state from the moment a file is
+            // opened, so clearing the disk attribute above is not enough — the
+            // open document (and any open PARENT ASSEMBLY holding it as a
+            // component) keeps showing [Read-only]. ReloadOrReplace(readOnly:false)
+            // is the API behind File > Reload: it re-reads the now-writable file
+            // from disk and promotes it to read-write EVEN when an assembly holds
+            // the component. A plain close+reopen can't do that — CloseDoc is a
+            // no-op while the assembly references the doc, so the cached read-only
+            // document survives and is handed straight back on reopen (found in
+            // PR-52 testing: unlock a Released component with its assembly open →
+            // part stayed [Read-only]). Fall back to close+reopen when the reload
+            // is refused (e.g. unsaved edits) or unavailable.
+            if (openDoc != null)
             {
-                try
+                // ReloadOrReplace(readOnly:false) is the File>Reload API. CALLING it
+                // re-reads the now-writable file and promotes the open doc (and any
+                // assembly-held component) to read-write as a SIDE EFFECT — that is
+                // what clears [Read-only], NOT the return value. The status int's
+                // polarity is interop/scenario-dependent and unreliable (a successful
+                // assembly-held reload returns NONZERO in this shop's build), so we do
+                // NOT gate on it: gating on nonzero made unlock needlessly close+reopen
+                // the part and yank its window away (PR-52 follow-up). Fall back to
+                // close+reopen ONLY when the call THROWS (method genuinely unavailable)
+                // — that alone can't promote an assembly-held component, but is the
+                // best last resort for a standalone doc and keeps unlock non-fatal.
+                bool reloadThrew = false;
+                try { openDoc.ReloadOrReplace(false, filePath, true); }
+                catch { reloadThrew = true; }
+
+                if (reloadThrew && reopenType >= 0)
                 {
-                    PDMLiteAddin.SwApp.CloseDoc(filePath);
-                    int errs = 0, warnings = 0;
-                    PDMLiteAddin.SwApp.OpenDoc6(filePath, reopenType,
-                        (int)swOpenDocOptions_e.swOpenDocOptions_Silent,
-                        "", ref errs, ref warnings);
+                    try
+                    {
+                        PDMLiteAddin.SwApp.CloseDoc(filePath);
+                        int errs = 0, warnings = 0;
+                        PDMLiteAddin.SwApp.OpenDoc6(filePath, reopenType,
+                            (int)swOpenDocOptions_e.swOpenDocOptions_Silent,
+                            "", ref errs, ref warnings);
+                    }
+                    catch { }
                 }
-                catch { }
             }
         }
 
@@ -212,6 +242,20 @@ namespace PDMLite
             string partNo = PropertyValidator.GetProperty(doc, "PartNo");
             string rev = PropertyValidator.GetProperty(doc, "Revision");
             string drawingNo = PropertyValidator.GetProperty(doc, "DrawingNo");
+            if (isDrawing)
+            {
+                // A drawing's own properties are typically EMPTY (they live
+                // on the model; the title block reads them via the template).
+                // Without this, the retired drawing's released PDF stayed in
+                // EXPORTS forever — ScrapExports received an empty DrawingNo
+                // and no-op'd. Same read the release export naming uses.
+                string dn = GetDrawingNo(doc);
+                if (!string.IsNullOrEmpty(dn)) drawingNo = dn;
+                if (string.IsNullOrEmpty(drawingNo))
+                    drawingNo = Path.GetFileNameWithoutExtension(filePath);
+                if (string.IsNullOrEmpty(partNo))
+                    partNo = GetDrawingPartNo(doc);
+            }
 
             // Per-config identity (models only). Exports are named per config
             // ({cfgPartNo}-R{rev}.step, {cfgDrawingNo} REV {rev}.pdf), so the
@@ -431,6 +475,7 @@ namespace PDMLite
                 string stepExport = Path.Combine(ExportRoot, "STEP");
                 string pdfExport = Path.Combine(ExportRoot, "PDF");
                 string bomExport = Path.Combine(ExportRoot, "BOM");
+                string dxfExport = Path.Combine(ExportRoot, "DXF");
 
                 string partNoClean = (partNo ?? "").Replace(".", "");
                 if (!string.IsNullOrEmpty(partNoClean) &&
@@ -440,6 +485,20 @@ namespace PDMLite
                     foreach (string f in Directory.GetFiles(
                         stepExport, partNoClean + "-R*.step"))
                         if (stepFilter.IsMatch(Path.GetFileName(f)))
+                            MoveToScrap(f);
+                }
+
+                // DXF (sheet-metal flat pattern): {partNoClean}-R{rev}.dxf —
+                // same naming as STEP. Without this a retired sheet-metal part's
+                // flat-pattern DXF was left in EXPORTS forever (same leak the BOM
+                // had before it was scrapped here).
+                if (!string.IsNullOrEmpty(partNoClean) &&
+                    Directory.Exists(dxfExport))
+                {
+                    var dxfFilter = ExportNameFilter(partNoClean, "-R", ".dxf");
+                    foreach (string f in Directory.GetFiles(
+                        dxfExport, partNoClean + "-R*.dxf"))
+                        if (dxfFilter.IsMatch(Path.GetFileName(f)))
                             MoveToScrap(f);
                 }
 
@@ -467,6 +526,23 @@ namespace PDMLite
                 }
             }
             catch { }
+        }
+
+        // ShowConfiguration2 returns FALSE when the target config is ALREADY the
+        // active config and no rebuild was needed — that is NOT a failure (the
+        // config IS active). The release config-switch loops must treat "already
+        // active" as success, or releasing a multi-config part FALSE-ABORTS whenever
+        // the config being processed is already active (e.g. the Master activated it
+        // by hand first, leaving it clean) — found in PR-52 multi-config testing.
+        // Returns true when cfgName is the active config AFTER the call (switch
+        // happened, OR it was already active), false only on a genuine refusal.
+        private static bool ActivateConfig(ModelDoc2 doc, string cfgName)
+        {
+            if (doc.ShowConfiguration2(cfgName)) return true;
+            string active = (doc.GetActiveConfiguration()
+                as SolidWorks.Interop.sldworks.Configuration)?.Name;
+            return string.Equals(active, cfgName,
+                StringComparison.OrdinalIgnoreCase);
         }
 
         // ── RELEASE ───────────────────────────────────────────────────────
@@ -947,7 +1023,7 @@ namespace PDMLite
                                 checkedByVal, c);
                             PropertyValidator.SetProperty(doc, "CheckedDate",
                                 checkedDateVal, c);
-                            if (doc.ShowConfiguration2(c))
+                            if (ActivateConfig(doc, c))
                                 PropertyValidator.AutoFillWeight(doc);
                             else
                                 cfgSwitchFailures.Add(c);
@@ -996,6 +1072,12 @@ namespace PDMLite
                     MessageBoxButtons.OK, MessageBoxIcon.Error);
                 return;
             }
+
+            // Mirror the parent config's properties onto any sheet-metal flat-
+            // pattern config so a released drawing sheet that documents the flat
+            // pattern shows the CURRENT rev/PN in its title block (no-op when
+            // there is no flat-pattern config).
+            SyncFlatPatternConfigs(doc);
 
             // A refused save here would publish a snapshot MISSING the just
             // auto-filled CheckedBy/CheckedDate/PartWeight — abort BEFORE any
@@ -1089,7 +1171,7 @@ namespace PDMLite
                                 collidedStamps.Add(cfgStamp);
                                 continue;
                             }
-                            if (!doc.ShowConfiguration2(c))
+                            if (!ActivateConfig(doc, c))
                             {
                                 // Exporting now would write the PREVIOUS
                                 // config's geometry under THIS config's part
@@ -1525,6 +1607,9 @@ namespace PDMLite
             {
                 PropertyValidator.SetProperty(fresh, "Revision", nextRev);
             }
+            // Keep the flat-pattern config's stale inherited rev in sync so a
+            // drawing's flat-pattern title-block field follows the bump.
+            SyncFlatPatternConfigs(fresh);
             if (!TrySaveVerified(fresh))
             {
                 // The revision bump never reached disk — previously ignored, so
@@ -1697,7 +1782,7 @@ namespace PDMLite
         // effectively succeeded; still dirty (e.g. file read-only on disk) =
         // genuine failure. EVERY internal Save3 call site must go through
         // this helper, or the false-negative abort bug comes back.
-        private static bool TrySaveVerified(ModelDoc2 doc)
+        internal static bool TrySaveVerified(ModelDoc2 doc)
         {
             bool ok;
             PDMLiteAddin.SuppressSaveValidation = true;
@@ -1770,7 +1855,221 @@ namespace PDMLite
         // reference paths stored inside each assembly matching the vault path
         // format. GetDocumentDependencies2 reads the file from disk WITHOUT
         // opening it in the UI.
-        private static List<string> GetParentAssemblies(string filePath)
+        // DIRECT parents only (traverse=false), full PATHS — used by the
+        // post-rename reference repair, which must open each candidate; the
+        // traversing variant below would also list grandparents that contain
+        // the part only through a subassembly (nothing to repoint there).
+        internal static List<string> GetDirectParentAssemblyPaths(string filePath)
+        {
+            var parents = new List<string>();
+            try
+            {
+                string target;
+                try { target = Path.GetFullPath(filePath); }
+                catch { target = filePath; }
+
+                foreach (string asmPath in
+                         DatabaseManager.GetTrackedFilePathsByExtension(".sldasm"))
+                {
+                    try
+                    {
+                        if (string.Equals(Path.GetFullPath(asmPath), target,
+                                StringComparison.OrdinalIgnoreCase))
+                            continue; // skip self
+                    }
+                    catch { }
+                    if (!File.Exists(asmPath)) continue;
+
+                    object depsObj = PDMLiteAddin.SwApp.GetDocumentDependencies2(
+                        asmPath, false, true, false); // direct deps only
+                    string[] deps = depsObj as string[];
+                    if (deps == null) continue;
+
+                    for (int i = 1; i < deps.Length; i += 2)
+                    {
+                        if (string.IsNullOrEmpty(deps[i])) continue;
+                        string depPath;
+                        try { depPath = Path.GetFullPath(deps[i]); }
+                        catch { depPath = deps[i]; }
+                        if (string.Equals(depPath, target,
+                                StringComparison.OrdinalIgnoreCase))
+                        {
+                            parents.Add(asmPath);
+                            break;
+                        }
+                    }
+                }
+            }
+            catch { }
+            return parents;
+        }
+
+        // ── Deferred follow-up to Rule 3.6's Rename & Save ────────────
+        // Parent assemblies reference the renamed configs BY NAME. Offer to
+        // repair them AFTER the part's save completed (never inside the save
+        // event — parents can be large and slow to open). Per-parent rules:
+        // Released/Locked → skip + report (frozen history; fix at its next
+        // revision). Open by ANOTHER user → skip + report (their session
+        // would be overwritten). Open in THIS session → repoint in memory,
+        // DO NOT save (the user's working file — they save it). Closed WIP →
+        // open silently, repoint, save (validation suppressed), close (the
+        // save's post-notify upsert audit-logs it as a normal Save).
+        internal static void RepairParentConfigRefs(
+            string modelPath, List<string[]> renames)
+        {
+            try
+            {
+                if (renames == null || renames.Count == 0) return;
+                var parents = GetDirectParentAssemblyPaths(modelPath);
+                if (parents.Count == 0) return;
+
+                var confirm = MessageBox.Show(
+                    parents.Count + " assembl" +
+                    (parents.Count == 1 ? "y references" : "ies reference") +
+                    " this part, possibly by the OLD configuration name" +
+                    (renames.Count == 1 ? "" : "s") + ".\n\n" +
+                    "Update their component references now?\n\n" +
+                    "(Released/locked assemblies and ones open on another " +
+                    "machine are skipped and reported. Assemblies open in " +
+                    "YOUR session are updated but left for you to save.)",
+                    "BCore PDM — Update Parent Assemblies",
+                    MessageBoxButtons.YesNo, MessageBoxIcon.Question);
+                if (confirm != DialogResult.Yes) return;
+
+                string user = PDMLiteAddin.CurrentUser;
+                var updated = new List<string>();
+                var inSession = new List<string>();
+                var skipped = new List<string>();
+
+                foreach (string ap in parents)
+                {
+                    string an = Path.GetFileName(ap);
+                    bool openHere = false;
+                    ModelDoc2 asm = null;
+                    try
+                    {
+                        string st = DatabaseManager.GetFileStatus(ap);
+                        if (st == "Released" || st == "Locked")
+                        {
+                            skipped.Add(an + " — " + st +
+                                " (fix at its next revision)");
+                            continue;
+                        }
+
+                        var others = DatabaseManager.GetOtherOpenSessions(
+                            ap, user);
+                        if (others != null && others.Count > 0)
+                        {
+                            skipped.Add(an + " — open by " + others[0].User);
+                            continue;
+                        }
+
+                        openHere = PDMLiteAddin.SwApp
+                            .GetOpenDocumentByName(ap) != null;
+                        asm = OpenByPath(ap);
+                        if (asm == null)
+                        {
+                            skipped.Add(an + " — could not open");
+                            continue;
+                        }
+
+                        int fixedCount = 0;
+                        var acfg = asm.GetActiveConfiguration()
+                            as SolidWorks.Interop.sldworks.Configuration;
+                        var root = acfg?.GetRootComponent3(true);
+                        object[] children = root?.GetChildren() as object[];
+                        if (children != null)
+                        {
+                            foreach (object o in children)
+                            {
+                                var comp = o as Component2;
+                                if (comp == null) continue;
+                                string cp = "";
+                                try { cp = comp.GetPathName() ?? ""; }
+                                catch { }
+                                if (!string.Equals(cp, modelPath,
+                                        StringComparison.OrdinalIgnoreCase))
+                                    continue;
+                                string rc = "";
+                                try
+                                { rc = comp.ReferencedConfiguration ?? ""; }
+                                catch { }
+                                foreach (var rn in renames)
+                                {
+                                    if (!string.Equals(rc, rn[0],
+                                            StringComparison.OrdinalIgnoreCase))
+                                        continue;
+                                    try
+                                    {
+                                        comp.ReferencedConfiguration = rn[1];
+                                        fixedCount++;
+                                    }
+                                    catch { }
+                                    break;
+                                }
+                            }
+                        }
+
+                        // Apply the ReferencedConfiguration change(s) so the save
+                        // persists them — without a rebuild SW may write the
+                        // assembly with the repoint NOT applied (silent no-op).
+                        if (fixedCount > 0)
+                            try { asm.EditRebuild3(); } catch { }
+
+                        if (fixedCount == 0)
+                        {
+                            if (!openHere)
+                                try { PDMLiteAddin.SwApp.CloseDoc(ap); }
+                                catch { }
+                            skipped.Add(an + " — no stale references found");
+                        }
+                        else if (openHere)
+                        {
+                            inSession.Add(an + " — " + fixedCount +
+                                " reference(s) updated IN YOUR OPEN SESSION " +
+                                "— save it");
+                        }
+                        else
+                        {
+                            if (TrySaveVerified(asm))
+                                updated.Add(an + " — " + fixedCount +
+                                    " reference(s) updated and saved");
+                            else
+                                skipped.Add(an + " — updated but the save " +
+                                    "FAILED (open it and save manually)");
+                            try { PDMLiteAddin.SwApp.CloseDoc(ap); } catch { }
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        skipped.Add(an + " — " + ex.Message);
+                        // Don't leak an assembly THIS method opened (can be
+                        // hundreds of MB) when a COM call threw mid-repair.
+                        if (!openHere && asm != null)
+                            try { PDMLiteAddin.SwApp.CloseDoc(ap); } catch { }
+                    }
+                }
+
+                var msg = new System.Text.StringBuilder();
+                if (updated.Count > 0)
+                    msg.AppendLine("Updated and saved:")
+                       .AppendLine("  • " + string.Join("\n  • ", updated))
+                       .AppendLine();
+                if (inSession.Count > 0)
+                    msg.AppendLine("Updated in your open session — SAVE them:")
+                       .AppendLine("  • " + string.Join("\n  • ", inSession))
+                       .AppendLine();
+                if (skipped.Count > 0)
+                    msg.AppendLine("Skipped:")
+                       .AppendLine("  • " + string.Join("\n  • ", skipped));
+                MessageBox.Show(msg.ToString().TrimEnd(),
+                    "BCore PDM — Parent Assemblies",
+                    MessageBoxButtons.OK, MessageBoxIcon.Information);
+            }
+            catch { }
+        }
+
+        internal static List<string> GetParentAssemblies(string filePath)
         {
             var parents = new List<string>();
             try
@@ -1814,6 +2113,44 @@ namespace PDMLite
             }
             catch { }
             return parents;
+        }
+
+        // SOLIDWORKS' auto-generated flat-pattern config ("{parent}SM-FLAT-PATTERN")
+        // keeps its OWN stale copy of the parent config's custom properties — SW
+        // copies them when the derived config is created and never updates them
+        // when the parent is bumped. A drawing sheet whose view references the
+        // flat pattern links its title block (via $PRPSHEET) to that config, so it
+        // shows the OLD revision even after New Revision / Release (PR-52: the
+        // released flat-pattern sheet stayed at REV A while the part was REV C).
+        // Mirror every parent-config property onto its flat-pattern child so those
+        // linked title-block fields stay current. Best-effort; a no-op for parts
+        // with no flat-pattern config, for assemblies and for drawings.
+        private static void SyncFlatPatternConfigs(ModelDoc2 doc)
+        {
+            try
+            {
+                if (doc == null) return;
+                string[] all = doc.GetConfigurationNames() as string[];
+                if (all == null) return;
+                foreach (string cfg in all)
+                {
+                    if (!PropertyValidator.IsAutoGeneratedConfig(cfg)) continue;
+                    string parent = PropertyValidator.ParentConfigOf(cfg);
+                    var pcpm = doc.Extension.get_CustomPropertyManager(parent);
+                    string[] names = pcpm?.GetNames() as string[];
+                    if (names == null) continue;
+                    // Copy the RESOLVED parent value of every property onto the
+                    // derived flat-pattern config. That config is not user-managed
+                    // (its props are stale inherited copies), so mirroring all of
+                    // them — flattening any expression-linked parent prop to its
+                    // current literal — is intended: the flat-pattern sheet's title
+                    // block then shows the parent's current rev/PN/etc.
+                    foreach (string p in names)
+                        PropertyValidator.SetProperty(doc, p,
+                            PropertyValidator.GetProperty(doc, p, parent), cfg);
+                }
+            }
+            catch { }
         }
 
         // When a part/assembly starts a new revision, its drawing (same
@@ -2082,6 +2419,14 @@ namespace PDMLite
                         fileIdentifier + "-R*.step",
                         ExportNameFilter(fileIdentifier, "-R", ".step"));
 
+                // DXF (sheet-metal flat pattern): {partNoClean}-R{rev}.dxf —
+                // same stamp as the STEP, so the same anchored glob + filter.
+                if (!isDrawing)
+                    MoveMatching(Path.Combine(ExportRoot, "DXF"),
+                        Path.Combine(ObsFolder, "DXF"),
+                        fileIdentifier + "-R*.dxf",
+                        ExportNameFilter(fileIdentifier, "-R", ".dxf"));
+
                 // PDF: {drawingNo} REV {rev}.pdf. fileIdentifier is the
                 // DrawingNo for drawings, dot-stripped PartNo otherwise (a
                 // model's PDF only matches when its DrawingNo equals it).
@@ -2200,6 +2545,14 @@ namespace PDMLite
                 targetRev = dialog.SelectedRevision;
             }
 
+            // SelectedRevision is "REV A" (kept verbose for the dialogs below);
+            // the export-name patterns ({id}-R{letter}.step, {dn} REV {letter}.pdf)
+            // and the drawing-archive lookup need the BARE letter — using the
+            // verbose form built "{id}-RREV A.step", which matched nothing, so
+            // Step 7b silently restored zero exports (found in PR-52 testing).
+            string targetLetter = targetRev
+                .Replace("REV", "").Replace("rev", "").Trim();
+
             // Final confirmation
             var confirm = MessageBox.Show(
                 "Confirm Rollback?\n\n" +
@@ -2215,8 +2568,43 @@ namespace PDMLite
 
             // Read everything still needed from the document BEFORE closing
             // it below — after CloseDoc the COM reference is dead.
-            string partNo = PropertyValidator.GetProperty(doc, "PartNo");
-            string drawingNo = PropertyValidator.GetProperty(doc, "DrawingNo");
+            // DRAWING: its own PartNo/DrawingNo properties are typically
+            // EMPTY (the props live on the model; the title block reads them
+            // through the template) — read them the way the release export
+            // naming does: from the referenced model. MODEL: exports are
+            // named PER CONFIG, so collect every config's numbers — the
+            // active config's alone left other configs' stale "current"
+            // exports in EXPORTS (the same gap RemoveFromVault had).
+            string partNo, drawingNo;
+            var rbPartNos = new List<string>();
+            var rbDrawingNos = new List<string>();
+            if (ext == ".slddrw")
+            {
+                partNo = GetDrawingPartNo(doc);
+                drawingNo = GetDrawingNo(doc);
+                if (string.IsNullOrEmpty(drawingNo))
+                    drawingNo = Path.GetFileNameWithoutExtension(filePath);
+            }
+            else
+            {
+                partNo = PropertyValidator.GetProperty(doc, "PartNo");
+                drawingNo = PropertyValidator.GetProperty(doc, "DrawingNo");
+                foreach (string cfg in PropertyValidator.GetConfigNames(doc))
+                {
+                    string cp = PropertyValidator.GetProperty(doc, "PartNo", cfg);
+                    string cd = PropertyValidator.GetProperty(doc, "DrawingNo", cfg);
+                    if (!string.IsNullOrEmpty(cp) &&
+                        !rbPartNos.Contains(cp, StringComparer.OrdinalIgnoreCase))
+                        rbPartNos.Add(cp);
+                    if (!string.IsNullOrEmpty(cd) &&
+                        !rbDrawingNos.Contains(cd, StringComparer.OrdinalIgnoreCase))
+                        rbDrawingNos.Add(cd);
+                }
+                if (rbPartNos.Count == 0 && !string.IsNullOrEmpty(partNo))
+                    rbPartNos.Add(partNo);
+                if (rbDrawingNos.Count == 0 && !string.IsNullOrEmpty(drawingNo))
+                    rbDrawingNos.Add(drawingNo);
+            }
 
             try
             {
@@ -2280,11 +2668,62 @@ namespace PDMLite
                 SetReadOnly(filePath, true);
                 SetReadOnly(releasedCopy, true);
 
-                // ── Step 7: Archive old exports ───────────────────────────────
-                // Uses the PartNo/DrawingNo captured BEFORE the close above
-                // (actual PartNo, not filename, to match STEP/PDF naming).
-                string partNoClean = partNo.Replace(".", "");
-                CleanupExportsOnRollback(partNoClean, drawingNo, partNo);
+                // ── Step 7: Archive old exports ───────────────────────────
+                // Identity captured BEFORE the close above. A DRAWING rollback
+                // cleans only its PDF (the model wasn't rolled back — its
+                // STEP/BOM stay current); a MODEL rollback cleans EVERY
+                // config's exports (rollback reverts ALL configurations, so
+                // the active config's numbers alone left the other configs'
+                // stale "current" deliverables in EXPORTS).
+                if (ext == ".slddrw")
+                {
+                    CleanupExportsOnRollback("", drawingNo);
+                }
+                else
+                {
+                    foreach (string pn in rbPartNos)
+                        CleanupExportsOnRollback(pn.Replace(".", ""), null, pn);
+                    // PDFs are the DRAWING's deliverable — archived AND restored in
+                    // Step 9 ONLY when the drawing is actually rolled back, so a
+                    // drawing that is NOT rolled back keeps its current PDF in EXPORTS
+                    // (archiving them here orphaned them in the warn/no-archive case).
+                }
+
+                // ── Step 7b: RESTORE the target revision's exports ────────
+                // The revision being rolled back TO was released once — its
+                // deliverables sit in ARCHIVE (moved there when the newer rev
+                // released). They are current again: move them back to
+                // EXPORTS (found in PR-52 testing — rollback otherwise left a
+                // Released file with NO current deliverables). Exact-name
+                // patterns, one move per config identity. For a model, the
+                // PDF restore pairs with the drawing-rollback offer below —
+                // accepting it brings the drawing file to the same rev.
+                if (ext == ".slddrw")
+                {
+                    if (!string.IsNullOrEmpty(drawingNo))
+                        MoveMatching(Path.Combine(ObsFolder, "PDF"),
+                            Path.Combine(ExportRoot, "PDF"),
+                            drawingNo + " REV " + targetLetter + ".pdf");
+                }
+                else
+                {
+                    foreach (string pn in rbPartNos)
+                    {
+                        MoveMatching(Path.Combine(ObsFolder, "STEP"),
+                            Path.Combine(ExportRoot, "STEP"),
+                            pn.Replace(".", "") + "-R" + targetLetter + ".step");
+                        MoveMatching(Path.Combine(ObsFolder, "DXF"),
+                            Path.Combine(ExportRoot, "DXF"),
+                            pn.Replace(".", "") + "-R" + targetLetter + ".dxf");
+                        MoveMatching(Path.Combine(ObsFolder, "BOM"),
+                            Path.Combine(ExportRoot, "BOM"),
+                            pn + "-R" + targetLetter + "_BOM.csv");
+                    }
+                    // The PDF is the DRAWING's deliverable, not the model's — it is
+                    // restored in Step 9 ONLY if the drawing is actually rolled back,
+                    // so a declined drawing rollback can't leave an old-rev PDF in
+                    // EXPORTS beside a new-rev drawing.
+                }
 
                 // ── Step 8: Update database ───────────────────────────────
                 DatabaseManager.LockFile(filePath, user);
@@ -2350,37 +2789,34 @@ namespace PDMLite
                 }
                 catch { }
 
-                // ── Step 9: Offer to roll back the matching drawing ───────
-                // Drawings are archived as a matched pair with the model, so a
-                // drawing archive at the same revision should exist if one was
-                // ever released. Restoring it keeps part + drawing consistent.
-                // Skipped when THIS file is itself a drawing (already restored).
-                string drwSummary = ext == ".slddrw"
-                    ? "n/a (this file is a drawing)"
-                    : "no matching drawing archive found";
-                string targetLetter = targetRev
-                    .Replace("REV", "").Replace("rev", "").Trim();
+                // ── Step 9: Roll the matching drawing back AUTOMATICALLY ──
+                // A released model + drawing are ONE deliverable and BCore couples
+                // their revision (the part drives the drawing — New Revision already
+                // auto-syncs it with no prompt), so a model rollback rolls its
+                // drawing back too, automatically. The ONLY non-rollback case is "no
+                // archived drawing at the target rev" while a drawing exists — that
+                // can't be auto-synced, so it is surfaced as a WARNING (never a
+                // silent rev mismatch). Skipped when THIS file is itself a drawing
+                // (already restored) or the model simply has no drawing.
+                string drwSummary;
                 string drwArchiveDir = Path.Combine(ObsFolder, "DRAWINGS");
                 string drwArchiveFile = Path.Combine(drwArchiveDir,
                     fileName + " REV " + targetLetter + ".slddrw");
 
-                if (ext != ".slddrw" && File.Exists(drwArchiveFile))
+                if (ext == ".slddrw")
                 {
-                    var drwChoice = MessageBox.Show(
-                        "A matching drawing archive was found:\n" +
-                        Path.GetFileName(drwArchiveFile) + "\n\n" +
-                        "Roll the drawing back to " + targetRev + " as well?",
-                        "BCore PDM — Roll Back Drawing",
-                        MessageBoxButtons.YesNo, MessageBoxIcon.Question);
+                    drwSummary = "n/a (this file is a drawing)";
+                }
+                else
+                {
+                    string drwTarget = FindDrawingPath(filePath) ??
+                        Path.Combine(Path.GetDirectoryName(filePath),
+                            fileName + ".slddrw");
 
-                    if (drwChoice == DialogResult.Yes)
+                    if (File.Exists(drwArchiveFile))
                     {
                         try
                         {
-                            string drwTarget = FindDrawingPath(filePath) ??
-                                Path.Combine(Path.GetDirectoryName(filePath),
-                                    fileName + ".slddrw");
-
                             // Archive the current drawing before overwriting it
                             // (collision-safe, same rationale as the model above).
                             if (File.Exists(drwTarget))
@@ -2410,17 +2846,53 @@ namespace PDMLite
                             DatabaseManager.SetFileStatus(drwTarget, "Released",
                                 user, "Drawing rolled back to " + targetRev);
 
+                            // The drawing is rolled back to the target rev, so bring
+                            // EVERY config's PDF to the target rev too: archive the
+                            // current PDF, then restore the target-rev one. Looping
+                            // rbDrawingNos (each config's DrawingNo) — not the single
+                            // active-config drawingNo — restores a MULTI-config model's
+                            // per-config PDFs, which the scalar missed (review finding).
+                            // Done HERE (not Step 7) so a non-rolled-back drawing keeps
+                            // its current PDF.
+                            foreach (string dn in rbDrawingNos)
+                            {
+                                if (string.IsNullOrEmpty(dn)) continue;
+                                CleanupExportsOnRollback("", dn);   // archive current
+                                MoveMatching(Path.Combine(ObsFolder, "PDF"),
+                                    Path.Combine(ExportRoot, "PDF"),
+                                    dn + " REV " + targetLetter + ".pdf"); // restore target
+                            }
+
                             drwSummary = Path.GetFileName(drwTarget) +
                                 " → " + targetRev;
                         }
                         catch (Exception dex)
                         {
-                            drwSummary = "drawing rollback failed: " + dex.Message;
+                            drwSummary = "drawing rollback FAILED: " + dex.Message +
+                                " — roll it back manually";
                         }
+                    }
+                    else if (File.Exists(drwTarget))
+                    {
+                        // A drawing exists but has NO archive at the target rev — it
+                        // would be left at a different rev than the model. Warn (never
+                        // a silent mismatch) so the Master fixes it manually.
+                        drwSummary = "WARNING: no archived drawing at " + targetRev +
+                            " — its revision will NOT match the model (fix manually)";
+                        MessageBox.Show(
+                            "The model was rolled back to " + targetRev +
+                            ", but no archived drawing exists at that revision:\n\n  " +
+                            Path.GetFileName(drwArchiveFile) + "\n\n" +
+                            "Its drawing (" + Path.GetFileName(drwTarget) + ") will " +
+                            "NOT match the model's revision. Open the drawing and set " +
+                            "its revision to " + targetRev + " manually to keep the " +
+                            "pair in sync.",
+                            "BCore PDM — Drawing Revision Mismatch",
+                            MessageBoxButtons.OK, MessageBoxIcon.Warning);
                     }
                     else
                     {
-                        drwSummary = "drawing left unchanged (you declined)";
+                        drwSummary = "n/a (no drawing for this model)";
                     }
                 }
 
@@ -3393,7 +3865,13 @@ namespace PDMLite
                 SolidWorks.Interop.sldworks.View v =
                     (SolidWorks.Interop.sldworks.View)sheet.GetNextView();
                 if (v == null) return "";
-                return v.ReferencedConfiguration ?? "";
+                // A sheet-metal drawing's first view may be the FLAT PATTERN,
+                // which references the auto-generated "{parent}SM-FLAT-PATTERN"
+                // config — that derived config holds a STALE inherited rev/PN, so
+                // resolve it to the real parent config (PR-52: a sheet-metal
+                // drawing released at the model's OLD rev because of this).
+                return PropertyValidator.ParentConfigOf(
+                    v.ReferencedConfiguration ?? "");
             }
             catch { return ""; }
         }
@@ -3441,7 +3919,12 @@ namespace PDMLite
                     (SolidWorks.Interop.sldworks.View)sheet.GetNextView();
                 while (v != null)
                 {
-                    string cfg = v.ReferencedConfiguration;
+                    // Map a flat-pattern view's "{parent}SM-FLAT-PATTERN" config
+                    // to the real parent config so the stored ReferencedConfigs
+                    // stay consistent with GetConfigNames (which filters the
+                    // flat-pattern config out) — drawing↔config mapping keys on it.
+                    string cfg = PropertyValidator.ParentConfigOf(
+                        v.ReferencedConfiguration);
                     if (!string.IsNullOrEmpty(cfg)) configs.Add(cfg);
                     v = (SolidWorks.Interop.sldworks.View)v.GetNextView();
                 }
@@ -3466,14 +3949,22 @@ namespace PDMLite
                 // BOM CSV (assemblies) — raw PartNo so the glob matches the
                 // {partNo}-R{rev}_BOM.csv filename correctly.
                 string bomId = rawPartNo ?? partNoClean;
-                MoveMatching(Path.Combine(ExportRoot, "BOM"),
-                    Path.Combine(ObsFolder, "BOM"), bomId + "-R*_BOM.csv",
-                    ExportNameFilter(bomId, "-R", "_BOM.csv"));
+                if (!string.IsNullOrEmpty(bomId))
+                    MoveMatching(Path.Combine(ExportRoot, "BOM"),
+                        Path.Combine(ObsFolder, "BOM"), bomId + "-R*_BOM.csv",
+                        ExportNameFilter(bomId, "-R", "_BOM.csv"));
 
                 // STEP files matching part number: {partNoClean}-R{rev}.step.
-                MoveMatching(Path.Combine(ExportRoot, "STEP"),
-                    Path.Combine(ObsFolder, "STEP"), partNoClean + "-R*.step",
-                    ExportNameFilter(partNoClean, "-R", ".step"));
+                if (!string.IsNullOrEmpty(partNoClean))
+                    MoveMatching(Path.Combine(ExportRoot, "STEP"),
+                        Path.Combine(ObsFolder, "STEP"), partNoClean + "-R*.step",
+                        ExportNameFilter(partNoClean, "-R", ".step"));
+
+                // DXF (sheet-metal flat pattern): {partNoClean}-R{rev}.dxf.
+                if (!string.IsNullOrEmpty(partNoClean))
+                    MoveMatching(Path.Combine(ExportRoot, "DXF"),
+                        Path.Combine(ObsFolder, "DXF"), partNoClean + "-R*.dxf",
+                        ExportNameFilter(partNoClean, "-R", ".dxf"));
 
                 // PDFs matching drawing number: {drawingNo} REV {rev}.pdf.
                 if (!string.IsNullOrEmpty(drawingNo))

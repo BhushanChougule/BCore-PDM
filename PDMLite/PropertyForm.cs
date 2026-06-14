@@ -542,8 +542,12 @@ namespace PDMLite
             this.Close();
         }
 
+        // Controls first (base.Dispose), fonts after — the reverse leaves
+        // a window where a re-entrant repaint could draw with a disposed
+        // Font (house convention, audit C4).
         protected override void Dispose(bool disposing)
         {
+            base.Dispose(disposing);
             if (disposing)
             {
                 _headerFont?.Dispose();
@@ -553,7 +557,6 @@ namespace PDMLite
                 _inputFont?.Dispose();
                 _buttonFont?.Dispose();
             }
-            base.Dispose(disposing);
         }
     }
 }

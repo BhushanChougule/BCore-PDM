@@ -185,9 +185,22 @@ namespace PDMLite
                 return doc;
             }
 
+            // A degraded-mode writer on another machine can briefly hold
+            // vault.xml open (the direct-save last resort), and the reader
+            // had NO retry — the IOException propagated raw out of whatever
+            // UI path triggered the read. Retry genuine sharing violations
+            // briefly, mirroring the Save side.
+            for (int attempt = 0; ; attempt++)
+            {
             try
             {
                 return XDocument.Load(DataFile);
+            }
+            catch (IOException io) when (
+                (io.HResult & 0xFFFF) == 32 || (io.HResult & 0xFFFF) == 33)
+            {
+                if (attempt == 4) throw;
+                System.Threading.Thread.Sleep(200);
             }
             catch (System.Xml.XmlException)
             {
@@ -197,6 +210,7 @@ namespace PDMLite
                 var restored = TryRestoreFromBackup("vault.xml corrupt");
                 if (restored != null) return restored;
                 throw;
+            }
             }
         }
 
@@ -463,6 +477,28 @@ namespace PDMLite
         public static void Initialize()
         {
             lock (_lock) using (AcquireProcessLock()) { LoadOrCreate(); }
+
+            // Sweep stale per-process save temps (vault.xml.{machine}.{pid}
+            // .tmp): normally consumed by File.Replace/Move, but a crash or
+            // serialization failure strands them and nothing else ever
+            // deletes them — across 10+ machines they accumulate forever.
+            // Only temps older than a day are touched (a LIVE temp exists
+            // for milliseconds mid-save).
+            try
+            {
+                foreach (string tmp in Directory.GetFiles(
+                    VaultFolder, "vault.xml.*.tmp"))
+                {
+                    try
+                    {
+                        if (DateTime.UtcNow - File.GetLastWriteTimeUtc(tmp)
+                                > TimeSpan.FromDays(1))
+                            File.Delete(tmp);
+                    }
+                    catch { }
+                }
+            }
+            catch { }
 
             // Ensure WIP division subfolders exist so engineers can
             // navigate to them from the first day without manual setup.
@@ -1186,8 +1222,22 @@ namespace PDMLite
                     // Orphan check: file gone on disk → never show it, and purge
                     // its record when we can prove the share is online.
                     string filePath = (string)el.Element("FilePath") ?? "";
-                    bool missing = string.IsNullOrEmpty(filePath) ||
-                                   !File.Exists(filePath);
+                    // File.Exists returns false on ACCESS errors too (a broken
+                    // ACL on one division folder, AV interference) — purging on
+                    // that would delete records (and later their histories, via
+                    // the re-create purge) for files that still exist. Only
+                    // treat the file as gone when its PARENT FOLDER is provably
+                    // reachable.
+                    bool missing = string.IsNullOrEmpty(filePath);
+                    if (!missing && !File.Exists(filePath))
+                    {
+                        try
+                        {
+                            missing = Directory.Exists(
+                                Path.GetDirectoryName(filePath));
+                        }
+                        catch { }
+                    }
                     if (missing)
                     {
                         if (canPurge)
@@ -1749,6 +1799,53 @@ namespace PDMLite
         // the path is not tracked. Used by the Pending Requests cards to show
         // the file's PartNumber + Revision (which live on the File record, not
         // on the RevisionRequest).
+        // Rename a tracked file's record IN PLACE (FilePath + FileName) and
+        // re-point its RevisionHistory entries, so the timeline follows the
+        // file. Used by Rule 3.6's config+drawing rename ({oldCfg}.slddrw →
+        // {newCfg}.slddrw); the file on disk is renamed by the caller.
+        public static void RenameFileRecord(string oldPath, string newPath,
+            string user)
+        {
+            string oldName = System.IO.Path.GetFileName(oldPath);
+            string newName = System.IO.Path.GetFileName(newPath);
+            lock (_lock) using (AcquireProcessLock())
+            {
+                var doc = LoadOrCreate();
+                // Only fall back to a FILENAME match for history entries when NO
+                // living WIP rival owns this name — otherwise an unrelated same-named
+                // file's timeline could be silently re-pointed. Same FindNameRival
+                // guard the codebase uses everywhere it matches history by basename
+                // (GetFileHistory / GetFileStatusByName / RemoveFileRecord).
+                bool nameRival = FindNameRival(doc, oldName, oldPath) != null;
+                bool changed = false;
+                foreach (var el in doc.Root.Element("Files").Elements("File"))
+                {
+                    if (!string.Equals((string)el.Element("FilePath"), oldPath,
+                            StringComparison.OrdinalIgnoreCase)) continue;
+                    el.Element("FilePath").Value = newPath;
+                    el.Element("FileName").Value = newName;
+                    changed = true;
+                }
+                foreach (var en in doc.Root.Element("RevisionHistory")
+                                          .Elements("Entry"))
+                {
+                    string ep = (string)en.Element("FilePath") ?? "";
+                    if (string.Equals(ep, oldPath,
+                            StringComparison.OrdinalIgnoreCase) ||
+                        (!nameRival &&
+                         string.Equals(System.IO.Path.GetFileName(ep), oldName,
+                            StringComparison.OrdinalIgnoreCase)))
+                    {
+                        en.Element("FilePath").Value = newPath;
+                        changed = true;
+                    }
+                }
+                if (changed) Save(doc);
+            }
+            AuditLogger.Log("FileRenamed", user, newName, "", "",
+                "renamed from " + oldName + " (config rename)");
+        }
+
         public static VaultFile GetFileRecord(string filePath)
         {
             if (string.IsNullOrEmpty(filePath)) return null;
@@ -1926,7 +2023,7 @@ namespace PDMLite
         // Mirrors the sanitisation in VaultManager.OpenOrCreateDrawing: a config
         // name used as a drawing filename has Windows-illegal characters replaced
         // with '_'. Kept here so config→drawing lookup agrees with creation.
-        private static string SanitizeFileName(string name)
+        internal static string SanitizeFileName(string name)
         {
             if (string.IsNullOrEmpty(name)) return name;
             var invalid = System.IO.Path.GetInvalidFileNameChars();
@@ -1968,8 +2065,18 @@ namespace PDMLite
                         bool coversAll     = string.IsNullOrEmpty(refConfigs);
                         bool coversThis    = !coversAll && refConfigs
                             .Split(',')
-                            .Any(c => string.Equals(c.Trim(), configName,
-                                          StringComparison.OrdinalIgnoreCase));
+                            .Select(c => c.Trim())
+                            .Any(c => string.Equals(c, configName,
+                                          StringComparison.OrdinalIgnoreCase) ||
+                                      // Legacy records (saved before the flat-pattern
+                                      // filter) may store the raw "{config}SM-FLAT-
+                                      // PATTERN" name; tolerate it so the drawing still
+                                      // resolves (self-heals on the next save).
+                                      (c.EndsWith("SM-FLAT-PATTERN",
+                                          StringComparison.OrdinalIgnoreCase) &&
+                                       string.Equals(c.Substring(0, c.Length -
+                                          "SM-FLAT-PATTERN".Length), configName,
+                                          StringComparison.OrdinalIgnoreCase)));
                         if (coversAll || coversThis)
                         {
                             result.Add(fp);
