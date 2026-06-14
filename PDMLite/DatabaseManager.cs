@@ -771,6 +771,36 @@ namespace PDMLite
             }
         }
 
+        // Update a file record's top-level Revision (matched by FilePath, case-
+        // insensitively). Used by rollback to sync a rolled-back DRAWING's record to
+        // the target rev: the model's identity is synced via the full reopen +
+        // UpsertFile in rollback Step 8.5, but a drawing carries no PartNo/Description
+        // of its own (the dashboard fills those from the model) — only its Revision
+        // needs updating so search/dashboard stop showing the pre-rollback rev. DB
+        // record only; never touches the file on disk; no-op if the path isn't tracked.
+        public static void SetFileRevision(string filePath, string revision)
+        {
+            if (string.IsNullOrEmpty(filePath)) return;
+            lock (_lock) using (AcquireProcessLock())
+            {
+                var doc = LoadOrCreate();
+                foreach (var el in doc.Root.Element("Files").Elements("File"))
+                {
+                    if (string.Equals((string)el.Element("FilePath"), filePath,
+                            StringComparison.OrdinalIgnoreCase))
+                    {
+                        var rev = el.Element("Revision");
+                        if (rev == null)
+                            el.Add(new XElement("Revision", revision ?? ""));
+                        else
+                            rev.Value = revision ?? "";
+                        break;
+                    }
+                }
+                Save(doc);
+            }
+        }
+
         // ════════════════════════════════════════════════════════════════
         // Remove from vault (DB record only — never touches files on disk)
         // ════════════════════════════════════════════════════════════════

@@ -2909,6 +2909,11 @@ namespace PDMLite
                                 DatabaseManager.LockFile(drwTarget, user);
                                 DatabaseManager.SetFileStatus(drwTarget, "Released",
                                     user, "Drawing rolled back to " + targetRev);
+                                // Sync the drawing's record to the rolled-back rev so
+                                // search/dashboard show it correctly (the model is
+                                // synced via Step 8.5; a drawing only needs its
+                                // Revision — PartNo/Description come from the model).
+                                DatabaseManager.SetFileRevision(drwTarget, targetLetter);
                                 // Restore THIS drawing's PDF(s): archive the current,
                                 // restore the target-rev one (per-drawing, so a drawing
                                 // that can't roll back keeps its current PDF). The
