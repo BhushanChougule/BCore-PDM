@@ -2868,6 +2868,12 @@ namespace PDMLite
                         string drwArchiveFile = Path.Combine(drwArchiveDir,
                             drwBase + " REV " + targetLetter + ".slddrw");
 
+                        // Don't RESURRECT a drawing that's no longer on disk: an
+                        // orphan vault record (file removed/scrapped but the record
+                        // not yet purged) would otherwise be recreated from its
+                        // archive and re-published. Roll back only EXISTING drawings.
+                        if (!File.Exists(drwTarget)) continue;
+
                         if (File.Exists(drwArchiveFile))
                         {
                             try
@@ -2926,14 +2932,13 @@ namespace PDMLite
                                     " (rollback failed: " + dex.Message + ")");
                             }
                         }
-                        else if (File.Exists(drwTarget))
+                        else
                         {
-                            // Drawing exists but has no archive at the target rev —
-                            // it will stay at its current rev; collect for the warning.
+                            // Drawing exists (guarded above) but has no archive at the
+                            // target rev — it stays at its current rev; warn.
                             drwMismatch.Add(Path.GetFileName(drwTarget) +
                                 " (no REV " + targetLetter + " archive)");
                         }
-                        // else: drawing not on disk → nothing to do
                     }
 
                     drwSummary = drwRolledBack.Count > 0
@@ -2945,8 +2950,9 @@ namespace PDMLite
                             string.Join(", ", drwMismatch);
                         MessageBox.Show(
                             "The model was rolled back to " + targetRev + ", but " +
-                            "these drawings could NOT be rolled back (no archive at " +
-                            "that rev) and will NOT match the model's revision:\n\n  • " +
+                            "these drawings could NOT be rolled back (reason shown " +
+                            "after each) and will NOT match the model's revision:" +
+                            "\n\n  • " +
                             string.Join("\n  • ", drwMismatch) + "\n\n" +
                             "Open each and set its revision to " + targetRev +
                             " manually to keep the pair in sync.",
