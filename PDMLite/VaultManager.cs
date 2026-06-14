@@ -2839,6 +2839,27 @@ namespace PDMLite
                 {
                     var drwRolledBack = new List<string>();
                     var drwMismatch = new List<string>();
+                    // A SEPARATE drawing ({config}.slddrw) owns its config's
+                    // DrawingNo; the SHARED/common drawing ({model}.slddrw) produces
+                    // ONE PDF named by ONE of the REMAINING configs' DrawingNos (the
+                    // ones with no separate drawing), and WHICH one depends on the
+                    // config its title block documents — NOT the active config. So
+                    // restore the shared drawing's PDF by trying every remaining
+                    // DrawingNo (only the real one matches); a separate drawing by its
+                    // own. Makes the shared-drawing PDF robust regardless of which
+                    // config is active at rollback time.
+                    var separateDnos = new HashSet<string>(
+                        StringComparer.OrdinalIgnoreCase);
+                    foreach (string[] dd in rbDrawings)
+                        if (!string.Equals(
+                                Path.GetFileNameWithoutExtension(dd[0]), fileName,
+                                StringComparison.OrdinalIgnoreCase) &&
+                            !string.IsNullOrEmpty(dd[1]))
+                            separateDnos.Add(dd[1]);
+                    var commonDnos = rbDrawingNos
+                        .Where(dn => !string.IsNullOrEmpty(dn) &&
+                                     !separateDnos.Contains(dn))
+                        .ToList();
                     foreach (string[] drw in rbDrawings)
                     {
                         string drwTarget = drw[0];
@@ -2876,15 +2897,26 @@ namespace PDMLite
                                 DatabaseManager.LockFile(drwTarget, user);
                                 DatabaseManager.SetFileStatus(drwTarget, "Released",
                                     user, "Drawing rolled back to " + targetRev);
-                                // Restore THIS drawing's PDF: archive the current,
-                                // restore the target-rev one (done per-drawing so a
-                                // drawing that can't roll back keeps its current PDF).
-                                if (!string.IsNullOrEmpty(drwDno))
+                                // Restore THIS drawing's PDF(s): archive the current,
+                                // restore the target-rev one (per-drawing, so a drawing
+                                // that can't roll back keeps its current PDF). The
+                                // SHARED drawing (basename == model name) restores by
+                                // every remaining-config DrawingNo (only its real one
+                                // matches; the rest are no-ops); a SEPARATE drawing by
+                                // its own.
+                                bool isShared = string.Equals(drwBase, fileName,
+                                    StringComparison.OrdinalIgnoreCase);
+                                var pdfDnos = isShared
+                                    ? commonDnos
+                                    : (string.IsNullOrEmpty(drwDno)
+                                        ? new List<string>()
+                                        : new List<string> { drwDno });
+                                foreach (string pdn in pdfDnos)
                                 {
-                                    CleanupExportsOnRollback("", drwDno);
+                                    CleanupExportsOnRollback("", pdn);
                                     MoveMatching(Path.Combine(ObsFolder, "PDF"),
                                         Path.Combine(ExportRoot, "PDF"),
-                                        drwDno + " REV " + targetLetter + ".pdf");
+                                        pdn + " REV " + targetLetter + ".pdf");
                                 }
                                 drwRolledBack.Add(Path.GetFileName(drwTarget));
                             }
