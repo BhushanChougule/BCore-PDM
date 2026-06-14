@@ -2661,10 +2661,16 @@ namespace PDMLite
                 // dialog already told the Master the file must be reopened.
                 if (ext != ".slddrw")
                 {
-                    string rbDrw = FindDrawingPath(filePath);
-                    if (rbDrw != null &&
-                        PDMLiteAddin.SwApp.GetOpenDocumentByName(rbDrw) != null)
-                        try { PDMLiteAddin.SwApp.CloseDoc(rbDrw); } catch { }
+                    // Close EVERY drawing being rolled back (shared + per-config),
+                    // not just the shared one: a per-config drawing left OPEN has its
+                    // disk file restored under it while SW keeps the STALE in-memory
+                    // copy, so the task pane showed the OLD rev after rollback (found
+                    // in PR-69 testing). Close them first (they reference the model);
+                    // rbDrawings was captured above, before this close.
+                    foreach (string[] drw in rbDrawings)
+                        if (PDMLiteAddin.SwApp
+                                .GetOpenDocumentByName(drw[0]) != null)
+                            try { PDMLiteAddin.SwApp.CloseDoc(drw[0]); } catch { }
                 }
                 try { PDMLiteAddin.SwApp.CloseDoc(filePath); } catch { }
 
