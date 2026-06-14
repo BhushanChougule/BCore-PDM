@@ -528,6 +528,23 @@ namespace PDMLite
             catch { }
         }
 
+        // ShowConfiguration2 returns FALSE when the target config is ALREADY the
+        // active config and no rebuild was needed — that is NOT a failure (the
+        // config IS active). The release config-switch loops must treat "already
+        // active" as success, or releasing a multi-config part FALSE-ABORTS whenever
+        // the config being processed is already active (e.g. the Master activated it
+        // by hand first, leaving it clean) — found in PR-52 multi-config testing.
+        // Returns true when cfgName is the active config AFTER the call (switch
+        // happened, OR it was already active), false only on a genuine refusal.
+        private static bool ActivateConfig(ModelDoc2 doc, string cfgName)
+        {
+            if (doc.ShowConfiguration2(cfgName)) return true;
+            string active = (doc.GetActiveConfiguration()
+                as SolidWorks.Interop.sldworks.Configuration)?.Name;
+            return string.Equals(active, cfgName,
+                StringComparison.OrdinalIgnoreCase);
+        }
+
         // ── RELEASE ───────────────────────────────────────────────────────
         // suppressPrompts skips the confirm + success dialogs (used when this
         // file is being released as part of a chained drawing+model release so
@@ -1006,7 +1023,7 @@ namespace PDMLite
                                 checkedByVal, c);
                             PropertyValidator.SetProperty(doc, "CheckedDate",
                                 checkedDateVal, c);
-                            if (doc.ShowConfiguration2(c))
+                            if (ActivateConfig(doc, c))
                                 PropertyValidator.AutoFillWeight(doc);
                             else
                                 cfgSwitchFailures.Add(c);
@@ -1154,7 +1171,7 @@ namespace PDMLite
                                 collidedStamps.Add(cfgStamp);
                                 continue;
                             }
-                            if (!doc.ShowConfiguration2(c))
+                            if (!ActivateConfig(doc, c))
                             {
                                 // Exporting now would write the PREVIOUS
                                 // config's geometry under THIS config's part
