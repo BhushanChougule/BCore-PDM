@@ -2448,6 +2448,18 @@ namespace PDMLite
             }
             catch { }
         }
+
+        // Adds a drawing WIP path → DrawingNo pair to the rollback list, deduped by
+        // path (case-insensitive). The shared {basename}.slddrw is returned by
+        // GetDrawingsForConfig for every config, so dedup keeps the first mapping.
+        private static void AddRbDrawing(List<string[]> list, string path, string dno)
+        {
+            if (string.IsNullOrEmpty(path)) return;
+            if (!list.Any(x => string.Equals(x[0], path,
+                    StringComparison.OrdinalIgnoreCase)))
+                list.Add(new[] { path, dno ?? "" });
+        }
+
         // ── ROLLBACK REVISION ─────────────────────────────────────────────
         public static void RollbackRevision(ModelDoc2 doc)
         {
@@ -2578,6 +2590,11 @@ namespace PDMLite
             string partNo, drawingNo;
             var rbPartNos = new List<string>();
             var rbDrawingNos = new List<string>();
+            // Every drawing that documents this model (shared {basename}.slddrw +
+            // each per-config {configName}.slddrw), each mapped to the DrawingNo its
+            // PDF is named by — so Step 9 rolls back ALL of them, not just the shared
+            // one. Captured here while the doc is still open (closed below).
+            var rbDrawings = new List<string[]>();
             if (ext == ".slddrw")
             {
                 partNo = GetDrawingPartNo(doc);
@@ -2589,6 +2606,9 @@ namespace PDMLite
             {
                 partNo = PropertyValidator.GetProperty(doc, "PartNo");
                 drawingNo = PropertyValidator.GetProperty(doc, "DrawingNo");
+                // Shared drawing FIRST, mapped to the active-config DrawingNo (its
+                // PDF is named by the config its primary view documents).
+                AddRbDrawing(rbDrawings, FindDrawingPath(filePath), drawingNo);
                 foreach (string cfg in PropertyValidator.GetConfigNames(doc))
                 {
                     string cp = PropertyValidator.GetProperty(doc, "PartNo", cfg);
@@ -2599,6 +2619,11 @@ namespace PDMLite
                     if (!string.IsNullOrEmpty(cd) &&
                         !rbDrawingNos.Contains(cd, StringComparer.OrdinalIgnoreCase))
                         rbDrawingNos.Add(cd);
+                    // This config's drawing(s): the shared one (deduped) + this
+                    // config's {configName}.slddrw, mapped to this config's DrawingNo.
+                    foreach (string d in
+                        DatabaseManager.GetDrawingsForConfig(filePath, cfg))
+                        AddRbDrawing(rbDrawings, d, cd);
                 }
                 if (rbPartNos.Count == 0 && !string.IsNullOrEmpty(partNo))
                     rbPartNos.Add(partNo);
@@ -2636,10 +2661,16 @@ namespace PDMLite
                 // dialog already told the Master the file must be reopened.
                 if (ext != ".slddrw")
                 {
-                    string rbDrw = FindDrawingPath(filePath);
-                    if (rbDrw != null &&
-                        PDMLiteAddin.SwApp.GetOpenDocumentByName(rbDrw) != null)
-                        try { PDMLiteAddin.SwApp.CloseDoc(rbDrw); } catch { }
+                    // Close EVERY drawing being rolled back (shared + per-config),
+                    // not just the shared one: a per-config drawing left OPEN has its
+                    // disk file restored under it while SW keeps the STALE in-memory
+                    // copy, so the task pane showed the OLD rev after rollback (found
+                    // in PR-69 testing). Close them first (they reference the model);
+                    // rbDrawings was captured above, before this close.
+                    foreach (string[] drw in rbDrawings)
+                        if (PDMLiteAddin.SwApp
+                                .GetOpenDocumentByName(drw[0]) != null)
+                            try { PDMLiteAddin.SwApp.CloseDoc(drw[0]); } catch { }
                 }
                 try { PDMLiteAddin.SwApp.CloseDoc(filePath); } catch { }
 
@@ -2789,110 +2820,155 @@ namespace PDMLite
                 }
                 catch { }
 
-                // ── Step 9: Roll the matching drawing back AUTOMATICALLY ──
-                // A released model + drawing are ONE deliverable and BCore couples
-                // their revision (the part drives the drawing — New Revision already
-                // auto-syncs it with no prompt), so a model rollback rolls its
-                // drawing back too, automatically. The ONLY non-rollback case is "no
-                // archived drawing at the target rev" while a drawing exists — that
-                // can't be auto-synced, so it is surfaced as a WARNING (never a
-                // silent rev mismatch). Skipped when THIS file is itself a drawing
-                // (already restored) or the model simply has no drawing.
+                // ── Step 9: Roll back EVERY drawing that documents the model ──
+                // A released model + its drawings are ONE deliverable and BCore couples
+                // their revision (the part drives the drawing — New Revision auto-syncs
+                // it), so a model rollback rolls back ALL of them automatically: the
+                // shared {basename}.slddrw AND each per-config {configName}.slddrw
+                // (captured in rbDrawings before the close). Per drawing: archive the
+                // current → restore the target-rev archive → mirror RELEASED → restore
+                // its PDF. A drawing with NO archive at the target rev can't be synced,
+                // so it is collected and warned about (never a silent mismatch). Skipped
+                // when THIS file is itself a drawing (already restored).
                 string drwSummary;
                 string drwArchiveDir = Path.Combine(ObsFolder, "DRAWINGS");
-                string drwArchiveFile = Path.Combine(drwArchiveDir,
-                    fileName + " REV " + targetLetter + ".slddrw");
 
                 if (ext == ".slddrw")
                 {
                     drwSummary = "n/a (this file is a drawing)";
                 }
+                else if (rbDrawings.Count == 0)
+                {
+                    drwSummary = "n/a (no drawing for this model)";
+                }
                 else
                 {
-                    string drwTarget = FindDrawingPath(filePath) ??
-                        Path.Combine(Path.GetDirectoryName(filePath),
-                            fileName + ".slddrw");
-
-                    if (File.Exists(drwArchiveFile))
+                    var drwRolledBack = new List<string>();
+                    var drwMismatch = new List<string>();
+                    // A SEPARATE drawing ({config}.slddrw) owns its config's
+                    // DrawingNo; the SHARED/common drawing ({model}.slddrw) produces
+                    // ONE PDF named by ONE of the REMAINING configs' DrawingNos (the
+                    // ones with no separate drawing), and WHICH one depends on the
+                    // config its title block documents — NOT the active config. So
+                    // restore the shared drawing's PDF by trying every remaining
+                    // DrawingNo (only the real one matches); a separate drawing by its
+                    // own. Makes the shared-drawing PDF robust regardless of which
+                    // config is active at rollback time.
+                    var separateDnos = new HashSet<string>(
+                        StringComparer.OrdinalIgnoreCase);
+                    foreach (string[] dd in rbDrawings)
+                        if (!string.Equals(
+                                Path.GetFileNameWithoutExtension(dd[0]), fileName,
+                                StringComparison.OrdinalIgnoreCase) &&
+                            !string.IsNullOrEmpty(dd[1]))
+                            separateDnos.Add(dd[1]);
+                    var commonDnos = rbDrawingNos
+                        .Where(dn => !string.IsNullOrEmpty(dn) &&
+                                     !separateDnos.Contains(dn))
+                        .ToList();
+                    foreach (string[] drw in rbDrawings)
                     {
-                        try
+                        string drwTarget = drw[0];
+                        string drwDno = drw[1];
+                        string drwBase = Path.GetFileNameWithoutExtension(drwTarget);
+                        string drwArchiveFile = Path.Combine(drwArchiveDir,
+                            drwBase + " REV " + targetLetter + ".slddrw");
+
+                        // Don't RESURRECT a drawing that's no longer on disk: an
+                        // orphan vault record (file removed/scrapped but the record
+                        // not yet purged) would otherwise be recreated from its
+                        // archive and re-published. Roll back only EXISTING drawings.
+                        if (!File.Exists(drwTarget)) continue;
+
+                        if (File.Exists(drwArchiveFile))
                         {
-                            // Archive the current drawing before overwriting it
-                            // (collision-safe, same rationale as the model above).
-                            if (File.Exists(drwTarget))
+                            try
                             {
-                                SetReadOnly(drwTarget, false);
-                                ArchiveCopy(drwTarget, CollisionSafeArchivePath(
-                                    drwArchiveDir, fileName, currentRev,
-                                    ".slddrw", rbMultiCfg));
+                                // Archive the current drawing (collision-safe).
+                                if (File.Exists(drwTarget))
+                                {
+                                    SetReadOnly(drwTarget, false);
+                                    ArchiveCopy(drwTarget, CollisionSafeArchivePath(
+                                        drwArchiveDir, drwBase, currentRev,
+                                        ".slddrw", rbMultiCfg));
+                                }
+                                // Restore the archived drawing to its WIP path.
+                                SetReadOnly(drwArchiveFile, false);
+                                File.Copy(drwArchiveFile, drwTarget, overwrite: true);
+                                // Mirror into the RELEASED folder snapshot.
+                                string drwReleased = Path.Combine(RelFolder,
+                                    Path.GetFileName(drwTarget));
+                                if (File.Exists(drwReleased))
+                                {
+                                    SetReadOnly(drwReleased, false);
+                                    File.Copy(drwArchiveFile, drwReleased,
+                                        overwrite: true);
+                                    SetReadOnly(drwReleased, true);
+                                }
+                                SetReadOnly(drwTarget, true);
+                                DatabaseManager.LockFile(drwTarget, user);
+                                DatabaseManager.SetFileStatus(drwTarget, "Released",
+                                    user, "Drawing rolled back to " + targetRev);
+                                // Sync the drawing's record to the rolled-back rev so
+                                // search/dashboard show it correctly (the model is
+                                // synced via Step 8.5; a drawing only needs its
+                                // Revision — PartNo/Description come from the model).
+                                DatabaseManager.SetFileRevision(drwTarget, targetLetter);
+                                // Restore THIS drawing's PDF(s): archive the current,
+                                // restore the target-rev one (per-drawing, so a drawing
+                                // that can't roll back keeps its current PDF). The
+                                // SHARED drawing (basename == model name) restores by
+                                // every remaining-config DrawingNo (only its real one
+                                // matches; the rest are no-ops); a SEPARATE drawing by
+                                // its own.
+                                bool isShared = string.Equals(drwBase, fileName,
+                                    StringComparison.OrdinalIgnoreCase);
+                                var pdfDnos = isShared
+                                    ? commonDnos
+                                    : (string.IsNullOrEmpty(drwDno)
+                                        ? new List<string>()
+                                        : new List<string> { drwDno });
+                                foreach (string pdn in pdfDnos)
+                                {
+                                    CleanupExportsOnRollback("", pdn);
+                                    MoveMatching(Path.Combine(ObsFolder, "PDF"),
+                                        Path.Combine(ExportRoot, "PDF"),
+                                        pdn + " REV " + targetLetter + ".pdf");
+                                }
+                                drwRolledBack.Add(Path.GetFileName(drwTarget));
                             }
-
-                            // Restore the archived drawing to the WIP path.
-                            SetReadOnly(drwArchiveFile, false);
-                            File.Copy(drwArchiveFile, drwTarget, overwrite: true);
-
-                            // Mirror into the RELEASED folder snapshot.
-                            string drwReleased = Path.Combine(RelFolder,
-                                fileName + ".slddrw");
-                            if (File.Exists(drwReleased))
+                            catch (Exception dex)
                             {
-                                SetReadOnly(drwReleased, false);
-                                File.Copy(drwArchiveFile, drwReleased, overwrite: true);
-                                SetReadOnly(drwReleased, true);
+                                drwMismatch.Add(Path.GetFileName(drwTarget) +
+                                    " (rollback failed: " + dex.Message + ")");
                             }
-
-                            SetReadOnly(drwTarget, true);
-                            DatabaseManager.LockFile(drwTarget, user);
-                            DatabaseManager.SetFileStatus(drwTarget, "Released",
-                                user, "Drawing rolled back to " + targetRev);
-
-                            // The drawing is rolled back to the target rev, so bring
-                            // EVERY config's PDF to the target rev too: archive the
-                            // current PDF, then restore the target-rev one. Looping
-                            // rbDrawingNos (each config's DrawingNo) — not the single
-                            // active-config drawingNo — restores a MULTI-config model's
-                            // per-config PDFs, which the scalar missed (review finding).
-                            // Done HERE (not Step 7) so a non-rolled-back drawing keeps
-                            // its current PDF.
-                            foreach (string dn in rbDrawingNos)
-                            {
-                                if (string.IsNullOrEmpty(dn)) continue;
-                                CleanupExportsOnRollback("", dn);   // archive current
-                                MoveMatching(Path.Combine(ObsFolder, "PDF"),
-                                    Path.Combine(ExportRoot, "PDF"),
-                                    dn + " REV " + targetLetter + ".pdf"); // restore target
-                            }
-
-                            drwSummary = Path.GetFileName(drwTarget) +
-                                " → " + targetRev;
                         }
-                        catch (Exception dex)
+                        else
                         {
-                            drwSummary = "drawing rollback FAILED: " + dex.Message +
-                                " — roll it back manually";
+                            // Drawing exists (guarded above) but has no archive at the
+                            // target rev — it stays at its current rev; warn.
+                            drwMismatch.Add(Path.GetFileName(drwTarget) +
+                                " (no REV " + targetLetter + " archive)");
                         }
                     }
-                    else if (File.Exists(drwTarget))
+
+                    drwSummary = drwRolledBack.Count > 0
+                        ? string.Join(", ", drwRolledBack) + " → " + targetRev
+                        : "none rolled back";
+                    if (drwMismatch.Count > 0)
                     {
-                        // A drawing exists but has NO archive at the target rev — it
-                        // would be left at a different rev than the model. Warn (never
-                        // a silent mismatch) so the Master fixes it manually.
-                        drwSummary = "WARNING: no archived drawing at " + targetRev +
-                            " — its revision will NOT match the model (fix manually)";
+                        drwSummary += "; NOT synced: " +
+                            string.Join(", ", drwMismatch);
                         MessageBox.Show(
-                            "The model was rolled back to " + targetRev +
-                            ", but no archived drawing exists at that revision:\n\n  " +
-                            Path.GetFileName(drwArchiveFile) + "\n\n" +
-                            "Its drawing (" + Path.GetFileName(drwTarget) + ") will " +
-                            "NOT match the model's revision. Open the drawing and set " +
-                            "its revision to " + targetRev + " manually to keep the " +
-                            "pair in sync.",
+                            "The model was rolled back to " + targetRev + ", but " +
+                            "these drawings could NOT be rolled back (reason shown " +
+                            "after each) and will NOT match the model's revision:" +
+                            "\n\n  • " +
+                            string.Join("\n  • ", drwMismatch) + "\n\n" +
+                            "Open each and set its revision to " + targetRev +
+                            " manually to keep the pair in sync.",
                             "BCore PDM — Drawing Revision Mismatch",
                             MessageBoxButtons.OK, MessageBoxIcon.Warning);
-                    }
-                    else
-                    {
-                        drwSummary = "n/a (no drawing for this model)";
                     }
                 }
 
@@ -3848,6 +3924,49 @@ namespace PDMLite
 
             // Fallback to the drawing's own PartNo property (inherited).
             try { return PropertyValidator.GetProperty(drawingDoc, "PartNo"); }
+            catch { return ""; }
+        }
+
+        // A drawing's revision is DRIVEN BY THE MODEL (the part is the master), so
+        // read it from the model's config the drawing documents — NOT the drawing's
+        // own "Revision" property, which a ROLLBACK leaves stale (the archive restore
+        // doesn't rewrite it). Mirrors GetDrawingPartNo. When the model isn't open
+        // (only the drawing is), falls back to the model's record revision (per-config
+        // when known — the model's rollback synced it), then the drawing's own prop.
+        public static string GetDrawingRevision(ModelDoc2 drawingDoc)
+        {
+            try
+            {
+                string referencedPath = GetDrawingReferencedModel(drawingDoc);
+                if (!string.IsNullOrEmpty(referencedPath))
+                {
+                    string drwCfg = GetDrawingPrimaryConfig(drawingDoc);
+                    ModelDoc2 refModel = PDMLiteAddin.SwApp
+                        .GetOpenDocumentByName(referencedPath) as ModelDoc2;
+                    if (refModel != null)
+                    {
+                        string rev = !string.IsNullOrEmpty(drwCfg)
+                            ? PropertyValidator.GetProperty(refModel, "Revision", drwCfg)
+                            : PropertyValidator.GetProperty(refModel, "Revision");
+                        if (!string.IsNullOrEmpty(rev)) return rev;
+                    }
+                    var rec = DatabaseManager.GetFileRecord(referencedPath);
+                    if (rec != null)
+                    {
+                        if (!string.IsNullOrEmpty(drwCfg) && rec.Configurations != null)
+                        {
+                            var ce = rec.Configurations.FirstOrDefault(c =>
+                                string.Equals(c.Name, drwCfg,
+                                    StringComparison.OrdinalIgnoreCase));
+                            if (ce != null && !string.IsNullOrEmpty(ce.Revision))
+                                return ce.Revision;
+                        }
+                        if (!string.IsNullOrEmpty(rec.Revision)) return rec.Revision;
+                    }
+                }
+            }
+            catch { }
+            try { return PropertyValidator.GetProperty(drawingDoc, "Revision"); }
             catch { return ""; }
         }
 
