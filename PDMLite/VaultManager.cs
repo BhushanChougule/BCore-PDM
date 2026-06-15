@@ -4362,11 +4362,14 @@ namespace PDMLite
         private static bool BeginVaultOperation(string filePath, string user,
             string operation)
         {
-            DatabaseManager.ActiveOperation holder;
+            // ActiveOperation is a top-level type (like VaultFile/LockInfo),
+            // NOT nested in DatabaseManager. System.Environment is qualified
+            // because SolidWorks.Interop.sldworks also defines an Environment.
+            ActiveOperation holder;
             try
             {
                 if (DatabaseManager.TryBeginOperation(filePath, user,
-                        Environment.MachineName, operation, out holder))
+                        System.Environment.MachineName, operation, out holder))
                     return true;
             }
             catch
@@ -4394,7 +4397,7 @@ namespace PDMLite
             try
             {
                 DatabaseManager.EndOperation(filePath, user,
-                    Environment.MachineName);
+                    System.Environment.MachineName);
             }
             catch { } // stale claim self-expires; never fail the operation here
         }
