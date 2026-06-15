@@ -33,6 +33,9 @@ NTFS permissions on **roles.config only**:
 | Masters (bchougule, rkramarz) / IT | Read + Write |
 
 Notes:
+- The `<Role>` value is case-INSENSITIVE — `Master`, `master` and `MASTER`
+  all work (the add-in canonicalises it). `bchougule` style usernames are
+  matched case-insensitively too.
 - The add-in caches role lookups for 5 minutes per machine, so a role
   change lands within 5 minutes (or after a SOLIDWORKS restart).
 - A corrupt/empty roles.config falls back to vault.xml (so a bad edit can

@@ -1326,6 +1326,22 @@ namespace PDMLite
         private static Dictionary<string, string> _roleCache;
         private static DateTime _roleCacheAt;
 
+        // Normalise a stored role to canonical case. The role gates around the
+        // app compare case-SENSITIVELY (GetUserRole(...) == "Master" in
+        // VaultManager/TaskPaneControl/SwAddin), but roles.config is hand-edited
+        // by IT in Notepad — a "master"/"MASTER" typo would otherwise silently
+        // demote that user everywhere the gates run while GetMasterUsernames
+        // (OrdinalIgnoreCase) still emailed them. Canonicalising at the single
+        // map-build chokepoint fixes every gate at once. An unrecognised role is
+        // returned verbatim (every gate treats non-"Master" as Engineer anyway).
+        private static string CanonicalRole(string role)
+        {
+            string r = (role ?? "").Trim();
+            if (r.Equals("Master", StringComparison.OrdinalIgnoreCase)) return "Master";
+            if (r.Equals("Engineer", StringComparison.OrdinalIgnoreCase)) return "Engineer";
+            return r;
+        }
+
         private static Dictionary<string, string> GetRoleMap()
         {
             lock (_roleCacheLock)
@@ -1348,7 +1364,7 @@ namespace PDMLite
                         {
                             string u = ((string)el.Element("Username") ?? "").Trim();
                             string r = ((string)el.Element("Role") ?? "").Trim();
-                            if (u.Length > 0 && r.Length > 0) map[u] = r;
+                            if (u.Length > 0 && r.Length > 0) map[u] = CanonicalRole(r);
                         }
                         // An EMPTY but present file is treated as unreadable
                         // (falls back) rather than demoting everyone at once.
@@ -1376,7 +1392,7 @@ namespace PDMLite
                         {
                             string u = ((string)el.Element("Username") ?? "").Trim();
                             string r = (string)el.Element("Role") ?? "Engineer";
-                            if (u.Length > 0) map[u] = r;
+                            if (u.Length > 0) map[u] = CanonicalRole(r);
                         }
                     }
                 }
