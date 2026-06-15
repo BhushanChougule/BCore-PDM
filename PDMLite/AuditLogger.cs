@@ -86,27 +86,50 @@ namespace PDMLite
         // the in-process _lock.
         private static void FlushSpill()
         {
+            bool cleared = false;
             try
             {
                 if (!File.Exists(SpillFile)) return;
                 using (var fs = OpenSpillExclusive(FileMode.Open))
                 {
                     if (fs == null) return; // briefly held by another process — next Log
-                    if (fs.Length == 0) return;
-                    var buf = new byte[fs.Length];
-                    int read = 0;
-                    while (read < buf.Length)
+                    if (fs.Length == 0) { cleared = true; } // already empty — tidy up below
+                    else
                     {
-                        int n = fs.Read(buf, read, buf.Length - read);
-                        if (n <= 0) break;
-                        read += n;
+                        var buf = new byte[fs.Length];
+                        int read = 0;
+                        while (read < buf.Length)
+                        {
+                            int n = fs.Read(buf, read, buf.Length - read);
+                            if (n <= 0) break;
+                            read += n;
+                        }
+                        string pending = Encoding.UTF8.GetString(buf, 0, read);
+                        if (pending.Length == 0 || AppendWithRetry(pending))
+                        {
+                            fs.SetLength(0); // landed — clear under the still-held handle
+                            cleared = true;
+                        }
                     }
-                    string pending = Encoding.UTF8.GetString(buf, 0, read);
-                    if (pending.Length == 0 || AppendWithRetry(pending))
-                        fs.SetLength(0); // landed (or empty) — clear, handle still held
                 }
             }
-            catch { } // spill stays; retried on the next Log call
+            catch { return; } // spill stays; retried on the next Log call
+
+            // Tidy: remove the now-empty spill so it doesn't linger forever as a
+            // 0-byte file. Best-effort + a length RE-CHECK so a line a second
+            // same-machine process spilled between our truncate and here is
+            // never deleted — if the file is non-empty again we leave it for the
+            // next flush (its content is already safely in audit.csv either way).
+            if (cleared)
+            {
+                try
+                {
+                    if (File.Exists(SpillFile) &&
+                        new FileInfo(SpillFile).Length == 0)
+                        File.Delete(SpillFile);
+                }
+                catch { }
+            }
         }
 
         // Save one line locally because audit.csv could not be written. Appends
