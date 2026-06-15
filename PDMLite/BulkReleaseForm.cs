@@ -451,7 +451,7 @@ namespace PDMLite
                     meta = "Modified by " + f.ModifiedBy;
                 if (f.ModifiedDate != default(DateTime))
                     meta += (meta.Length > 0 ? " · " : "Modified ") +
-                            f.ModifiedDate.ToString("dd/MM/yyyy");
+                            f.ModifiedDate.ToString("MM/dd/yyyy", System.Globalization.CultureInfo.InvariantCulture);
                 if (meta.Length > 0)
                     card.Controls.Add(new Label
                     {

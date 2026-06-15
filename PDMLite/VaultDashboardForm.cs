@@ -84,9 +84,11 @@ namespace PDMLite
         // Row right-click menu (Open / Open linked / Copy path / Open folder).
         private ContextMenuStrip _rowMenu;
         private ToolStripMenuItem _miOpen, _miOpenLinked, _miCopyPath, _miOpenFolder;
-        private int _menuViewIndex = -1;  // ABSOLUTE _view index the menu was opened
-                                          // on (not grid-relative): a page change
-                                          // while the menu is up can't retarget it
+        private VaultFile _menuRow;       // the ROW OBJECT the menu was opened on —
+                                          // not an index: the search debounce can
+                                          // rebuild _view while the menu is up, and
+                                          // a stale index then opened a DIFFERENT
+                                          // file than the one right-clicked
         private string _menuLinkedPath;   // drawing for a model row, model for a drawing row
         private string _menuLinkedConfig; // config to land on when opening a drawing's model
 
@@ -714,12 +716,27 @@ namespace PDMLite
         private void BuildPager()
         {
             if (_bottomPanel == null || _pagerFont == null) return;
-            foreach (var c in _pagerControls)
+            // DEFER the old buttons' disposal: BuildPager is reached from a
+            // pager button's OWN Click handler (GoToPage → ShowGridPage →
+            // BuildPager), and disposing a control while its Click event is
+            // still on the stack is a latent intermittent
+            // ObjectDisposedException inside WinForms' button-up handling.
+            // Remove them from the panel now; dispose them when the message
+            // loop comes back around. (Before the handle exists — the ctor's
+            // initial build — no click can be on the stack: dispose inline.)
+            if (_pagerControls.Count > 0)
             {
-                _bottomPanel.Controls.Remove(c);
-                c.Dispose();
+                var old = new List<Control>(_pagerControls);
+                _pagerControls.Clear();
+                foreach (var c in old) _bottomPanel.Controls.Remove(c);
+                Action disposeOld = () =>
+                {
+                    foreach (var c in old)
+                        try { c.Dispose(); } catch { }
+                };
+                if (IsHandleCreated) BeginInvoke(disposeOld);
+                else disposeOld();
             }
-            _pagerControls.Clear();
 
             int total = PageCount;
             int current = _page + 1; // 1-based for display
@@ -1298,7 +1315,7 @@ namespace PDMLite
             int idx = PageStart + hit.RowIndex;
             if (idx < 0 || idx >= _view.Count) return;
 
-            _menuViewIndex = idx; // store the ABSOLUTE _view index, not grid-relative
+            _menuRow = _view[idx]; // capture the OBJECT — see field comment
             // Select the row under the cursor for visual feedback (FullRowSelect).
             _grid.CurrentCell = _grid[Math.Max(0, hit.ColumnIndex), hit.RowIndex];
 
@@ -1383,12 +1400,12 @@ namespace PDMLite
             string.Equals(Path.GetFileNameWithoutExtension(fileName ?? ""),
                 baseName, StringComparison.OrdinalIgnoreCase);
 
-        // The VaultFile the menu was opened on (null if the view changed under it).
+        // The VaultFile the menu was opened on. The object itself is captured at
+        // right-click time, so a filter/search/page change while the menu is up
+        // can never retarget the action onto a different row.
         private VaultFile MenuRow()
         {
-            int idx = _menuViewIndex; // absolute index captured at right-click time
-            if (idx < 0 || idx >= _view.Count) return null;
-            return _view[idx];
+            return _menuRow;
         }
 
         // Defer the open to the caller (OpenByPath runs after this modal closes).

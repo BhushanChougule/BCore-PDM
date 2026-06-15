@@ -217,10 +217,14 @@ namespace PDMLite
             };
             this.Controls.Add(searchCard);
 
+            // Full width — search is BUTTON-LESS by design: auto-search fires
+            // on ≥2 chars via the 600ms timer and clearing the box stops it
+            // (both handled in TextChanged below), so there is no Clear/Search
+            // button. S(2) margins each side inside searchCard.
             _searchBox = new TextBox
             {
                 Font = fLabel,
-                Width = w - S(2) - S(53),
+                Width = w - S(4),
                 Height = S(22),
                 Location = new Point(S(2), S(2)),
                 BorderStyle = BorderStyle.None,
@@ -241,42 +245,8 @@ namespace PDMLite
             };
             searchCard.Controls.Add(_searchBox);
 
-            Button btnClear = new Button
-            {
-                Text = "✖",
-                Font = new Font("Segoe UI", 3.5f * _scale, FontStyle.Bold),
-                Width = S(22),
-                Height = S(24),
-                Location = new Point(x + w - S(52), y),
-                BackColor = cRed,
-                ForeColor = Color.White,
-                FlatStyle = FlatStyle.Flat,
-                Cursor = Cursors.Hand
-            };
-            btnClear.FlatAppearance.BorderSize = 0;
-            btnClear.Click += (s, e) =>
-            {
-                _searchBox.Text = "";
-                ClearAndDispose(_resultsPanel);
-                _resultsPanel.Height = 0;
-            };
-            this.Controls.Add(btnClear);
-
-            Button btnSearch = new Button
-            {
-                Text = "Search",
-                Font = new Font("Segoe UI", 3.5f * _scale, FontStyle.Bold),
-                Width = S(48),
-                Height = S(24),
-                Location = new Point(x + w - S(48), y),
-                BackColor = cBrand,
-                ForeColor = Color.White,
-                FlatStyle = FlatStyle.Flat,
-                Cursor = Cursors.Hand
-            };
-            btnSearch.FlatAppearance.BorderSize = 0;
-            btnSearch.Click += (s, e) => RunSearch();
-            this.Controls.Add(btnSearch);
+            // No Clear/Search buttons by design (auto-search + clear-on-empty,
+            // see the search-box note above). Advance past the search row.
             y += S(28);
 
             this.Controls.Add(new Label
@@ -1262,7 +1232,10 @@ namespace PDMLite
             {
                 string dateStr = "—";
                 if (DateTime.TryParse(entry.ChangedDate, out DateTime dt))
-                    dateStr = dt.ToString("dd/MM/yy HH:mm");
+                    // MM/dd like everywhere else — the panel rendered dd/MM,
+                    // contradicting the project-wide MM/dd/yyyy convention.
+                    dateStr = dt.ToString("MM/dd/yy HH:mm",
+                        System.Globalization.CultureInfo.InvariantCulture);
 
                 _historyPanel.Controls.Add(new Label
                 {

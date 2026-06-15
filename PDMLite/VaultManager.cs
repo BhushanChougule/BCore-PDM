@@ -3657,7 +3657,7 @@ namespace PDMLite
             {
                 sb.AppendLine($"● [{req.RequestType}]  {req.FileName}");
                 if (DateTime.TryParse(req.RequestDate, out DateTime dt))
-                    sb.AppendLine($"  Submitted: {dt:dd/MM/yy HH:mm}");
+                    sb.AppendLine("  Submitted: " + dt.ToString("MM/dd/yy HH:mm", System.Globalization.CultureInfo.InvariantCulture));
                 sb.AppendLine($"  Status: {req.Status}");
                 if (!string.IsNullOrEmpty(req.Note))
                     sb.AppendLine($"  Note: {req.Note}");
