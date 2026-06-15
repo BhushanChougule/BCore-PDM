@@ -941,23 +941,32 @@ namespace PDMLite
                         if (choice == (int)swMessageBoxResult_e.swMbHitNo) return 1;
                     }
 
-                    // Rule 5: broken references
-                    var broken = ReferenceChecker.GetBrokenReferences(doc);
-                    if (broken.Count > 0)
-                    {
-                        int choice = SwApp.SendMsgToUser2(
-                            "BROKEN REFERENCES:\n\n• " +
-                            string.Join("\n• ", broken) + "\n\n" +
-                            "Cannot release with broken refs.\nSave as WIP anyway?",
-                            (int)swMessageBoxIcon_e.swMbWarning,
-                            (int)swMessageBoxBtn_e.swMbYesNo);
-                        if (choice == (int)swMessageBoxResult_e.swMbHitNo) return 1;
-                        DatabaseManager.SetBrokenRefFlag(filePath, true);
-                    }
-                    else
-                    {
-                        DatabaseManager.SetBrokenRefFlag(filePath, false);
-                    }
+                    // Rule 5 moved OUT of this block — it must run for
+                    // drawings too (see below).
+                }
+
+                // Rule 5: broken references — runs for ALL doc types (parts,
+                // assemblies AND drawings). A DRAWING whose referenced model is
+                // missing — or a part with a missing external/derived parent —
+                // must be flagged too. ReferenceChecker handles every type, but
+                // this gate previously sat INSIDE the isPart||isAsm block, so a
+                // drawing's broken model was never caught at save and its
+                // dashboard flag stayed clear (found in PR-J testing).
+                var broken = ReferenceChecker.GetBrokenReferences(doc);
+                if (broken.Count > 0)
+                {
+                    int brokenChoice = SwApp.SendMsgToUser2(
+                        "BROKEN REFERENCES:\n\n• " +
+                        string.Join("\n• ", broken) + "\n\n" +
+                        "Cannot release with broken refs.\nSave as WIP anyway?",
+                        (int)swMessageBoxIcon_e.swMbWarning,
+                        (int)swMessageBoxBtn_e.swMbYesNo);
+                    if (brokenChoice == (int)swMessageBoxResult_e.swMbHitNo) return 1;
+                    DatabaseManager.SetBrokenRefFlag(filePath, true);
+                }
+                else
+                {
+                    DatabaseManager.SetBrokenRefFlag(filePath, false);
                 }
 
                 return 0;

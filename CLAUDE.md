@@ -884,7 +884,7 @@ GetNextRevision() in VaultManager.cs handles this
 
 \- Auto PartWeight, auto-capitalize (CharacterCasing.Upper)
 
-\- Broken reference detection (ALL doc types — audit M4): ReferenceChecker.GetBrokenReferences checks an assembly's components (live walk), a PART's external/derived references AND a DRAWING's referenced model (via GetDocumentDependencies2 on the path), every referenced file DEDUPED before File.Exists (audit M3 — a thousand-instance assembly fired thousands of redundant network stat calls per save). Previously assembly-only: parts and drawings always passed Rule 5 and even got their broken-ref flag CLEARED
+\- Broken reference detection (ALL doc types — audit M4): ReferenceChecker.GetBrokenReferences checks an assembly's components (live walk), a PART's external/derived references AND a DRAWING's referenced model (via GetDocumentDependencies2 on the path), every referenced file DEDUPED before File.Exists (audit M3 — a thousand-instance assembly fired thousands of redundant network stat calls per save). Previously assembly-only: parts and drawings always passed Rule 5 and even got their broken-ref flag CLEARED. The SAVE-GATE caller matches: ValidateSave Rule 5 (GetBrokenReferences + SetBrokenRefFlag) runs for ALL doc types — it was moved OUT of the isPart||isAsm validation block (which correctly skips drawings for the property rules 3/3.5/3.6/4), because while sitting inside it a DRAWING's broken model was detected by ReferenceChecker but never reached the save gate, so the flag stayed clear and the dashboard never showed it red (found in PR-J testing)
 
 \- File locking + OS read-only protection
 
