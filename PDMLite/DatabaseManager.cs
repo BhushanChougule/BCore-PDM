@@ -1301,21 +1301,127 @@ namespace PDMLite
         }
 
         // ════════════════════════════════════════════════════════════════
-        // Users
+        // Users / roles
         // ════════════════════════════════════════════════════════════════
+        // Roles come from TWO sources, in priority order (audit H13):
+        //  1. N:\PDM-SolidWorks\VAULT\roles.config — OPTIONAL override file:
+        //       <Roles>
+        //         <User><Username>bchougule</Username><Role>Master</Role></User>
+        //       </Roles>
+        //     "Master only" is otherwise pure client-side data in vault.xml,
+        //     which every engineer can edit in Notepad (self-promotion to
+        //     Master). IT can set NTFS ACLs on roles.config (read-only for
+        //     engineers, writable by the Masters/IT), turning the role list
+        //     into OS-ENFORCED protection. When present and readable it is
+        //     AUTHORITATIVE — vault.xml's <Users> is ignored entirely.
+        //  2. vault.xml <Users> — the original behaviour (fallback, and the
+        //     default until IT creates roles.config). See SECURITY.md.
+        // Lookups are CACHED for 5 minutes per process: IsMaster runs on
+        // every Master button press and each call was a full vault.xml load
+        // over SMB. AddUser invalidates the cache; a role change made on
+        // another machine lands within the cache window.
+        private const string RolesFile = @"N:\PDM-SolidWorks\VAULT\roles.config";
+        private const int RoleCacheSeconds = 300;
+        private static readonly object _roleCacheLock = new object();
+        private static Dictionary<string, string> _roleCache;
+        private static DateTime _roleCacheAt;
+
+        // Normalise a stored role to canonical case. The role gates around the
+        // app compare case-SENSITIVELY (GetUserRole(...) == "Master" in
+        // VaultManager/TaskPaneControl/SwAddin), but roles.config is hand-edited
+        // by IT in Notepad — a "master"/"MASTER" typo would otherwise silently
+        // demote that user everywhere the gates run while GetMasterUsernames
+        // (OrdinalIgnoreCase) still emailed them. Canonicalising at the single
+        // map-build chokepoint fixes every gate at once. An unrecognised role is
+        // returned verbatim (every gate treats non-"Master" as Engineer anyway).
+        private static string CanonicalRole(string role)
+        {
+            string r = (role ?? "").Trim();
+            if (r.Equals("Master", StringComparison.OrdinalIgnoreCase)) return "Master";
+            if (r.Equals("Engineer", StringComparison.OrdinalIgnoreCase)) return "Engineer";
+            return r;
+        }
+
+        private static Dictionary<string, string> GetRoleMap()
+        {
+            lock (_roleCacheLock)
+            {
+                if (_roleCache != null &&
+                    (DateTime.Now - _roleCacheAt).TotalSeconds < RoleCacheSeconds)
+                    return _roleCache;
+
+                var map = new Dictionary<string, string>(
+                    StringComparer.OrdinalIgnoreCase);
+
+                // 1) roles.config — authoritative when present and readable.
+                bool fromFile = false;
+                try
+                {
+                    if (File.Exists(RolesFile))
+                    {
+                        var rolesDoc = XDocument.Load(RolesFile);
+                        foreach (var el in rolesDoc.Root.Elements("User"))
+                        {
+                            string u = ((string)el.Element("Username") ?? "").Trim();
+                            string r = ((string)el.Element("Role") ?? "").Trim();
+                            if (u.Length > 0 && r.Length > 0) map[u] = CanonicalRole(r);
+                        }
+                        // An EMPTY but present file is treated as unreadable
+                        // (falls back) rather than demoting everyone at once.
+                        fromFile = map.Count > 0;
+                    }
+                }
+                catch
+                {
+                    // Corrupt roles.config → fall back to vault.xml below so a
+                    // bad edit can't lock both Masters out; the throttled
+                    // health log makes the problem visible.
+                    map.Clear();
+                    LogDbEvent("RolesFileUnreadable",
+                        "roles.config exists but could not be parsed — " +
+                        "falling back to vault.xml <Users>");
+                }
+
+                // 2) vault.xml <Users> fallback.
+                if (!fromFile)
+                {
+                    lock (_lock) using (AcquireProcessLock())
+                    {
+                        var doc = LoadOrCreate();
+                        foreach (var el in doc.Root.Element("Users").Elements("User"))
+                        {
+                            string u = ((string)el.Element("Username") ?? "").Trim();
+                            string r = (string)el.Element("Role") ?? "Engineer";
+                            if (u.Length > 0) map[u] = CanonicalRole(r);
+                        }
+                    }
+                }
+
+                _roleCache = map;
+                _roleCacheAt = DateTime.Now;
+                return map;
+            }
+        }
+
         public static string GetUserRole(string username)
         {
-            lock (_lock) using (AcquireProcessLock())
-            {
-                var doc = LoadOrCreate();
-                foreach (var el in doc.Root.Element("Users").Elements("User"))
-                {
-                    if (string.Equals((string)el.Element("Username"),
-                        username, StringComparison.OrdinalIgnoreCase))
-                        return (string)el.Element("Role") ?? "Engineer";
-                }
-                return "Engineer";
-            }
+            string role;
+            return GetRoleMap().TryGetValue((username ?? "").Trim(), out role)
+                ? role : "Engineer";
+        }
+
+        // Every username whose role is Master — used by EmailManager so
+        // request notifications reach the LIVE Master list instead of a
+        // hardcoded pair. Empty when the role source is unreachable (the
+        // caller falls back).
+        public static List<string> GetMasterUsernames()
+        {
+            var masters = new List<string>();
+            foreach (var kv in GetRoleMap())
+                if (string.Equals(kv.Value, "Master",
+                        StringComparison.OrdinalIgnoreCase))
+                    masters.Add(kv.Key);
+            return masters;
         }
 
         public static void AddUser(string username, string role)
@@ -1325,23 +1431,34 @@ namespace PDMLite
                 var doc = LoadOrCreate();
                 var users = doc.Root.Element("Users");
 
+                bool updated = false;
                 foreach (var el in users.Elements("User"))
                 {
                     if (string.Equals((string)el.Element("Username"),
                         username, StringComparison.OrdinalIgnoreCase))
                     {
-                        el.Element("Role").Value = role;
-                        Save(doc);
-                        return;
+                        SetOrAdd(el, "Role", role); // legacy-safe (no NRE)
+                        updated = true;
+                        break;
                     }
                 }
 
-                users.Add(new XElement("User",
-                    new XElement("Username", username),
-                    new XElement("Role", role)
-                ));
+                if (!updated)
+                    users.Add(new XElement("User",
+                        new XElement("Username", username),
+                        new XElement("Role", role)
+                    ));
                 Save(doc);
             }
+            // OUTSIDE the DB lock: GetRoleMap locks _roleCacheLock → _lock, so
+            // taking _roleCacheLock while holding _lock would invert the
+            // ordering and risk a deadlock.
+            InvalidateRoleCache();
+        }
+
+        private static void InvalidateRoleCache()
+        {
+            lock (_roleCacheLock) { _roleCache = null; }
         }
         // ════════════════════════════════════════════════════════════════════
         // Search Files

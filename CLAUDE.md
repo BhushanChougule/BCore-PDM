@@ -228,7 +228,7 @@ Methods:
 
 \- Initialize() → creates WIP division subfolders + SCRAP folder on first addin load; also sweeps stranded per-process save temps (vault.xml.*.tmp older than a day — a crash mid-save orphans them and nothing else ever deletes them)
 
-\- GetUserRole, AddUser
+\- GetUserRole, AddUser, GetMasterUsernames. ROLE SOURCE (audit H13): roles come from N:\\PDM-SolidWorks\\VAULT\\roles.config when it exists and parses (AUTHORITATIVE — IT can ACL it read-only for engineers, making "Master" OS-enforced instead of Notepad-editable vault.xml data; format <Roles><User><Username>..</Username><Role>Master</Role></User></Roles>), else vault.xml <Users> (the original behaviour and the default until IT creates the file). A corrupt/empty roles.config FALLS BACK to vault.xml (a bad edit can't lock the Masters out) and logs a throttled "RolesFileUnreadable" health event. The stored role is CANONICALISED to "Master"/"Engineer" at the single GetRoleMap chokepoint (CanonicalRole) so the case-SENSITIVE gates (GetUserRole(..)=="Master" in VaultManager/TaskPaneControl/SwAddin) honour any case IT types in the hand-edited roles.config — a "master"/"MASTER" typo no longer silently demotes that user while GetMasterUsernames still emailed them. Role lookups are CACHED 5 min per process (IsMaster runs on every Master click and each call was a whole vault.xml SMB load); AddUser invalidates the cache OUTSIDE the DB lock (GetRoleMap locks \_roleCacheLock→\_lock, so the reverse order would deadlock). Setup guidance in SECURITY.md
 
 \- SearchFiles(term) / SearchFiles(term, out truncated) → searches PartNumber + Description + FileName (all statuses); returns canonical WIP path; dedupes by filename; capped at MaxSearchResults=50 (truncated=true when more matched, so UI can prompt to refine — prevents rendering thousands of cards at 50k scale); AUTO-PURGES orphaned records whose file is missing on disk, but ONLY when the WIP root is reachable (network-down guard so a transient outage never deletes records), the file's PARENT FOLDER is provably reachable (File.Exists returns false on ACCESS errors too — a broken ACL on one division must not purge that division's records), AND the cross-machine lock was actually acquired (a degraded-mode search is a READ and must never write a stale snapshot back); auto-purges are audit-logged as "AutoPurgeOrphan"
 
@@ -554,6 +554,10 @@ DPI-aware Form (S(v)=v\*\_scale, fonts=pt\*\_scale), ALL users (read-only). NOT 
 
 Sends email notifications via SMTP (company uses Mailgun: smtp.mailgun.org:587, sender bcorepdm@mg.richardswilcox.com). Non-fatal — all sends wrapped in try/catch; failure never blocks workflow.
 
+\- ASYNC (audit M1): the notification sends run on a ThreadPool background thread — SmtpClient.Send blocks up to 10s per recipient and every Notify\* call happens inside a Click handler on SOLIDWORKS' UI thread, so a request submission froze SOLIDWORKS up to ~20s when Mailgun was unreachable. SendTestEmail stays synchronous (a diagnostic the user is actively waiting on).
+
+\- SMTP HOST PIN (audit H6): TrySend/SendTestEmail refuse any SmtpServer that is not \*.mailgun.org — email.config sits on a share every engineer can write, and a tampered <SmtpServer> would hand the SMTP password to an attacker's server on the next send. Pinned in CODE (a config-side allowlist would be editable by the same attacker); moving providers is a deliberate code change. SendTestEmail explains the pin when it blocks. EnableSsl always on. Full credential guidance (send-only Mailgun login, ACLs, rotation) in SECURITY.md.
+
 Config file: N:\\PDM-SolidWorks\\VAULT\\email.config (XML, created on first addin load if missing)
 
 \- Enabled = true/false toggle
@@ -566,7 +570,7 @@ Methods:
 
 \- EnsureConfigTemplate() → creates template email.config if not present (called in ConnectToSW)
 
-\- NotifyRequestSubmitted(type, fileName, partNo, rev, requester, note) → emails both Masters
+\- NotifyRequestSubmitted(type, fileName, partNo, rev, requester, note) → emails every Master from the LIVE role list (DatabaseManager.GetMasterUsernames — a Master added via roles.config/vault.xml gets request emails with no code change); the original bchougule+rkramarz pair remains only as a last-resort fallback when the role source is unreadable
 
 \- NotifyRequestApproved(type, fileName, requestedBy) → emails the engineer
 
@@ -921,6 +925,8 @@ GetNextRevision() in VaultManager.cs handles this
 \- File history rendered as individual labels (no text overlap), with StatusColor per entry
 
 \- Email notifications (Mailgun SMTP) on request submit/approve/reject — config at N:\\PDM-SolidWorks\\VAULT\\email.config; "Send Test Email" button sends to the logged-in user to verify the pipeline
+
+\- Notifications & roles hardening (audit H6/H13/M1): notification emails send on a background thread (a dead Mailgun no longer freezes SOLIDWORKS ~20s per request); the SMTP host is pinned in code to \*.mailgun.org so a tampered email.config can't harvest the password; request emails go to the live Master list (GetMasterUsernames) instead of a hardcoded pair; optional VAULT\\roles.config becomes the authoritative, ACL-protectable role source (vault.xml <Users> stays the fallback); role lookups cached 5 min. SECURITY.md (repo root) documents the NTFS ACL layout (RELEASED/ARCHIVE/EXPORTS/SCRAP/ADDIN read-only for engineers), the roles.config setup, and the email-credential containment steps — apply with the engineer-PC rollout
 
 \- Duplicate part-number detection on save (warns with Yes/No override when another file already uses the same PartNo) — format validation deemed unfeasible due to 3 divisions with inconsistent numbering
 
