@@ -1125,7 +1125,6 @@ namespace PDMLite
             var lockInfo = info.Lock;
 
             string partNo = PropertyValidator.GetProperty(doc, "PartNo");
-            string rev = PropertyValidator.GetProperty(doc, "Revision");
 
             bool isMaster = DatabaseManager.GetUserRole(
                 PDMLiteAddin.CurrentUser) == "Master";
