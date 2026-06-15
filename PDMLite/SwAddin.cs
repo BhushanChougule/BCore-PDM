@@ -177,7 +177,7 @@ namespace PDMLite
                     SwApp.SendMsgToUser2(
                         "🔒  FILE LOCKED — BCore PDM\n\n" +
                         "Locked by : " + lockInfo.LockedBy + "\n" +
-                        "Locked on : " + lockInfo.LockedDate.ToString("dd/MM/yyyy HH:mm") + "\n\n" +
+                        "Locked on : " + lockInfo.LockedDate.ToString("MM/dd/yyyy HH:mm", System.Globalization.CultureInfo.InvariantCulture) + "\n\n" +
                         "You can view and reference this file\nbut cannot save any changes.",
                         (int)swMessageBoxIcon_e.swMbInformation,
                         (int)swMessageBoxBtn_e.swMbOk);
@@ -225,7 +225,7 @@ namespace PDMLite
                 {
                     string who = string.Join("\n", others.ConvertAll(o =>
                         "  • " + o.User + "   (since " +
-                        o.OpenedDate.ToString("dd/MM/yyyy HH:mm") + ")"));
+                        o.OpenedDate.ToString("MM/dd/yyyy HH:mm", System.Globalization.CultureInfo.InvariantCulture) + ")"));
                     SwApp.SendMsgToUser2(
                         "⚠  FILE ALREADY OPEN — BCore PDM\n\n" +
                         "This file is currently open by:\n" + who + "\n\n" +
