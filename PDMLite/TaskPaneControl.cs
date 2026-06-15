@@ -217,12 +217,14 @@ namespace PDMLite
             };
             this.Controls.Add(searchCard);
 
-            // Width leaves room for the Clear (S22) + Search (S48) buttons and
-            // the S(3) gap between them — see the button layout note below.
+            // Full width — search is BUTTON-LESS by design: auto-search fires
+            // on ≥2 chars via the 600ms timer and clearing the box stops it
+            // (both handled in TextChanged below), so there is no Clear/Search
+            // button. S(2) margins each side inside searchCard.
             _searchBox = new TextBox
             {
                 Font = fLabel,
-                Width = w - S(2) - S(78),
+                Width = w - S(4),
                 Height = S(22),
                 Location = new Point(S(2), S(2)),
                 BorderStyle = BorderStyle.None,
@@ -243,55 +245,8 @@ namespace PDMLite
             };
             searchCard.Controls.Add(_searchBox);
 
-            // Clear ends at x+w-S(51); Search starts at x+w-S(48) — a real
-            // S(3) gap. The old positions overlapped by S(18) (Clear spanned
-            // up to x+w-S(30) UNDER Search's left 40%), and Clear, added
-            // first, was on top — so clicks on the left part of "Search"
-            // silently cleared the box instead (audit M12).
-            Button btnClear = new Button
-            {
-                Text = "✖",
-                Font = new Font("Segoe UI", 3.5f * _scale, FontStyle.Bold),
-                Width = S(22),
-                Height = S(24),
-                Location = new Point(x + w - S(73), y),
-                BackColor = cRed,
-                ForeColor = Color.White,
-                FlatStyle = FlatStyle.Flat,
-                Cursor = Cursors.Hand
-            };
-            btnClear.FlatAppearance.BorderSize = 0;
-            btnClear.Click += (s, e) =>
-            {
-                _searchBox.Text = "";
-                ClearAndDispose(_resultsPanel);
-                _resultsPanel.Height = 0;
-            };
-            this.Controls.Add(btnClear);
-
-            Button btnSearch = new Button
-            {
-                Text = "Search",
-                Font = new Font("Segoe UI", 3.5f * _scale, FontStyle.Bold),
-                Width = S(48),
-                Height = S(24),
-                Location = new Point(x + w - S(48), y),
-                BackColor = cBrand,
-                ForeColor = Color.White,
-                FlatStyle = FlatStyle.Flat,
-                Cursor = Cursors.Hand
-            };
-            btnSearch.FlatAppearance.BorderSize = 0;
-            btnSearch.Click += (s, e) => RunSearch();
-            this.Controls.Add(btnSearch);
-
-            // Both buttons are siblings of the OPAQUE full-width searchCard and
-            // were being painted BEHIND it — completely invisible (found in
-            // PR-H testing: the pane showed only the box, no ✖ / Search). Lift
-            // them to the front of the z-order so they show at the right end of
-            // the search box. (The M12 spacing fix above is only visible now.)
-            btnClear.BringToFront();
-            btnSearch.BringToFront();
+            // No Clear/Search buttons by design (auto-search + clear-on-empty,
+            // see the search-box note above). Advance past the search row.
             y += S(28);
 
             this.Controls.Add(new Label
