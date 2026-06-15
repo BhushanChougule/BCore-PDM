@@ -2297,8 +2297,11 @@ namespace PDMLite
                 {
                     if (!string.Equals((string)el.Element("FilePath"), oldPath,
                             StringComparison.OrdinalIgnoreCase)) continue;
-                    el.Element("FilePath").Value = newPath;
-                    el.Element("FileName").Value = newName;
+                    // SetOrAdd, not .Element(x).Value: a legacy record with a
+                    // FilePath but no FileName element would NRE here (audit
+                    // M11 — same class fixed across the file).
+                    SetOrAdd(el, "FilePath", newPath);
+                    SetOrAdd(el, "FileName", newName);
                     changed = true;
                 }
                 foreach (var en in doc.Root.Element("RevisionHistory")
@@ -2311,7 +2314,7 @@ namespace PDMLite
                          string.Equals(System.IO.Path.GetFileName(ep), oldName,
                             StringComparison.OrdinalIgnoreCase)))
                     {
-                        en.Element("FilePath").Value = newPath;
+                        SetOrAdd(en, "FilePath", newPath); // legacy-safe (audit M11)
                         changed = true;
                     }
                 }
