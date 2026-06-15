@@ -284,6 +284,14 @@ namespace PDMLite
             btnSearch.FlatAppearance.BorderSize = 0;
             btnSearch.Click += (s, e) => RunSearch();
             this.Controls.Add(btnSearch);
+
+            // Both buttons are siblings of the OPAQUE full-width searchCard and
+            // were being painted BEHIND it — completely invisible (found in
+            // PR-H testing: the pane showed only the box, no ✖ / Search). Lift
+            // them to the front of the z-order so they show at the right end of
+            // the search box. (The M12 spacing fix above is only visible now.)
+            btnClear.BringToFront();
+            btnSearch.BringToFront();
             y += S(28);
 
             this.Controls.Add(new Label
