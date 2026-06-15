@@ -318,6 +318,8 @@ Core vault operations.
 
 \- GetDrawingPartNo(doc) → gets PartNo from the model a drawing references, reading the SPECIFIC config the drawing documents (via GetDrawingPrimaryConfig) NOT the model's active config (which may be any config after a release/export loop switched it); falls back to the active-config read, then the drawing's own PartNo, then ""; used by the task-pane Active File card. GetDrawingNo and the drawing-release revision sync use the same config-specific read.
 
+\- GetDrawingRevision(doc) → gets the drawing's revision FROM THE MODEL (the part drives the drawing's rev), reading the config the drawing documents — mirrors GetDrawingPartNo. The Active File card uses this for drawings instead of the drawing's own "Revision" property, which a ROLLBACK leaves stale (the archive restore doesn't rewrite the drawing's own prop, so the card showed the pre-rollback rev while the title block — model-linked — showed the rolled-back one; PR-69). Falls back to the model's record revision (per-config when known) when the model isn't open, then the drawing's own property.
+
 \- GetDrawingPrimaryConfig(doc) → returns the ReferencedConfiguration of the drawing's first model view (the config the drawing documents), or "" if unreadable (treat as "use active config"); a flat-pattern view's "{parent}SM-FLAT-PATTERN" config is resolved to its PARENT via ParentConfigOf (the flat-pattern config's rev/PN is stale). Underpins GetDrawingPartNo/GetDrawingNo and the drawing-release rev sync so a config-specific drawing always reports its OWN config's PartNo/DrawingNo/Revision.
 
 \- GetDrawingReferencedModel(doc) → gets path of model referenced by drawing

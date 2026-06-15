@@ -3927,6 +3927,49 @@ namespace PDMLite
             catch { return ""; }
         }
 
+        // A drawing's revision is DRIVEN BY THE MODEL (the part is the master), so
+        // read it from the model's config the drawing documents — NOT the drawing's
+        // own "Revision" property, which a ROLLBACK leaves stale (the archive restore
+        // doesn't rewrite it). Mirrors GetDrawingPartNo. When the model isn't open
+        // (only the drawing is), falls back to the model's record revision (per-config
+        // when known — the model's rollback synced it), then the drawing's own prop.
+        public static string GetDrawingRevision(ModelDoc2 drawingDoc)
+        {
+            try
+            {
+                string referencedPath = GetDrawingReferencedModel(drawingDoc);
+                if (!string.IsNullOrEmpty(referencedPath))
+                {
+                    string drwCfg = GetDrawingPrimaryConfig(drawingDoc);
+                    ModelDoc2 refModel = PDMLiteAddin.SwApp
+                        .GetOpenDocumentByName(referencedPath) as ModelDoc2;
+                    if (refModel != null)
+                    {
+                        string rev = !string.IsNullOrEmpty(drwCfg)
+                            ? PropertyValidator.GetProperty(refModel, "Revision", drwCfg)
+                            : PropertyValidator.GetProperty(refModel, "Revision");
+                        if (!string.IsNullOrEmpty(rev)) return rev;
+                    }
+                    var rec = DatabaseManager.GetFileRecord(referencedPath);
+                    if (rec != null)
+                    {
+                        if (!string.IsNullOrEmpty(drwCfg) && rec.Configurations != null)
+                        {
+                            var ce = rec.Configurations.FirstOrDefault(c =>
+                                string.Equals(c.Name, drwCfg,
+                                    StringComparison.OrdinalIgnoreCase));
+                            if (ce != null && !string.IsNullOrEmpty(ce.Revision))
+                                return ce.Revision;
+                        }
+                        if (!string.IsNullOrEmpty(rec.Revision)) return rec.Revision;
+                    }
+                }
+            }
+            catch { }
+            try { return PropertyValidator.GetProperty(drawingDoc, "Revision"); }
+            catch { return ""; }
+        }
+
         // ── Config the drawing's primary (first) model view references ────────
         // Returns the ReferencedConfiguration of the first model view on the
         // sheet, or "" if it can't be read (treat as "use active config").

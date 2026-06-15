@@ -1140,13 +1140,19 @@ namespace PDMLite
                 return;
             }
             string partNo = PropertyValidator.GetProperty(doc, "PartNo");
-            string rev = PropertyValidator.GetProperty(doc, "Revision");
             var lockInfo = DatabaseManager.GetLockInfo(filePath);
 
             bool isMaster = DatabaseManager.GetUserRole(
                 PDMLiteAddin.CurrentUser) == "Master";
             bool isDrawing = doc.GetType() ==
                 (int)swDocumentTypes_e.swDocDRAWING;
+            // A drawing's revision is DRIVEN BY THE MODEL it documents (the part is
+            // the master), and a rollback leaves the drawing's OWN Revision property
+            // stale — so read it from the model like the Part No. A part/assembly
+            // shows its active config's own Revision.
+            string rev = isDrawing
+                ? VaultManager.GetDrawingRevision(doc)
+                : PropertyValidator.GetProperty(doc, "Revision");
 
             // Multi-config indicator. Config name = Part No by convention, so a
             // part/assembly with several configs shows "(N configs)" after the
