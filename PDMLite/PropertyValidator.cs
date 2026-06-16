@@ -269,8 +269,12 @@ namespace PDMLite
                 if (double.IsNaN(massKg) || massKg <= 0)
                 {
                     int status;
+                    // bUseSystemUnits=true so vals[5] is genuinely kg regardless
+                    // of the document's mass units — matching the primary
+                    // CreateMassProperty path's UseSystemUnits=true (the old
+                    // inherited 'false' would read the doc's units, mislabelled kg).
                     double[] vals = doc.Extension.GetMassProperties2(
-                        1, out status, false) as double[];
+                        1, out status, true) as double[];
                     // Layout: [0..2] centre of mass, [3] volume, [4] area,
                     // [5] mass (kg), [6..] moments of inertia.
                     if (vals != null && vals.Length > 5)

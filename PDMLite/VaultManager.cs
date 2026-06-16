@@ -3039,9 +3039,13 @@ namespace PDMLite
                         MoveMatching(Path.Combine(ObsFolder, "DXF"),
                             Path.Combine(ExportRoot, "DXF"),
                             pn.Replace(".", "") + "-R" + targetLetter + ".dxf");
+                        // FileSafe like every other BOM glob — ExportBom writes
+                        // the file under the sanitised PartNo, so the restore
+                        // must look for the same sanitised name (a raw pn missed
+                        // an illegal-char PartNo's archived BOM on rollback).
                         MoveMatching(Path.Combine(ObsFolder, "BOM"),
                             Path.Combine(ExportRoot, "BOM"),
-                            pn + "-R" + targetLetter + "_BOM.csv");
+                            ExportManager.FileSafe(pn) + "-R" + targetLetter + "_BOM.csv");
                     }
                     // The PDF is the DRAWING's deliverable, not the model's — it is
                     // restored in Step 9 ONLY if the drawing is actually rolled back,
