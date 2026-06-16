@@ -79,7 +79,8 @@ namespace PDMLite
         // Whole-vault counts — invariant under filtering, so cached once per load
         // (UpdateSummary used to re-scan _all 4× on every keystroke / page click).
         private int _cntWip, _cntRel, _cntLck, _cntBrk;
-        private const int ColRev = 4;     // "Rev" column index
+        private const int ColRev = 4;        // "Rev" column index
+        private const int ColModifiedBy = 5; // first of the metadata columns (5..9)
         private const int ColWipDays = 9; // appended "WIP Days" column index
 
         // Row right-click menu (Open / Open linked / Copy path / Open folder).
@@ -435,7 +436,7 @@ namespace PDMLite
             // hard-coded column indices (Status=3, dates=6/8) are untouched.
             AddColumn("WIP Days");
             _grid.Columns[ColWipDays].DefaultCellStyle.Alignment =
-                DataGridViewContentAlignment.MiddleRight;
+                DataGridViewContentAlignment.MiddleCenter;
             _grid.Columns[ColWipDays].HeaderCell.ToolTipText =
                 "Days since last modified (WIP files only) · click to sort by staleness";
 
@@ -1119,8 +1120,12 @@ namespace PDMLite
                 }
                 // Per-column slack on top of the measured text: the short "Rev"
                 // header needs more (1.20) so it doesn't ellipsis to "R..."; the
-                // "WIP Days" header is already wide enough so it gets none (1.0).
-                double mult = ci == ColRev ? 1.20 : (ci == ColWipDays ? 1.0 : 1.15);
+                // metadata columns (Modified By/Date, Released By/Date, WIP Days)
+                // are tightened to 1.10; everything else gets 1.15.
+                double mult;
+                if (ci == ColRev) mult = 1.20;
+                else if (ci >= ColModifiedBy && ci <= ColWipDays) mult = 1.10;
+                else mult = 1.15;
                 int w = (int)(max * mult) + GlyphZone + S(10); // arrow + cell padding
                 if (w < S(56))  w = S(56);
                 if (w > S(540)) w = S(540);
