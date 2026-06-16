@@ -1116,7 +1116,7 @@ namespace PDMLite
                     int wv = TextRenderer.MeasureText(CellText(_all[i], ci), cellFont).Width;
                     if (wv > max) max = wv;
                 }
-                int w = (int)(max * 1.20) + GlyphZone + S(10); // arrow + cell padding
+                int w = (int)(max * 1.15) + GlyphZone + S(10); // arrow + cell padding
                 if (w < S(56))  w = S(56);
                 if (w > S(540)) w = S(540);
                 col.Width = w;
