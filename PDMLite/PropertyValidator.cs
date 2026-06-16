@@ -283,11 +283,15 @@ namespace PDMLite
 
                 if (double.IsNaN(massKg) || massKg < 0) return;
 
+                // The shop works in POUNDS only — never kilograms. massKg comes
+                // back in kg from the system-units mass read above; convert and
+                // stamp PartWeight as lbs alone (InvariantCulture so the decimal
+                // is "." regardless of machine locale).
                 double massLbs = massKg * 2.20462;
 
                 string weightStr = string.Format(
                     System.Globalization.CultureInfo.InvariantCulture,
-                    "{0:F3} kg / {1:F3} lbs", massKg, massLbs);
+                    "{0:F3} lbs", massLbs);
                 SetProperty(doc, "PartWeight", weightStr);
             }
             catch
