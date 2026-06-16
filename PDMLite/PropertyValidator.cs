@@ -231,7 +231,16 @@ namespace PDMLite
             return result;
         }
 
-        // Auto-calculate PartWeight from SOLIDWORKS mass properties
+        // Auto-calculate PartWeight from SOLIDWORKS mass properties.
+        //
+        // Uses CreateMassProperty (the documented IMassProperty API), NOT the
+        // old `MassProperty mp = doc.Extension.GetMassProperties2(...)`:
+        // GetMassProperties2 returns a double[] — under embedded interop that
+        // assignment compiled as a dynamic conversion that threw
+        // RuntimeBinderException at runtime, was swallowed by the catch, and
+        // PartWeight was silently never auto-filled (audit H5).
+        // GetMassProperties2's array is kept as a FALLBACK, read correctly as
+        // double[] (index 5 = mass in kg).
         public static void AutoFillWeight(ModelDoc2 doc)
         {
             try
@@ -241,15 +250,48 @@ namespace PDMLite
                     docType != (int)swDocumentTypes_e.swDocASSEMBLY)
                     return;
 
-                int status;
-                MassProperty mp = doc.Extension.GetMassProperties2(1, out status, false);
+                double massKg = double.NaN;
 
-                if (mp == null) return;
+                try
+                {
+                    MassProperty mp =
+                        doc.Extension.CreateMassProperty() as MassProperty;
+                    if (mp != null)
+                    {
+                        // System (MKS) units so Mass is kilograms regardless
+                        // of the document's display units.
+                        try { mp.UseSystemUnits = true; } catch { }
+                        massKg = mp.Mass;
+                    }
+                }
+                catch { }
 
-                double massKg = mp.Mass;
+                if (double.IsNaN(massKg) || massKg <= 0)
+                {
+                    int status;
+                    // bUseSystemUnits=true so vals[5] is genuinely kg regardless
+                    // of the document's mass units — matching the primary
+                    // CreateMassProperty path's UseSystemUnits=true (the old
+                    // inherited 'false' would read the doc's units, mislabelled kg).
+                    double[] vals = doc.Extension.GetMassProperties2(
+                        1, out status, true) as double[];
+                    // Layout: [0..2] centre of mass, [3] volume, [4] area,
+                    // [5] mass (kg), [6..] moments of inertia.
+                    if (vals != null && vals.Length > 5)
+                        massKg = vals[5];
+                }
+
+                if (double.IsNaN(massKg) || massKg < 0) return;
+
+                // The shop works in POUNDS only — never kilograms. massKg comes
+                // back in kg from the system-units mass read above; convert and
+                // stamp PartWeight as lbs alone (InvariantCulture so the decimal
+                // is "." regardless of machine locale).
                 double massLbs = massKg * 2.20462;
 
-                string weightStr = $"{massKg:F3} kg / {massLbs:F3} lbs";
+                string weightStr = string.Format(
+                    System.Globalization.CultureInfo.InvariantCulture,
+                    "{0:F3} lbs", massLbs);
                 SetProperty(doc, "PartWeight", weightStr);
             }
             catch
@@ -268,13 +310,18 @@ namespace PDMLite
                     string val = GetProperty(doc, prop);
                     if (string.IsNullOrEmpty(val)) continue;
 
-                    // Check if in old yyyy-MM-dd format
+                    // Check if in old yyyy-MM-dd format. InvariantCulture on
+                    // BOTH sides: a null culture parses — and "/" in a format
+                    // string separates — with the machine's locale, so a
+                    // non-US Windows locale wrote "06.13.2026"-style values.
                     if (DateTime.TryParseExact(val, "yyyy-MM-dd",
-                        null, System.Globalization.DateTimeStyles.None,
+                        System.Globalization.CultureInfo.InvariantCulture,
+                        System.Globalization.DateTimeStyles.None,
                         out DateTime dt))
                     {
                         // Convert to new format
-                        SetProperty(doc, prop, dt.ToString("MM/dd/yyyy"));
+                        SetProperty(doc, prop, dt.ToString("MM/dd/yyyy",
+                            System.Globalization.CultureInfo.InvariantCulture));
                     }
                 }
             }

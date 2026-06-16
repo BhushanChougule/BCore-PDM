@@ -437,8 +437,29 @@ namespace PDMLite
             }
             try { PDMLiteAddin.SwApp.CloseDoc(filePath); } catch { }
 
-            // Move the primary file's artifacts to SCRAP.
-            MoveToScrap(filePath);
+            // Move the primary file's artifacts to SCRAP. The WIP copy is THE
+            // canonical file — if it exists but cannot be moved (still held
+            // open on another machine, share hiccup), ABORT before the record
+            // delete: previously MoveToScrap's null return was ignored and the
+            // record was deleted anyway, leaving the file stranded in WIP as
+            // an untracked-but-present rival (Rule 2.6 then hard-blocked any
+            // same-named save, with no record left to explain why).
+            bool wipExisted = File.Exists(filePath);
+            if (MoveToScrap(filePath) == null && wipExisted)
+            {
+                AuditLogger.Log("RemoveFromVault", user, fileName, partNo, rev,
+                    "ABORTED — WIP copy could not be moved to SCRAP");
+                MessageBox.Show(
+                    "Remove ABORTED — the file could not be moved to SCRAP:\n" +
+                    filePath + "\n\n" +
+                    "It may still be open on another machine, or the network " +
+                    "share may be unavailable. The vault record was NOT " +
+                    "deleted — nothing changed.\n\n" +
+                    "Make sure the file is closed everywhere and try again.",
+                    "BCore PDM — Remove Failed",
+                    MessageBoxButtons.OK, MessageBoxIcon.Error);
+                return;
+            }
             MoveToScrap(Path.Combine(RelFolder, fileName));
             if (isDrawing)
             {
@@ -456,11 +477,22 @@ namespace PDMLite
                 "moved to SCRAP");
 
             // Move every associated drawing's artifacts (PDFs were already
-            // scrapped above via the per-config DrawingNos).
+            // scrapped above via the per-config DrawingNos). Same move-gate as
+            // the model: a drawing that could not be moved KEEPS its record
+            // (it is still a live tracked file) and is reported at the end.
+            var drwFailures = new List<string>();
             foreach (string dp in drwPaths)
             {
                 string drwName = Path.GetFileName(dp);
-                MoveToScrap(dp);
+                bool drwExisted = File.Exists(dp);
+                if (MoveToScrap(dp) == null && drwExisted)
+                {
+                    drwFailures.Add(drwName);
+                    AuditLogger.Log("RemoveFromVault", user, drwName, partNo, rev,
+                        "drawing of " + fileName +
+                        " could NOT be moved to SCRAP — record kept");
+                    continue;
+                }
                 MoveToScrap(Path.Combine(RelFolder, drwName));
                 DatabaseManager.RemoveFileRecord(dp);
                 AuditLogger.Log("RemoveFromVault", user, drwName, partNo, rev,
@@ -474,9 +506,16 @@ namespace PDMLite
                         ? "Associated drawing also removed."
                         : drwPaths.Count + " associated drawings also removed.")
                     : "") +
+                (drwFailures.Count > 0
+                    ? "\n\nWARNING — these drawings could NOT be moved and " +
+                      "stay tracked in the vault (close them everywhere and " +
+                      "remove again):\n  • " + string.Join("\n  • ", drwFailures)
+                    : "") +
                 "\n\nFiles moved to SCRAP:\n" + ScrapFolder,
                 "BCore PDM — Remove from Vault",
-                MessageBoxButtons.OK, MessageBoxIcon.Information);
+                MessageBoxButtons.OK,
+                drwFailures.Count > 0 ? MessageBoxIcon.Warning
+                                      : MessageBoxIcon.Information);
         }
 
         // Move a single file into SCRAP, timestamped so repeated removals of
@@ -570,15 +609,17 @@ namespace PDMLite
                             MoveToScrap(f);
                 }
 
-                // BOM CSV (assemblies) — uses the RAW PartNo (dots preserved).
-                // Previously not scrapped at all, leaving a retired assembly's
-                // current BOM in EXPORTS forever.
-                if (!string.IsNullOrEmpty(partNo) &&
+                // BOM CSV (assemblies) — uses the RAW PartNo (dots preserved),
+                // pushed through FileSafe to match how ExportBom writes the
+                // file (illegal chars → '_'). Previously not scrapped at all,
+                // leaving a retired assembly's current BOM in EXPORTS forever.
+                string bomScrapId = ExportManager.FileSafe(partNo);
+                if (!string.IsNullOrEmpty(bomScrapId) &&
                     Directory.Exists(bomExport))
                 {
-                    var bomFilter = ExportNameFilter(partNo, "-R", "_BOM.csv");
+                    var bomFilter = ExportNameFilter(bomScrapId, "-R", "_BOM.csv");
                     foreach (string f in Directory.GetFiles(
-                        bomExport, partNo + "-R*_BOM.csv"))
+                        bomExport, bomScrapId + "-R*_BOM.csv"))
                         if (bomFilter.IsMatch(Path.GetFileName(f)))
                             MoveToScrap(f);
                 }
@@ -844,7 +885,8 @@ namespace PDMLite
                 // Manufactured parts with no drawing warn (override); Purchased
                 // and Toolbox parts with no drawing are skipped.
                 List<string> drwBlockers, drwWarnings;
-                EvaluateAssemblyDrawings(doc, out drwBlockers, out drwWarnings);
+                bool drwEvalOk =
+                    EvaluateAssemblyDrawings(doc, out drwBlockers, out drwWarnings);
 
                 if (drwBlockers.Count > 0)
                 {
@@ -869,6 +911,22 @@ namespace PDMLite
                         MessageBoxButtons.YesNo,
                         MessageBoxIcon.Warning);
                     if (choice != DialogResult.Yes) return;
+                }
+
+                // The gate's component walk failed (or returned nothing) —
+                // the drawings above may be only a PARTIAL picture. Previously
+                // this case silently PASSED the gate; make the Master decide.
+                if (!drwEvalOk)
+                {
+                    var evalChoice = MessageBox.Show(
+                        "The component drawing check could NOT be completed " +
+                        "for this assembly (component enumeration failed).\n\n" +
+                        "Some component drawings may be unreleased without " +
+                        "being listed. Release the Assembly anyway?",
+                        "BCore PDM — Drawing Check Incomplete",
+                        MessageBoxButtons.YesNo,
+                        MessageBoxIcon.Warning);
+                    if (evalChoice != DialogResult.Yes) return;
                 }
             }
 
@@ -1096,7 +1154,11 @@ namespace PDMLite
             // ── Auto-fill fields (all configurations for parts/assemblies) ─
             string checkedByVal = user.Length >= 2
                 ? user.Substring(0, 2).ToUpper() : user.ToUpper();
-            string checkedDateVal = DateTime.Now.ToString("MM/dd/yyyy");
+            // InvariantCulture: "/" in a format string is the CULTURE's date
+            // separator — on a machine with a non-US locale the property would
+            // be stamped "06.13.2026"-style, breaking the MM/dd/yyyy convention.
+            string checkedDateVal = DateTime.Now.ToString("MM/dd/yyyy",
+                System.Globalization.CultureInfo.InvariantCulture);
 
             var cfgSwitchFailures = new List<string>();
             if (!isDrawing)
@@ -1933,15 +1995,58 @@ namespace PDMLite
                 MessageBoxButtons.OK,
                 MessageBoxIcon.Stop);
 
+        // The shop's revision alphabet (skips I,O,Q,S,X per ASME practice).
+        private static readonly string[] RevLetters = {
+            "A","B","C","D","E","F","G","H","J",
+            "K","L","M","N","P","R","T","U","V","W","Y","Z"
+        };
+
         private static string GetNextRevision(string current)
         {
-            string[] revs = {
-                "A","B","C","D","E","F","G","H","J",
-                "K","L","M","N","P","R","T","U","V","W","Y","Z"
-            };
-            int idx = Array.IndexOf(revs, current.ToUpper());
-            return idx >= 0 && idx < revs.Length - 1
-                ? revs[idx + 1] : current + "1";
+            current = (current ?? "").Trim().ToUpper();
+
+            // No revision yet (brand-new/legacy record) → start the sequence.
+            // The old fallback returned "1", then "11", "111"… — names that
+            // break export naming and rollback parsing.
+            if (current.Length == 0) return "A";
+
+            // Every char in the rev alphabet → increment as a base-21 counter
+            // with carry, so the sequence continues past Z the ASME way:
+            // …Y → Z → AA → AB … AZ → BA … ZZ → AAA. The skip letters
+            // (I,O,Q,S,X) are skipped in every position automatically because
+            // they are not in the alphabet. The old code degenerated to Z1,
+            // Z11, Z111… after Z.
+            var digits = new List<int>();
+            bool alphabetic = true;
+            foreach (char ch in current)
+            {
+                int d = Array.IndexOf(RevLetters, ch.ToString());
+                if (d < 0) { alphabetic = false; break; }
+                digits.Add(d);
+            }
+            if (alphabetic)
+            {
+                int i = digits.Count - 1;
+                while (i >= 0 && digits[i] == RevLetters.Length - 1)
+                {
+                    digits[i] = 0;   // carry
+                    i--;
+                }
+                if (i >= 0) digits[i]++;
+                else digits.Insert(0, 0); // all-Z → grow one letter (Z → AA)
+                var sb = new StringBuilder();
+                foreach (int d in digits) sb.Append(RevLetters[d]);
+                return sb.ToString();
+            }
+
+            // Purely numeric legacy revision → numeric increment ("1" → "2"),
+            // not the old "1" + "1" = "11".
+            int n;
+            if (int.TryParse(current, out n)) return (n + 1).ToString();
+
+            // Unknown token (mixed/odd legacy value) — keep the documented old
+            // fallback so behaviour never regresses for data we can't read.
+            return current + "1";
         }
 
         // ════════════════════════════════════════════════════════════════
@@ -2418,7 +2523,11 @@ namespace PDMLite
         //   blockers — components whose drawing exists but is NOT Released
         //   warnings — Manufactured components with NO drawing (override allowed)
         // Toolbox and Purchased-with-no-drawing components are skipped silently.
-        private static void EvaluateAssemblyDrawings(
+        // RETURNS FALSE when the evaluation itself failed (component walk threw
+        // mid-pass): the gate previously caught-and-passed, silently releasing
+        // an assembly whose drawings were never checked. The caller turns a
+        // false return into an explicit Yes/No override.
+        private static bool EvaluateAssemblyDrawings(
             ModelDoc2 doc, out List<string> blockers, out List<string> warnings)
         {
             blockers = new List<string>();
@@ -2429,13 +2538,24 @@ namespace PDMLite
             {
                 AssemblyDoc asm = (AssemblyDoc)doc;
                 object[] components = (object[])asm.GetComponents(false);
-                if (components == null) return;
+                if (components == null) return false; // nothing readable — let the caller ask
 
                 foreach (object obj in components)
                 {
                     Component2 comp = obj as Component2;
                     if (comp == null) continue;
-                    if (comp.IsSuppressed()) continue;
+                    // GetSuppression2(), NOT IsSuppressed(): IsSuppressed()
+                    // wrongly reports LIGHTWEIGHT components as suppressed (the
+                    // same API bug ExportBom already works around), so every
+                    // lightweight child SKIPPED this gate entirely and its
+                    // unreleased drawing never blocked the assembly. Only
+                    // swComponentSuppressed is genuinely suppressed; lightweight
+                    // / resolved / fully-resolved are all PRESENT.
+                    int supState = -1;
+                    try { supState = comp.GetSuppression2(); } catch { }
+                    if (supState == (int)
+                        swComponentSuppressionState_e.swComponentSuppressed)
+                        continue;
 
                     string path = comp.GetPathName();
                     if (string.IsNullOrEmpty(path)) continue;
@@ -2462,8 +2582,9 @@ namespace PDMLite
                             warnings.Add(compName);
                     }
                 }
+                return true;
             }
-            catch { }
+            catch { return false; } // evaluation failed — caller asks, never silently passes
         }
 
         // Exact-name filter paired with each export glob. A glob alone is a
@@ -2561,10 +2682,12 @@ namespace PDMLite
                     ExportNameFilter(fileIdentifier, " REV ", ".pdf"));
 
                 // BOM CSV (assemblies only): {partNo}-R{rev}_BOM.csv with the
-                // RAW PartNo (dots preserved).
+                // RAW PartNo (dots preserved), FileSafe'd to match how
+                // ExportBom actually names the file on disk.
                 if (!isDrawing)
                 {
-                    string bid = bomIdentifier ?? fileIdentifier;
+                    string bid = ExportManager.FileSafe(
+                        bomIdentifier ?? fileIdentifier);
                     MoveMatching(Path.Combine(ExportRoot, "BOM"),
                         Path.Combine(ObsFolder, "BOM"),
                         bid + "-R*_BOM.csv",
@@ -2654,9 +2777,29 @@ namespace PDMLite
             // archive convention — without it a file named "Bracket" would
             // also list (and could restore) "Bracket REV PLATE"'s archives.
             var archiveFilter = ExportNameFilter(fileName, " REV ", ext);
-            string[] archivedFiles = Directory.GetFiles(
+            var archiveList = Directory.GetFiles(
                     archivePath, fileName + " REV *" + ext)
                 .Where(f => archiveFilter.IsMatch(Path.GetFileName(f)))
+                .ToList();
+
+            // ALSO list collision-stamped archives. CollisionSafeArchivePath
+            // preserves a second snapshot of the same rev letter as
+            // "{name}_{yyyyMMdd_HHmmss} REV {rev}{ext}" — but that name does
+            // not match the primary glob above (which requires "{name} REV "),
+            // so the very snapshots the collision guard saved could never be
+            // restored. The stamp regex is pinned to exactly _8digits_6digits
+            // so a DIFFERENT file whose name merely starts with "{name}_"
+            // never leaks into this file's archive list.
+            var stampedFilter = new Regex(
+                "^" + Regex.Escape(fileName) +
+                @"_\d{8}_\d{6} REV [A-Za-z0-9]+" + Regex.Escape(ext) + "$",
+                RegexOptions.IgnoreCase);
+            archiveList.AddRange(Directory.GetFiles(
+                    archivePath, fileName + "_* REV *" + ext)
+                .Where(f => stampedFilter.IsMatch(Path.GetFileName(f))));
+
+            string[] archivedFiles = archiveList
+                .Distinct(StringComparer.OrdinalIgnoreCase)
                 .ToArray();
 
             if (archivedFiles.Length == 0)
@@ -2896,9 +3039,13 @@ namespace PDMLite
                         MoveMatching(Path.Combine(ObsFolder, "DXF"),
                             Path.Combine(ExportRoot, "DXF"),
                             pn.Replace(".", "") + "-R" + targetLetter + ".dxf");
+                        // FileSafe like every other BOM glob — ExportBom writes
+                        // the file under the sanitised PartNo, so the restore
+                        // must look for the same sanitised name (a raw pn missed
+                        // an illegal-char PartNo's archived BOM on rollback).
                         MoveMatching(Path.Combine(ObsFolder, "BOM"),
                             Path.Combine(ExportRoot, "BOM"),
-                            pn + "-R" + targetLetter + "_BOM.csv");
+                            ExportManager.FileSafe(pn) + "-R" + targetLetter + "_BOM.csv");
                     }
                     // The PDF is the DRAWING's deliverable, not the model's — it is
                     // restored in Step 9 ONLY if the drawing is actually rolled back,
@@ -4261,8 +4408,9 @@ namespace PDMLite
                 // move (same C3 fix as ArchiveOldExports).
 
                 // BOM CSV (assemblies) — raw PartNo so the glob matches the
-                // {partNo}-R{rev}_BOM.csv filename correctly.
-                string bomId = rawPartNo ?? partNoClean;
+                // {partNo}-R{rev}_BOM.csv filename correctly, FileSafe'd to
+                // match how ExportBom actually names the file on disk.
+                string bomId = ExportManager.FileSafe(rawPartNo ?? partNoClean);
                 if (!string.IsNullOrEmpty(bomId))
                     MoveMatching(Path.Combine(ExportRoot, "BOM"),
                         Path.Combine(ObsFolder, "BOM"), bomId + "-R*_BOM.csv",
