@@ -333,7 +333,24 @@ namespace PDMLite
             if (_revisionAll != null) _revisionAll.Checked = false;
             if (_releaseAll != null)  _releaseAll.Checked = false;
 
-            var all = DatabaseManager.GetPendingRequests();
+            List<RevisionRequest> all;
+            try
+            {
+                all = DatabaseManager.GetPendingRequests();
+            }
+            catch
+            {
+                // DB unreachable (N: blip / unrestorable vault) — this runs
+                // from Click handlers on SOLIDWORKS' message loop, where an
+                // uncaught throw is an unhandled exception dialog. Say so
+                // instead of rendering empty columns that read as "no work".
+                all = new List<RevisionRequest>();
+                MessageBox.Show(
+                    "Could not read pending requests — the vault is " +
+                    "unavailable.\n\nCheck the N: drive and reopen this window.",
+                    "BCore PDM — Vault Unavailable",
+                    MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            }
 
             var unlockReqs   = all.Where(r => r.RequestType == "Unlock").ToList();
             var revisionReqs = all.Where(r => r.RequestType == "Revision" ||
@@ -381,17 +398,24 @@ namespace PDMLite
                 bool hasNote = !string.IsNullOrEmpty(req.Note);
 
                 // PN + Revision live on the File record, not the request. For a
-                // drawing (no props of its own) fall back to its model.
-                var rec = DatabaseManager.GetFileRecord(req.FilePath);
-                string pn = rec?.PartNumber ?? "";
-                string rev = rec?.Revision ?? "";
-                if (string.IsNullOrWhiteSpace(pn) &&
-                    req.FileName != null &&
-                    req.FileName.EndsWith(".slddrw", StringComparison.OrdinalIgnoreCase))
+                // drawing (no props of its own) fall back to its model. Guarded:
+                // these are per-card DB reads — a network blip mid-populate must
+                // degrade to a card without the PN line, not an unhandled throw.
+                string pn = "", rev = "";
+                try
                 {
-                    var model = DatabaseManager.GetModelForDrawing(req.FilePath);
-                    if (model != null) { pn = model.PartNumber; rev = model.Revision; }
+                    var rec = DatabaseManager.GetFileRecord(req.FilePath);
+                    pn = rec?.PartNumber ?? "";
+                    rev = rec?.Revision ?? "";
+                    if (string.IsNullOrWhiteSpace(pn) &&
+                        req.FileName != null &&
+                        req.FileName.EndsWith(".slddrw", StringComparison.OrdinalIgnoreCase))
+                    {
+                        var model = DatabaseManager.GetModelForDrawing(req.FilePath);
+                        if (model != null) { pn = model.PartNumber; rev = model.Revision; }
+                    }
                 }
+                catch { }
                 bool hasPnLine = !string.IsNullOrWhiteSpace(pn) ||
                                  !string.IsNullOrWhiteSpace(rev);
 
@@ -617,7 +641,20 @@ namespace PDMLite
         // Approve every pending request across all three columns.
         private void ApproveAllPending()
         {
-            var all = DatabaseManager.GetPendingRequests();
+            List<RevisionRequest> all;
+            try
+            {
+                all = DatabaseManager.GetPendingRequests();
+            }
+            catch
+            {
+                MessageBox.Show(
+                    "Could not read pending requests — the vault is " +
+                    "unavailable.\n\nCheck the N: drive and try again.",
+                    "BCore PDM — Vault Unavailable",
+                    MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                return;
+            }
             if (all.Count == 0)
             {
                 MessageBox.Show("There are no pending requests.",

@@ -315,8 +315,30 @@ namespace PDMLite
             ClearAndDispose(_listPanel);
 
             bool truncated;
-            List<VaultFile> files =
-                DatabaseManager.GetReleasableFiles(_filter.Text, out truncated);
+            List<VaultFile> files;
+            try
+            {
+                files = DatabaseManager.GetReleasableFiles(_filter.Text,
+                    out truncated);
+            }
+            catch
+            {
+                // DB unreachable — LoadFiles reruns on every debounce tick, so
+                // an uncaught throw here is an unhandled message-loop
+                // exception inside SOLIDWORKS (same guard as the task-pane
+                // search). Show the state in the list instead.
+                truncated = false;
+                _countLabel.Text = "vault unavailable";
+                _listPanel.Controls.Add(new Label
+                {
+                    Text = "Vault unavailable — check the N: drive.",
+                    Font = _fCardSub,
+                    ForeColor = Color.FromArgb(180, 75, 75),
+                    Location = new Point(S(8), S(10)),
+                    AutoSize = true
+                });
+                return;
+            }
 
             _countLabel.Text = files.Count + " WIP file" +
                 (files.Count == 1 ? "" : "s") + (truncated ? " (first 50)" : "");
