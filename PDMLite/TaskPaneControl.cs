@@ -943,6 +943,15 @@ namespace PDMLite
         {
             var cards = new List<SearchGroup>();
 
+            // ONE drawing snapshot for the WHOLE search. Each config card needs
+            // the drawings for its model+config, and the old per-card
+            // GetDrawingsForConfig was up to ~50 full vault.xml SMB loads per
+            // search (audit M3). Resolve every card against this in-memory
+            // index instead.
+            DatabaseManager.DrawingIndex drwIndex;
+            try { drwIndex = DatabaseManager.BuildDrawingIndex(); }
+            catch { drwIndex = null; } // search still renders; cards just lack the drawing wiring
+
             var modelPaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             foreach (var f in results)
             {
@@ -961,7 +970,7 @@ namespace PDMLite
                     if (model != null && modelPaths.Contains(model.FilePath))
                         continue; // model matched too — expanded under it
                     if (model != null)
-                        AddModelConfigCards(cards, model, termL);
+                        AddModelConfigCards(cards, model, termL, drwIndex);
                     else
                         cards.Add(new SearchGroup
                         {
@@ -974,7 +983,7 @@ namespace PDMLite
                 }
                 else
                 {
-                    AddModelConfigCards(cards, f, termL);
+                    AddModelConfigCards(cards, f, termL, drwIndex);
                 }
             }
             return cards;
@@ -982,7 +991,7 @@ namespace PDMLite
 
         // Append one card per matching configuration of a model file.
         private void AddModelConfigCards(List<SearchGroup> cards,
-            VaultFile model, string termL)
+            VaultFile model, string termL, DatabaseManager.DrawingIndex drwIndex)
         {
             string fileName = string.IsNullOrEmpty(model.FileName)
                 ? Path.GetFileName(model.FilePath) : model.FileName;
@@ -1010,10 +1019,10 @@ namespace PDMLite
             foreach (var c in shown)
             {
                 // This config's drawing — config-specific, or a shared
-                // config-table drawing that covers all configs.
+                // config-table drawing that covers all configs. Resolved
+                // against the ONE shared snapshot (no per-card DB load).
                 string drawingPath = null;
-                var drws = DatabaseManager.GetDrawingsForConfig(
-                    model.FilePath, c.Name);
+                var drws = drwIndex?.DrawingsForConfig(model.FilePath, c.Name);
                 if (drws != null && drws.Count > 0) drawingPath = drws[0];
 
                 cards.Add(new SearchGroup
@@ -1093,8 +1102,11 @@ namespace PDMLite
                 // Saved doc with an unusable path string — show the title.
                 try { fileName = (doc.GetTitle() ?? "").Trim(); } catch { }
             }
-            string status;
-            try { status = DatabaseManager.GetFileStatusByName(filePath); }
+
+            // ONE DB load for status + lock + history (was three separate
+            // vault.xml loads on every doc/config switch — audit M3).
+            ActiveFileInfo info;
+            try { info = DatabaseManager.GetActiveFileInfo(filePath); }
             catch
             {
                 // DB unreachable (network down / unrestorable vault) — this
@@ -1109,8 +1121,10 @@ namespace PDMLite
                 PopulateHistoryPanel(null);
                 return;
             }
+            string status = info.Status;
+            var lockInfo = info.Lock;
+
             string partNo = PropertyValidator.GetProperty(doc, "PartNo");
-            var lockInfo = DatabaseManager.GetLockInfo(filePath);
 
             bool isMaster = DatabaseManager.GetUserRole(
                 PDMLiteAddin.CurrentUser) == "Master";
@@ -1157,15 +1171,13 @@ namespace PDMLite
                 // On disk but no vault record: saved outside the vault, or
                 // QUARANTINED — first save under a taken name (the post-save
                 // guard refuses to track a duplicate). Say so instead of
-                // implying the file is a tracked WIP.
-                string dup = null;
-                try { dup = DatabaseManager.FindFileNameConflict(
-                        fileName, filePath); }
-                catch { }
+                // implying the file is a tracked WIP. The duplicate flag came
+                // from the SAME load as the status (no extra DB call).
+                bool dup = info.HasDuplicateRival;
                 // "DUPLICATE" / "Untracked" — the value column fits ~10 chars
                 // before clipping (sized for "Not Locked").
-                _statusVal.Text = dup != null ? "DUPLICATE" : "Untracked";
-                _statusVal.ForeColor = dup != null ? cSwRed : cDark;
+                _statusVal.Text = dup ? "DUPLICATE" : "Untracked";
+                _statusVal.ForeColor = dup ? cSwRed : cDark;
             }
             // Drawings share the PartNo of the part/assembly they document —
             // pull it from the referenced model so the card matches the part.
@@ -1189,11 +1201,8 @@ namespace PDMLite
                 ? VaultManager.GetDrawingOpenLabel(doc)
                 : "Open Drawing");
 
-            // File History (guarded — see the status sentinel above)
-            List<HistoryEntry> history = null;
-            try { history = DatabaseManager.GetFileHistory(filePath); }
-            catch { }
-            PopulateHistoryPanel(history);
+            // File History — from the same combined load above.
+            PopulateHistoryPanel(info.History);
 
             // Refresh pending requests for masters
             RefreshRequests();

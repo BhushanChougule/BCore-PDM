@@ -54,6 +54,18 @@ namespace PDMLite
         public DateTime LockedDate { get; set; }
     }
 
+    // Everything the task-pane Active File card needs about one file, gathered
+    // in a SINGLE vault.xml load. Refresh previously made three separate loads
+    // (GetFileStatusByName + GetLockInfo + GetFileHistory) on every document
+    // and configuration switch (audit M3).
+    public class ActiveFileInfo
+    {
+        public string Status = "";                 // by-name semantics (GetFileStatusByName)
+        public LockInfo Lock = new LockInfo { IsLocked = false };
+        public List<HistoryEntry> History = new List<HistoryEntry>();
+        public bool HasDuplicateRival;             // a living rival WIP file owns this name
+    }
+
     public class HistoryEntry
     {
         public string Status { get; set; }
@@ -2150,6 +2162,95 @@ namespace PDMLite
             return "";
         }
 
+        // Status (by-name) + lock (exact path) + history (name-fallback gated)
+        // for the active file, in ONE load. Mirrors GetFileStatusByName +
+        // GetLockInfo + GetFileHistory exactly, sharing the FindNameRival gate
+        // so the combined result can never disagree with the individual calls.
+        public static ActiveFileInfo GetActiveFileInfo(string filePath)
+        {
+            var info = new ActiveFileInfo();
+            if (string.IsNullOrEmpty(filePath)) return info;
+            string fileName = System.IO.Path.GetFileName(filePath);
+
+            lock (_lock) using (AcquireProcessLock())
+            {
+                var doc = LoadOrCreate();
+                var filesEl = doc.Root.Element("Files");
+
+                // Exact-path record (status + lock both prefer it).
+                XElement exact = null;
+                foreach (var el in filesEl.Elements("File"))
+                {
+                    if (string.Equals((string)el.Element("FilePath"), filePath,
+                            StringComparison.OrdinalIgnoreCase))
+                    {
+                        exact = el;
+                        break;
+                    }
+                }
+
+                bool rival = FindNameRival(doc, fileName, filePath) != null;
+                // The card's "DUPLICATE" sentinel: a living rival AND no exact
+                // record of our own (the original is never its own duplicate).
+                info.HasDuplicateRival = rival && exact == null;
+
+                if (exact != null)
+                {
+                    info.Status = (string)exact.Element("Status") ?? "";
+
+                    // Lock — exact-path only, like GetLockInfo (NOT name-fallback).
+                    string lockedBy = (string)exact.Element("LockedBy") ?? "";
+                    if (!string.IsNullOrEmpty(lockedBy))
+                    {
+                        DateTime lockedDate;
+                        DateTime.TryParse((string)exact.Element("LockedDate"),
+                            out lockedDate);
+                        info.Lock = new LockInfo
+                        {
+                            IsLocked = true,
+                            LockedBy = lockedBy,
+                            LockedDate = lockedDate
+                        };
+                    }
+                }
+                else if (!rival)
+                {
+                    // Status name-fallback (GetFileStatusByName) — but only when
+                    // no living rival owns the name.
+                    foreach (var el in filesEl.Elements("File"))
+                    {
+                        if (string.Equals((string)el.Element("FileName"), fileName,
+                                StringComparison.OrdinalIgnoreCase))
+                        {
+                            info.Status = (string)el.Element("Status") ?? "";
+                            break;
+                        }
+                    }
+                }
+
+                // History — same name-fallback gate as GetFileHistory.
+                foreach (var el in doc.Root.Element("RevisionHistory").Elements("Entry"))
+                {
+                    string entryPath = (string)el.Element("FilePath") ?? "";
+                    bool match = string.Equals(entryPath, filePath,
+                                     StringComparison.OrdinalIgnoreCase)
+                              || (!rival && string.Equals(
+                                     System.IO.Path.GetFileName(entryPath),
+                                     fileName, StringComparison.OrdinalIgnoreCase));
+                    if (!match) continue;
+                    info.History.Add(new HistoryEntry
+                    {
+                        Status      = (string)el.Element("Status")     ?? "",
+                        ChangedBy   = (string)el.Element("ChangedBy")  ?? "",
+                        ChangedDate = (string)el.Element("ChangedDate")?? "",
+                        ChangeNote  = (string)el.Element("ChangeNote") ?? ""
+                    });
+                }
+                info.History.Reverse(); // most recent first, like GetFileHistory
+            }
+            return info;
+        }
+
         // Returns the full VaultFile record for an exact file path, or null if
         // the path is not tracked. Used by the Pending Requests cards to show
         // the file's PartNumber + Revision (which live on the File record, not
@@ -2386,84 +2487,140 @@ namespace PDMLite
                 c => System.Array.IndexOf(invalid, c) >= 0 ? '_' : c).ToArray());
         }
 
-        public static List<string> GetDrawingsForConfig(string modelFilePath, string configName)
+        // One drawing record, snapshotted into a DrawingIndex.
+        public sealed class DrawingRec
         {
-            var result = new List<string>();
-            if (string.IsNullOrEmpty(modelFilePath)) return result;
+            public string FilePath;
+            public string FileName;
+            public string FileBase;          // filename without extension
+            public string ReferencedModel;
+            public string ReferencedConfigs;
+        }
 
-            string modelName = System.IO.Path.GetFileName(modelFilePath);
-            var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        // An in-memory snapshot of EVERY tracked drawing, read with a SINGLE
+        // vault.xml load. The per-config search card needs the drawings for
+        // each model+config; calling GetDrawingsForConfig per card was up to
+        // ~50 full SMB loads per search (audit M3). RunSearch now builds ONE
+        // DrawingIndex and resolves all cards against it in memory.
+        public sealed class DrawingIndex
+        {
+            private readonly List<DrawingRec> _drawings;
+            internal DrawingIndex(List<DrawingRec> drawings) { _drawings = drawings; }
 
+            // The drawings that document a specific configuration of a model —
+            // identical match logic to GetDrawingsForConfig, run in memory.
+            public List<string> DrawingsForConfig(string modelFilePath,
+                string configName)
+            {
+                var result = new List<string>();
+                if (string.IsNullOrEmpty(modelFilePath)) return result;
+                string modelName = System.IO.Path.GetFileName(modelFilePath);
+                string modelBase =
+                    System.IO.Path.GetFileNameWithoutExtension(modelFilePath);
+                var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+                foreach (var d in _drawings)
+                {
+                    if (string.IsNullOrEmpty(d.FilePath) ||
+                        seen.Contains(d.FilePath)) continue;
+                    if (DrawingMatchesConfig(d, modelFilePath, modelName,
+                            modelBase, configName))
+                    {
+                        result.Add(d.FilePath);
+                        seen.Add(d.FilePath);
+                    }
+                }
+                return result;
+            }
+        }
+
+        // Build the drawing snapshot in one load. Cheap to reuse across many
+        // lookups in a single operation (search card expansion, bulk scans).
+        public static DrawingIndex BuildDrawingIndex()
+        {
+            var list = new List<DrawingRec>();
             lock (_lock) using (AcquireProcessLock())
             {
                 var doc = LoadOrCreate();
                 foreach (var el in doc.Root.Element("Files").Elements("File"))
                 {
-                    string fn  = (string)el.Element("FileName") ?? "";
+                    string fn = (string)el.Element("FileName") ?? "";
                     if (!System.IO.Path.GetExtension(fn)
                             .Equals(".slddrw", StringComparison.OrdinalIgnoreCase))
                         continue;
-
                     string fp = (string)el.Element("FilePath") ?? "";
-                    if (string.IsNullOrEmpty(fp) || seen.Contains(fp)) continue;
-
-                    string refModel   = (string)el.Element("ReferencedModel")   ?? "";
-                    string refConfigs = (string)el.Element("ReferencedConfigs") ?? "";
-
-                    if (!string.IsNullOrEmpty(refModel) &&
-                        (string.Equals(refModel, modelFilePath,
-                             StringComparison.OrdinalIgnoreCase) ||
-                         string.Equals(System.IO.Path.GetFileName(refModel),
-                             modelName, StringComparison.OrdinalIgnoreCase)))
+                    if (string.IsNullOrEmpty(fp)) continue;
+                    list.Add(new DrawingRec
                     {
-                        // Drawing references our model. Check config coverage.
-                        bool coversAll     = string.IsNullOrEmpty(refConfigs);
-                        bool coversThis    = !coversAll && refConfigs
-                            .Split(',')
-                            .Select(c => c.Trim())
-                            .Any(c => string.Equals(c, configName,
-                                          StringComparison.OrdinalIgnoreCase) ||
-                                      // Legacy records (saved before the flat-pattern
-                                      // filter) may store the raw "{config}SM-FLAT-
-                                      // PATTERN" name; tolerate it so the drawing still
-                                      // resolves (self-heals on the next save).
-                                      (c.EndsWith("SM-FLAT-PATTERN",
-                                          StringComparison.OrdinalIgnoreCase) &&
-                                       string.Equals(c.Substring(0, c.Length -
-                                          "SM-FLAT-PATTERN".Length), configName,
-                                          StringComparison.OrdinalIgnoreCase)));
-                        if (coversAll || coversThis)
-                        {
-                            result.Add(fp);
-                            seen.Add(fp);
-                        }
-                        continue; // don't also match by basename
-                    }
-
-                    // Basename fallback: drawing named after the model (shared) or
-                    // after the config PartNo (config-specific) — pre-reference era.
-                    string fnBase = System.IO.Path.GetFileNameWithoutExtension(fn);
-                    string modelBase   = System.IO.Path.GetFileNameWithoutExtension(modelFilePath);
-                    bool sharedMatch   = string.Equals(fnBase, modelBase,
-                                            StringComparison.OrdinalIgnoreCase);
-                    // Config-specific drawings are saved with a filename-SAFE
-                    // version of the config name (illegal chars → '_'), so match
-                    // the raw config name OR its sanitised form — otherwise a
-                    // PartNo containing a slash/quote/etc. would never resolve its
-                    // drawing here and New Revision would skip bumping it.
-                    bool configMatch   = !string.IsNullOrEmpty(configName) &&
-                                        (string.Equals(fnBase, configName,
-                                            StringComparison.OrdinalIgnoreCase) ||
-                                         string.Equals(fnBase, SanitizeFileName(configName),
-                                            StringComparison.OrdinalIgnoreCase));
-                    if ((sharedMatch || configMatch) && !seen.Contains(fp))
-                    {
-                        result.Add(fp);
-                        seen.Add(fp);
-                    }
+                        FilePath          = fp,
+                        FileName          = fn,
+                        FileBase          = System.IO.Path
+                                              .GetFileNameWithoutExtension(fn),
+                        ReferencedModel   = (string)el.Element("ReferencedModel")   ?? "",
+                        ReferencedConfigs = (string)el.Element("ReferencedConfigs") ?? ""
+                    });
                 }
             }
-            return result;
+            return new DrawingIndex(list);
+        }
+
+        // The single source of truth for "does this drawing document this
+        // model+config" — used by BOTH GetDrawingsForConfig (one DB load) and
+        // DrawingIndex (in-memory), so the two can never disagree.
+        private static bool DrawingMatchesConfig(DrawingRec d,
+            string modelFilePath, string modelName, string modelBase,
+            string configName)
+        {
+            string refModel   = d.ReferencedModel ?? "";
+            string refConfigs = d.ReferencedConfigs ?? "";
+
+            if (!string.IsNullOrEmpty(refModel) &&
+                (string.Equals(refModel, modelFilePath,
+                     StringComparison.OrdinalIgnoreCase) ||
+                 string.Equals(System.IO.Path.GetFileName(refModel),
+                     modelName, StringComparison.OrdinalIgnoreCase)))
+            {
+                // Drawing references our model. Check config coverage.
+                bool coversAll  = string.IsNullOrEmpty(refConfigs);
+                bool coversThis = !coversAll && refConfigs
+                    .Split(',')
+                    .Select(c => c.Trim())
+                    .Any(c => string.Equals(c, configName,
+                                  StringComparison.OrdinalIgnoreCase) ||
+                              // Legacy records (saved before the flat-pattern
+                              // filter) may store the raw "{config}SM-FLAT-
+                              // PATTERN" name; tolerate it so the drawing still
+                              // resolves (self-heals on the next save).
+                              (c.EndsWith("SM-FLAT-PATTERN",
+                                  StringComparison.OrdinalIgnoreCase) &&
+                               string.Equals(c.Substring(0, c.Length -
+                                  "SM-FLAT-PATTERN".Length), configName,
+                                  StringComparison.OrdinalIgnoreCase)));
+                return coversAll || coversThis;
+            }
+
+            // Basename fallback: drawing named after the model (shared) or
+            // after the config PartNo (config-specific) — pre-reference era.
+            bool sharedMatch = string.Equals(d.FileBase, modelBase,
+                                  StringComparison.OrdinalIgnoreCase);
+            // Config-specific drawings are saved with a filename-SAFE version of
+            // the config name (illegal chars → '_'), so match the raw config
+            // name OR its sanitised form — otherwise a PartNo containing a
+            // slash/quote/etc. would never resolve its drawing here.
+            bool configMatch = !string.IsNullOrEmpty(configName) &&
+                (string.Equals(d.FileBase, configName,
+                     StringComparison.OrdinalIgnoreCase) ||
+                 string.Equals(d.FileBase, SanitizeFileName(configName),
+                     StringComparison.OrdinalIgnoreCase));
+            return sharedMatch || configMatch;
+        }
+
+        public static List<string> GetDrawingsForConfig(string modelFilePath, string configName)
+        {
+            if (string.IsNullOrEmpty(modelFilePath)) return new List<string>();
+            // One DB load (BuildDrawingIndex), then the shared in-memory matcher
+            // — same single-load cost callers had before.
+            return BuildDrawingIndex().DrawingsForConfig(modelFilePath, configName);
         }
 
         // Returns all configuration entries for a tracked file path.
