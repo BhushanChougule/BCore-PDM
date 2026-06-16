@@ -1006,6 +1006,10 @@ GetNextRevision() in VaultManager.cs handles this
 
 10\. Licensing / super-access / installer — DEFERRED until development is declared done. Full design pinned in LICENSING.md (offline signed license file with expiry + owner password hash, Owner role above Master via license not vault.xml, graduated expiry: governance features off but files still open/save, ConfuserEx obfuscation, single Inno Setup installer, commercialization addendum incl. the IP-ownership gate). During development only two habits apply: keep conventions centralized when touched anyway, and build nothing that fights that design.
 
+\### Future ideas (not scheduled)
+
+\- Per-config File History (task pane) — TODAY the Active File card's File History is FILE-LEVEL: a multi-config part is one .sldprt = one FilePath = one shared timeline, so switching the active config shows the same history (RevisionHistory entries match by FilePath/filename, never by config; GetActiveFileInfo preserves this exactly). This is consistent with the file-level status/lock model (one config can't be Released while another is WIP — they freeze together). Showing history PER CONFIG would require a data-model change: RevisionHistory <Entry> nodes don't record WHICH config an event applied to, so there's nothing to filter on, and it sits awkwardly against the all-or-nothing release model. Noted from PR-J Test 2; revisit only if the file-level model itself is ever reconsidered.
+
 
 
 \## Development Workflow
