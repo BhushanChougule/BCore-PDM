@@ -27,6 +27,16 @@ namespace PDMLite
         private DataGridView _grid;
         private Label _countLabel;
         private Button _btnExport;
+        private Button _btnExpandAll, _btnCollapseAll;
+
+        // Tree state for the SELECTED baseline. _full = its components in stored
+        // depth-first order; _hasKids[i] = component i is a sub-assembly with
+        // children; _collapsed = component indices whose subtree is hidden;
+        // _rowToComp maps a grid row back to its _full index (for click toggling).
+        private List<BaselineComponent> _full = new List<BaselineComponent>();
+        private bool[] _hasKids = new bool[0];
+        private readonly HashSet<int> _collapsed = new HashSet<int>();
+        private readonly List<int> _rowToComp = new List<int>();
 
         private float _scale = 1f;
         private int S(float v) => (int)(v * _scale);
@@ -91,8 +101,8 @@ namespace PDMLite
                 TextAlign = ContentAlignment.MiddleCenter
             });
 
-            // ── Top panel: assembly name + release picker + meta ──────
-            var top = new Panel { Dock = DockStyle.Top, Height = S(86), BackColor = cBg };
+            // ── Top panel: assembly name + release picker + meta + tree buttons ──
+            var top = new Panel { Dock = DockStyle.Top, Height = S(116), BackColor = cBg };
 
             var nameLbl = new Label
             {
@@ -144,6 +154,32 @@ namespace PDMLite
                 AutoEllipsis = true
             };
             top.Controls.Add(_metaLabel);
+
+            // Tree controls: collapse to top-level-only, or expand everything.
+            // (Per sub-assembly: click its ▸/▾ row to toggle.)
+            _btnExpandAll = MakeButton("Expand All", cBrand, Color.White);
+            _btnExpandAll.Location = new Point(S(14), S(84));
+            _btnExpandAll.Click += (s, e) => { _collapsed.Clear(); RenderRows(); };
+            top.Controls.Add(_btnExpandAll);
+
+            _btnCollapseAll = MakeButton("Collapse All", Color.FromArgb(220, 220, 220), cTextDark);
+            _btnCollapseAll.Location = new Point(_btnExpandAll.Right + S(8), S(84));
+            _btnCollapseAll.Click += (s, e) =>
+            {
+                _collapsed.Clear();
+                for (int i = 0; i < _hasKids.Length; i++)
+                    if (_hasKids[i]) _collapsed.Add(i);
+                RenderRows();
+            };
+            top.Controls.Add(_btnCollapseAll);
+
+            top.Controls.Add(new Label
+            {
+                Text = "Tip: click a ▸/▾ sub-assembly row to expand or collapse it.",
+                Font = _fMeta, ForeColor = Color.FromArgb(140, 146, 156),
+                Location = new Point(_btnCollapseAll.Right + S(12), S(89)),
+                AutoSize = false, Width = S(300), Height = S(16), AutoEllipsis = true
+            });
 
             // ── Bottom button row ─────────────────────────────────────
             var bottom = new Panel { Dock = DockStyle.Bottom, Height = S(44), BackColor = cBg };
@@ -209,6 +245,7 @@ namespace PDMLite
             AddCol("Status", 0.18f);
             AddCol("Qty", 0.10f, DataGridViewContentAlignment.MiddleRight);
             _grid.CellFormatting += Grid_CellFormatting;
+            _grid.CellClick += Grid_CellClick; // toggle a sub-assembly's subtree
 
             // Docking resolves by z-order: the Fill control must be added FIRST
             // (it is resolved LAST, so it takes the leftover middle), then the
@@ -267,11 +304,26 @@ namespace PDMLite
         private void LoadSelected()
         {
             if (_grid == null) return;
-            _grid.Rows.Clear();
 
             var b = Selected();
+            _full = b?.Components ?? new List<BaselineComponent>();
+            _collapsed.Clear(); // start fully expanded on every release switch
+
+            // A component is an expandable sub-assembly if the NEXT row is deeper
+            // (depth-first order guarantees a node's descendants follow it).
+            _hasKids = new bool[_full.Count];
+            for (int i = 0; i < _full.Count; i++)
+                _hasKids[i] = i + 1 < _full.Count &&
+                              _full[i + 1].Level > _full[i].Level;
+
+            bool enable = b != null;
+            if (_btnExpandAll != null) _btnExpandAll.Enabled = enable;
+            if (_btnCollapseAll != null) _btnCollapseAll.Enabled = enable;
+
             if (b == null)
             {
+                _grid.Rows.Clear();
+                _rowToComp.Clear();
                 _metaLabel.Text = _baselines.Count == 0
                     ? "No baselines captured yet — this assembly has not been " +
                       "released since the baseline feature shipped."
@@ -286,27 +338,61 @@ namespace PDMLite
                 "   ·   REV " + b.Revision +
                 "   ·   Released by " + b.ReleasedBy + " on " + FmtDate(b.ReleasedDate);
 
-            // INDENTED tree: keep the stored depth-first order (do NOT re-sort)
-            // and indent the Component name by its Level so sub-assemblies and
-            // the parts inside them are visible. Old (pre-indent) baselines have
-            // every Level = 0, so they render as the original flat list.
-            foreach (var c in b.Components)
-            {
-                string baseName = Path.GetFileNameWithoutExtension(c.Name ?? "");
-                bool isSub = (Path.GetExtension(c.Name ?? "") ?? "")
-                    .Equals(".sldasm", StringComparison.OrdinalIgnoreCase);
-                // Two spaces per level, plus a small marker so a sub-assembly
-                // reads as a heading for the indented rows beneath it.
-                string indent = new string(' ', Math.Max(c.Level, 0) * 4);
-                string label = indent + (isSub ? "▸ " : "") + baseName;
-                int row = _grid.Rows.Add(label, c.PartNo, c.Revision, c.Status, c.Qty);
-                if (isSub) _grid.Rows[row].Tag = "sub"; // bolded in CellFormatting
-            }
+            RenderRows();
 
-            int total = b.Components.Sum(c => Math.Max(c.Qty, 0));
-            _countLabel.Text = b.Components.Count + " line" +
-                (b.Components.Count == 1 ? "" : "s") + "  ·  " + total + " total qty";
-            if (_btnExport != null) _btnExport.Enabled = b.Components.Count > 0;
+            int total = _full.Sum(c => Math.Max(c.Qty, 0));
+            _countLabel.Text = _full.Count + " line" +
+                (_full.Count == 1 ? "" : "s") + "  ·  " + total + " total qty";
+            if (_btnExport != null) _btnExport.Enabled = _full.Count > 0;
+        }
+
+        // Rebuild the visible grid rows from _full, honouring _collapsed: a
+        // collapsed sub-assembly hides every deeper row until the tree returns
+        // to its level or shallower (works for nested collapses). The arrow
+        // shows ▾ (expanded) / ▸ (collapsed) on sub-assemblies; leaves align
+        // under the name. _rowToComp maps each grid row back to its _full index.
+        private void RenderRows()
+        {
+            if (_grid == null) return;
+            _grid.Rows.Clear();
+            _rowToComp.Clear();
+
+            int hideDeeperThan = -1; // -1 = not hiding; else hide rows with Level >
+            for (int i = 0; i < _full.Count; i++)
+            {
+                var c = _full[i];
+                int level = Math.Max(c.Level, 0);
+
+                if (hideDeeperThan >= 0 && level > hideDeeperThan)
+                    continue;                 // descendant of a collapsed node
+                hideDeeperThan = -1;          // back to a visible level
+
+                bool kids = i < _hasKids.Length && _hasKids[i];
+                bool collapsed = kids && _collapsed.Contains(i);
+                string arrow = kids ? (collapsed ? "▸ " : "▾ ") : "   ";
+                string label = new string(' ', level * 4) + arrow +
+                    Path.GetFileNameWithoutExtension(c.Name ?? "");
+
+                int row = _grid.Rows.Add(label, c.PartNo, c.Revision, c.Status, c.Qty);
+                if (kids) _grid.Rows[row].Tag = "sub"; // bolded in CellFormatting
+                _rowToComp.Add(i);
+
+                if (collapsed) hideDeeperThan = level; // hide its subtree
+            }
+        }
+
+        // Click a sub-assembly's Component cell (the ▸/▾ row) to expand/collapse it.
+        private void Grid_CellClick(object sender, DataGridViewCellEventArgs e)
+        {
+            if (e.RowIndex < 0 || e.ColumnIndex != 0) return; // Component column only
+            if (e.RowIndex >= _rowToComp.Count) return;
+            int comp = _rowToComp[e.RowIndex];
+            if (comp < 0 || comp >= _hasKids.Length || !_hasKids[comp]) return;
+
+            if (!_collapsed.Remove(comp)) _collapsed.Add(comp); // toggle
+            // Defer the rebuild so we don't mutate Rows inside the grid's own
+            // click processing (avoids re-entrancy on the cell that was clicked).
+            BeginInvoke((Action)RenderRows);
         }
 
         // Colour the Status cell; bold the Component cell on sub-assembly rows so
