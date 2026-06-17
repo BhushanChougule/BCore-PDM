@@ -27,6 +27,7 @@ namespace PDMLite
         private DataGridView _grid;
         private Label _countLabel;
         private Button _btnExport;
+        private Button _btnExportAll;
         private Button _btnExpandAll, _btnCollapseAll;
 
         // Tree state for the SELECTED baseline. _full = its components in stored
@@ -83,8 +84,8 @@ namespace PDMLite
             this.MinimizeBox = false;
             this.BackColor = cBg;
             this.KeyPreview = true;
-            this.ClientSize = new Size(S(560), S(560));
-            this.MinimumSize = new Size(S(420), S(360));
+            this.ClientSize = new Size(S(600), S(560));
+            this.MinimumSize = new Size(S(540), S(360));
 
             // ── Header bar ────────────────────────────────────────────
             var headerBar = new Panel
@@ -176,10 +177,10 @@ namespace PDMLite
 
             top.Controls.Add(new Label
             {
-                Text = "Tip: click a ▸/▾ sub-assembly row to expand or collapse it.",
+                Text = "Tip: Click a ▸/▾ sub-assembly row to expand or collapse it.",
                 Font = _fMeta, ForeColor = Color.FromArgb(140, 146, 156),
                 Location = new Point(_btnCollapseAll.Right + S(12), S(89)),
-                AutoSize = false, Width = S(300), Height = S(16), AutoEllipsis = true
+                AutoSize = true, MaximumSize = new Size(S(360), 0)
             });
 
             // ── Bottom button row ─────────────────────────────────────
@@ -201,16 +202,16 @@ namespace PDMLite
             _btnExport = MakeButton("Export CSV", cBrand, Color.White);
             _btnExport.Click += (s, e) => ExportCsv();
 
-            // Anchor both to the bottom-right; lay out on resize.
+            // All revisions → one Excel file, a worksheet per release.
+            _btnExportAll = MakeButton("Export All Revs", cBrandDark, Color.White);
+            _btnExportAll.Width = S(124);
+            _btnExportAll.Click += (s, e) => ExportAllXlsx();
+
+            // Anchor to the bottom-right; lay out on resize (Close | CSV | All).
             bottom.Controls.Add(_btnExport);
+            bottom.Controls.Add(_btnExportAll);
             bottom.Controls.Add(btnClose);
-            bottom.Resize += (s, e) =>
-            {
-                btnClose.Location = new Point(
-                    bottom.Width - btnClose.Width - S(14), S(9));
-                _btnExport.Location = new Point(
-                    btnClose.Left - _btnExport.Width - S(8), S(9));
-            };
+            bottom.Resize += (s, e) => LayoutBottomButtons(bottom, btnClose);
 
             // ── Component grid (fills the middle) ─────────────────────
             _grid = new DataGridView
@@ -264,10 +265,7 @@ namespace PDMLite
 
             // Initial button layout (the Resize handler covers later resizes;
             // 'bottom' now has its docked width).
-            btnClose.Location = new Point(
-                bottom.Width - btnClose.Width - S(14), S(9));
-            _btnExport.Location = new Point(
-                btnClose.Left - _btnExport.Width - S(8), S(9));
+            LayoutBottomButtons(bottom, btnClose);
 
             this.FormClosed += (s, e) =>
             {
@@ -325,17 +323,7 @@ namespace PDMLite
             // Outline (BOM item) numbers: 1, 2 … at the top; N.1, N.2 … under N;
             // N.M.1 … one level deeper. Intrinsic to the tree position, so it's
             // the SAME whether the row is shown expanded or collapsed.
-            _outline = new string[_full.Count];
-            var counters = new List<int>();
-            for (int i = 0; i < _full.Count; i++)
-            {
-                int level = Math.Max(_full[i].Level, 0);
-                while (counters.Count < level + 1) counters.Add(0);
-                if (counters.Count > level + 1)
-                    counters.RemoveRange(level + 1, counters.Count - (level + 1));
-                counters[level]++;
-                _outline[i] = string.Join(".", counters);
-            }
+            _outline = ComputeOutline(_full);
 
             bool enable = b != null;
             if (_btnExpandAll != null) _btnExpandAll.Enabled = enable;
@@ -441,6 +429,24 @@ namespace PDMLite
                 e.CellStyle.ForeColor = Color.FromArgb(140, 140, 140);
         }
 
+        // BOM outline numbers for a depth-first component list (1, 1.1, 1.3.1 …).
+        // Shared by the on-screen tree and the Excel export.
+        private static string[] ComputeOutline(List<BaselineComponent> comps)
+        {
+            var outline = new string[comps.Count];
+            var counters = new List<int>();
+            for (int i = 0; i < comps.Count; i++)
+            {
+                int level = Math.Max(comps[i].Level, 0);
+                while (counters.Count < level + 1) counters.Add(0);
+                if (counters.Count > level + 1)
+                    counters.RemoveRange(level + 1, counters.Count - (level + 1));
+                counters[level]++;
+                outline[i] = string.Join(".", counters);
+            }
+            return outline;
+        }
+
         // Display a stored "yyyy-MM-dd HH:mm:ss" timestamp as MM/dd/yyyy HH:mm:ss
         // (house convention). Storage stays ISO so it sorts chronologically.
         private static string FmtDate(string stored)
@@ -523,6 +529,79 @@ namespace PDMLite
             var invalid = Path.GetInvalidFileNameChars();
             return new string(name.Select(
                 c => Array.IndexOf(invalid, c) >= 0 ? '_' : c).ToArray());
+        }
+
+        // Right-align Close, then Export CSV, then Export All Revs (right→left).
+        private void LayoutBottomButtons(Panel bottom, Button btnClose)
+        {
+            btnClose.Location = new Point(
+                bottom.Width - btnClose.Width - S(14), S(9));
+            _btnExport.Location = new Point(
+                btnClose.Left - _btnExport.Width - S(8), S(9));
+            _btnExportAll.Location = new Point(
+                _btnExport.Left - _btnExportAll.Width - S(8), S(9));
+        }
+
+        // Export EVERY captured baseline to one .xlsx — a worksheet per release
+        // (CSV can't hold multiple sheets). Each sheet has a small meta block +
+        // the full indented BOM (all levels, regardless of on-screen collapse).
+        private void ExportAllXlsx()
+        {
+            if (_baselines == null || _baselines.Count == 0) return;
+            using (var sfd = new SaveFileDialog
+            {
+                Filter = "Excel workbook (*.xlsx)|*.xlsx|All files (*.*)|*.*",
+                FileName = SafeName(Path.GetFileNameWithoutExtension(_asmName ?? "baseline"))
+                    + "_ALL-BASELINES.xlsx"
+            })
+            {
+                if (sfd.ShowDialog(this) != DialogResult.OK) return;
+                try
+                {
+                    var sheets = new List<XlsxWriter.Sheet>();
+                    foreach (var b in _baselines)
+                    {
+                        var sh = new XlsxWriter.Sheet("REV " + b.Revision +
+                            (string.IsNullOrEmpty(b.Config) ? "" : " " + b.Config));
+                        sh.Add("Assembly", _asmName ?? "");
+                        sh.Add("Part No", b.PartNo);
+                        sh.Add("Revision", b.Revision);
+                        sh.Add("Config", b.Config);
+                        sh.Add("Released By", b.ReleasedBy);
+                        sh.Add("Released", FmtDate(b.ReleasedDate));
+                        sh.AddBlank();
+                        sh.Add("No.", "Level", "Component", "Part No",
+                            "Revision", "Status", "Qty");
+
+                        var outline = ComputeOutline(b.Components);
+                        for (int i = 0; i < b.Components.Count; i++)
+                        {
+                            var c = b.Components[i];
+                            sh.Add(
+                                i < outline.Length ? outline[i] : "",
+                                c.Level.ToString(),
+                                new string(' ', Math.Max(c.Level, 0) * 2) +
+                                    Path.GetFileNameWithoutExtension(c.Name ?? ""),
+                                c.PartNo ?? "", c.Revision ?? "", c.Status ?? "",
+                                c.Qty.ToString());
+                        }
+                        sheets.Add(sh);
+                    }
+
+                    XlsxWriter.Write(sfd.FileName, sheets);
+                    MessageBox.Show(
+                        sheets.Count + " release" + (sheets.Count == 1 ? "" : "s") +
+                        " exported to:\n" + sfd.FileName,
+                        "BCore PDM — Baselines Exported",
+                        MessageBoxButtons.OK, MessageBoxIcon.Information);
+                }
+                catch (Exception ex)
+                {
+                    MessageBox.Show("Could not export the workbook:\n" + ex.Message,
+                        "BCore PDM — Export Failed",
+                        MessageBoxButtons.OK, MessageBoxIcon.Error);
+                }
+            }
         }
 
         private Button MakeButton(string text, Color back, Color fore)
