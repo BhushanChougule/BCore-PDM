@@ -316,7 +316,9 @@ namespace PDMLite
             };
             this.KeyDown += (s, e) =>
             {
-                if (e.KeyCode == Keys.Escape) this.Close();
+                // Don't close the form when Escape is just dismissing the open
+                // Release dropdown.
+                if (e.KeyCode == Keys.Escape && !_revPicker.DroppedDown) this.Close();
             };
         }
 
@@ -516,7 +518,10 @@ namespace PDMLite
             if (!_collapsed.Remove(comp)) _collapsed.Add(comp); // toggle
             // Defer the rebuild so we don't mutate Rows inside the grid's own
             // click processing (avoids re-entrancy on the cell that was clicked).
-            BeginInvoke((Action)RenderRows);
+            // Guard the handle: a double-click toggles here then Close()s the
+            // form, so a queued rebuild could otherwise hit a destroyed grid
+            // (same IsHandleCreated guard the dashboard/audit pagers use).
+            if (IsHandleCreated) BeginInvoke((Action)RenderRows);
         }
 
         // Double-click any row → open that component (current copy). Deferred:

@@ -2734,9 +2734,18 @@ namespace PDMLite
                          || string.IsNullOrEmpty(cStatus) || string.IsNullOrEmpty(cDesc))
                         && files != null)
                     {
+                        // Match by FilePath first; fall back to FileName (the
+                        // vault enforces vault-wide unique filenames, so this is
+                        // unambiguous) so a path-normalisation difference between
+                        // the component path and the stored record path can't
+                        // leave a tracked child stamped "Untracked" with blanks.
+                        string compName = System.IO.Path.GetFileName(comp.Path ?? "");
                         var fr = files.Elements("File").FirstOrDefault(f =>
-                            string.Equals((string)f.Element("FilePath"), comp.Path,
-                                StringComparison.OrdinalIgnoreCase));
+                                     string.Equals((string)f.Element("FilePath"), comp.Path,
+                                         StringComparison.OrdinalIgnoreCase))
+                              ?? files.Elements("File").FirstOrDefault(f =>
+                                     string.Equals((string)f.Element("FileName"), compName,
+                                         StringComparison.OrdinalIgnoreCase));
                         if (fr != null)
                         {
                             if (string.IsNullOrEmpty(cPartNo))

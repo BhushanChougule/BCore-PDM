@@ -145,8 +145,23 @@ namespace PDMLite
         private static string Esc(string s)
         {
             if (string.IsNullOrEmpty(s)) return "";
-            return s.Replace("&", "&amp;").Replace("<", "&lt;")
-                    .Replace(">", "&gt;").Replace("\"", "&quot;");
+            var sb = new StringBuilder(s.Length);
+            foreach (char c in s)
+            {
+                // XML 1.0 forbids C0 control chars except TAB/LF/CR — a stray one
+                // (from a copy-pasted/imported property value) would make Excel
+                // report the workbook as corrupt. Drop them.
+                if (c < 0x20 && c != '\t' && c != '\n' && c != '\r') continue;
+                switch (c)
+                {
+                    case '&': sb.Append("&amp;"); break;
+                    case '<': sb.Append("&lt;"); break;
+                    case '>': sb.Append("&gt;"); break;
+                    case '"': sb.Append("&quot;"); break;
+                    default:  sb.Append(c); break;
+                }
+            }
+            return sb.ToString();
         }
 
         private static string SanitizeSheetName(string name)
