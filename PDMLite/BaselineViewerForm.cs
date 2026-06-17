@@ -110,8 +110,8 @@ namespace PDMLite
                 TextAlign = ContentAlignment.MiddleCenter
             });
 
-            // ── Top panel: assembly name + release picker + meta + tree buttons ──
-            var top = new Panel { Dock = DockStyle.Top, Height = S(116), BackColor = cBg };
+            // ── Top panel (centered): name · release picker · meta · buttons · tip ──
+            var top = new Panel { Dock = DockStyle.Top, Height = S(134), BackColor = cBg };
 
             var nameLbl = new Label
             {
@@ -119,28 +119,26 @@ namespace PDMLite
                     ? Path.GetFileName(_asmPath ?? "") : _asmName,
                 Font = _fSub,
                 ForeColor = cTextDark,
-                Location = new Point(S(14), S(8)),
                 AutoSize = false,
-                Width = S(520),
                 Height = S(20),
+                TextAlign = ContentAlignment.MiddleCenter,
                 AutoEllipsis = true
             };
             top.Controls.Add(nameLbl);
 
-            top.Controls.Add(new Label
+            var lblRelease = new Label
             {
                 Text = "Release:",
                 Font = _fLabel,
                 ForeColor = cTextDark,
-                Location = new Point(S(14), S(34)),
                 AutoSize = true
-            });
+            };
+            top.Controls.Add(lblRelease);
 
             _revPicker = new ComboBox
             {
                 Font = _fLabel,
                 DropDownStyle = ComboBoxStyle.DropDownList,
-                Location = new Point(S(70), S(31)),
                 Width = S(380),                 // wide enough for "REV x (cfg) — date"
                 DropDownWidth = S(420)          // so the open list never clips
             };
@@ -156,10 +154,9 @@ namespace PDMLite
             {
                 Font = _fMeta,
                 ForeColor = Color.FromArgb(110, 116, 126),
-                Location = new Point(S(14), S(58)),
                 AutoSize = false,
-                Width = S(520),
                 Height = S(18),
+                TextAlign = ContentAlignment.MiddleCenter,
                 AutoEllipsis = true
             };
             top.Controls.Add(_metaLabel);
@@ -168,12 +165,10 @@ namespace PDMLite
             // flatten to a rolled-up parts list. (Per sub-assembly: click its
             // ▸/▾ row to toggle.)
             _btnExpandAll = MakeButton("Expand All", cBrand, Color.White);
-            _btnExpandAll.Location = new Point(S(14), S(84));
             _btnExpandAll.Click += (s, e) => { _collapsed.Clear(); RenderRows(); };
             top.Controls.Add(_btnExpandAll);
 
             _btnCollapseAll = MakeButton("Collapse All", Color.FromArgb(220, 220, 220), cTextDark);
-            _btnCollapseAll.Location = new Point(_btnExpandAll.Right + S(8), S(84));
             _btnCollapseAll.Click += (s, e) =>
             {
                 _collapsed.Clear();
@@ -186,17 +181,41 @@ namespace PDMLite
             // Flatten = rolled-up parts list (each leaf part once, EXTENDED total
             // qty across all sub-assembly levels). Toggle back to the tree.
             _btnFlatten = MakeButton("Flatten", cBrandDark, Color.White);
-            _btnFlatten.Location = new Point(_btnCollapseAll.Right + S(8), S(84));
             _btnFlatten.Click += (s, e) => SetFlat(!_flat);
             top.Controls.Add(_btnFlatten);
 
-            top.Controls.Add(new Label
+            var tipLbl = new Label
             {
                 Text = "Tip: Click a ▸/▾ row to expand/collapse; double-click a row to open it.",
                 Font = _fMeta, ForeColor = Color.FromArgb(140, 146, 156),
-                Location = new Point(_btnFlatten.Right + S(12), S(86)),
-                AutoSize = true, MaximumSize = new Size(S(260), 0)
-            });
+                AutoSize = false, Height = S(16),
+                TextAlign = ContentAlignment.MiddleCenter, AutoEllipsis = true
+            };
+            top.Controls.Add(tipLbl);
+
+            // Centre every row horizontally; re-centre when the form is resized.
+            Action layoutTop = () =>
+            {
+                int W = top.ClientSize.Width, m = S(8);
+                int full = Math.Max(0, W - 2 * m);
+                nameLbl.Bounds   = new Rectangle(m, S(8),  full, S(20));
+                _metaLabel.Bounds = new Rectangle(m, S(58), full, S(18));
+                tipLbl.Bounds    = new Rectangle(m, S(112), full, S(16));
+
+                int relGroup = lblRelease.Width + S(6) + _revPicker.Width;
+                int relX = Math.Max(m, (W - relGroup) / 2);
+                lblRelease.Location = new Point(relX, S(34));
+                _revPicker.Location = new Point(relX + lblRelease.Width + S(6), S(31));
+
+                int bGroup = _btnExpandAll.Width + S(8) + _btnCollapseAll.Width +
+                    S(8) + _btnFlatten.Width;
+                int bX = Math.Max(m, (W - bGroup) / 2);
+                _btnExpandAll.Location  = new Point(bX, S(84));
+                _btnCollapseAll.Location = new Point(_btnExpandAll.Right + S(8), S(84));
+                _btnFlatten.Location    = new Point(_btnCollapseAll.Right + S(8), S(84));
+            };
+            top.Resize += (s, e) => layoutTop();
+            layoutTop();
 
             // ── Bottom button row ─────────────────────────────────────
             var bottom = new Panel { Dock = DockStyle.Bottom, Height = S(44), BackColor = cBg };
@@ -421,7 +440,7 @@ namespace PDMLite
 
                 if (collapsed) hideDeeperThan = level; // hide its subtree
             }
-            UpdateCount(_full.Count, "line", _full.Sum(c => Math.Max(c.Qty, 0)));
+            UpdateCount(_full.Count, "Lines", _full.Sum(c => Math.Max(c.Qty, 0)));
         }
 
         // Flattened parts list: every LEAF part once (grouped by Part No / file),
@@ -470,17 +489,19 @@ namespace PDMLite
                     qty.ToString(), FmtWeight(c.Weight));
                 _rowToComp.Add(i);
             }
-            UpdateCount(order.Count, "part", sumQty);
+            UpdateCount(order.Count, "Parts", sumQty);
         }
 
-        // Footer: "{n} {noun}s · {qty} total qty · Mass {m} lb" (mass only when known).
+        // Footer: "Lines: 10  ·  Total Qty: 12  ·  Weight: 8.477 lbs"
+        // (the label noun is "Lines" in the tree, "Parts" when flattened;
+        //  weight shown only when known).
         private void UpdateCount(int n, string noun, long qty)
         {
             double mass = TotalMassLb(_full, _extQty);
-            _countLabel.Text = n + " " + noun + (n == 1 ? "" : "s") +
-                "  ·  " + qty + " total qty" +
-                (mass > 0 ? "  ·  Mass " + mass.ToString("0.###",
-                    CultureInfo.InvariantCulture) + " lb" : "");
+            _countLabel.Text = noun + ": " + n +
+                "   ·   Total Qty: " + qty +
+                (mass > 0 ? "   ·   Weight: " + mass.ToString("0.###",
+                    CultureInfo.InvariantCulture) + " lbs" : "");
         }
 
         // Click a sub-assembly's No./name to expand/collapse it (tree mode only).
