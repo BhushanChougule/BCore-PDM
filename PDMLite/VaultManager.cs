@@ -3903,11 +3903,19 @@ namespace PDMLite
             Font fDlgLabel = new Font("Segoe UI", 4f * scale);
             Font fDlgBtn = new Font("Segoe UI", 4.5f * scale, FontStyle.Bold);
 
+            // Wrap the prompt to the inner width so a long prompt shows on
+            // several lines instead of clipping; grow the dialog by exactly the
+            // overflow so a short prompt (the other callers) is unchanged.
+            int promptH = TextRenderer.MeasureText(prompt, fDlgLabel,
+                new Size(innerW, int.MaxValue), TextFormatFlags.WordBreak).Height
+                + SC(4);
+            int extra = Math.Max(0, promptH - SC(18));
+
             Form noteForm = new Form
             {
                 Text = "BCore PDM — " + title,
                 Width = dlgW,
-                Height = SC(185),
+                Height = SC(185) + extra,
                 StartPosition = FormStartPosition.CenterScreen,
                 FormBorderStyle = FormBorderStyle.FixedDialog,
                 MaximizeBox = false, MinimizeBox = false,
@@ -3937,13 +3945,13 @@ namespace PDMLite
                 Font = fDlgLabel,
                 ForeColor = Color.FromArgb(60, 60, 60),
                 Location = new Point(padX, SC(34)),
-                AutoSize = false, Width = innerW, Height = SC(18)
+                AutoSize = false, Width = innerW, Height = promptH
             });
 
             TextBox noteTb = new TextBox
             {
                 Font = fDlgLabel,
-                Location = new Point(padX, SC(54)),
+                Location = new Point(padX, SC(54) + extra),
                 Width = innerW, Height = SC(45),
                 Multiline = true,
                 BorderStyle = BorderStyle.FixedSingle,
@@ -3955,7 +3963,7 @@ namespace PDMLite
             {
                 Text = "Submit",
                 Font = fDlgBtn,
-                Location = new Point(padX, SC(108)),
+                Location = new Point(padX, SC(108) + extra),
                 Width = SC(128), Height = SC(28),
                 BackColor = Color.FromArgb(44, 85, 128),
                 ForeColor = Color.White,
@@ -3974,7 +3982,7 @@ namespace PDMLite
             {
                 Text = "Cancel",
                 Font = fDlgBtn,
-                Location = new Point(SC(148), SC(108)),
+                Location = new Point(SC(148), SC(108) + extra),
                 Width = SC(80), Height = SC(28),
                 BackColor = Color.FromArgb(220, 220, 220),
                 ForeColor = Color.FromArgb(60, 60, 60),
