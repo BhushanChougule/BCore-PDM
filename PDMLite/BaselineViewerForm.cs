@@ -35,6 +35,7 @@ namespace PDMLite
         // _rowToComp maps a grid row back to its _full index (for click toggling).
         private List<BaselineComponent> _full = new List<BaselineComponent>();
         private bool[] _hasKids = new bool[0];
+        private string[] _outline = new string[0]; // outline number per _full row (1, 1.1, 1.3.1)
         private readonly HashSet<int> _collapsed = new HashSet<int>();
         private readonly List<int> _rowToComp = new List<int>();
 
@@ -234,16 +235,21 @@ namespace PDMLite
             _grid.ColumnHeadersDefaultCellStyle.BackColor = cBrandDark;
             _grid.ColumnHeadersDefaultCellStyle.ForeColor = Color.White;
             _grid.ColumnHeadersDefaultCellStyle.Font = _fGridHead;
+            _grid.ColumnHeadersDefaultCellStyle.Alignment =
+                DataGridViewContentAlignment.MiddleCenter; // all titles centered
             _grid.ColumnHeadersHeight = S(26);
             _grid.AlternatingRowsDefaultCellStyle.BackColor =
                 Color.FromArgb(245, 248, 251);
             _grid.RowTemplate.Height = S(22);
 
-            AddCol("Component", 0.34f);
-            AddCol("Part No", 0.22f);
-            AddCol("Rev", 0.10f);
-            AddCol("Status", 0.18f);
-            AddCol("Qty", 0.10f, DataGridViewContentAlignment.MiddleRight);
+            // No. column FIRST = the tree column (indent + arrow + outline number
+            // like 1 / 1.1 / 1.3.1). Rev + Qty VALUES centered; the rest left.
+            AddCol("No.", 0.14f);
+            AddCol("Component", 0.28f);
+            AddCol("Part No", 0.20f);
+            AddCol("Rev", 0.10f, DataGridViewContentAlignment.MiddleCenter);
+            AddCol("Status", 0.16f);
+            AddCol("Qty", 0.10f, DataGridViewContentAlignment.MiddleCenter);
             _grid.CellFormatting += Grid_CellFormatting;
             _grid.CellClick += Grid_CellClick; // toggle a sub-assembly's subtree
 
@@ -316,6 +322,21 @@ namespace PDMLite
                 _hasKids[i] = i + 1 < _full.Count &&
                               _full[i + 1].Level > _full[i].Level;
 
+            // Outline (BOM item) numbers: 1, 2 … at the top; N.1, N.2 … under N;
+            // N.M.1 … one level deeper. Intrinsic to the tree position, so it's
+            // the SAME whether the row is shown expanded or collapsed.
+            _outline = new string[_full.Count];
+            var counters = new List<int>();
+            for (int i = 0; i < _full.Count; i++)
+            {
+                int level = Math.Max(_full[i].Level, 0);
+                while (counters.Count < level + 1) counters.Add(0);
+                if (counters.Count > level + 1)
+                    counters.RemoveRange(level + 1, counters.Count - (level + 1));
+                counters[level]++;
+                _outline[i] = string.Join(".", counters);
+            }
+
             bool enable = b != null;
             if (_btnExpandAll != null) _btnExpandAll.Enabled = enable;
             if (_btnCollapseAll != null) _btnCollapseAll.Enabled = enable;
@@ -370,10 +391,12 @@ namespace PDMLite
                 bool kids = i < _hasKids.Length && _hasKids[i];
                 bool collapsed = kids && _collapsed.Contains(i);
                 string arrow = kids ? (collapsed ? "▸ " : "▾ ") : "   ";
-                string label = new string(' ', level * 4) + arrow +
-                    Path.GetFileNameWithoutExtension(c.Name ?? "");
+                // No. column carries the tree: indent + arrow + outline number.
+                string no = new string(' ', level * 3) + arrow +
+                    (i < _outline.Length ? _outline[i] : "");
+                string name = Path.GetFileNameWithoutExtension(c.Name ?? "");
 
-                int row = _grid.Rows.Add(label, c.PartNo, c.Revision, c.Status, c.Qty);
+                int row = _grid.Rows.Add(no, name, c.PartNo, c.Revision, c.Status, c.Qty);
                 if (kids) _grid.Rows[row].Tag = "sub"; // bolded in CellFormatting
                 _rowToComp.Add(i);
 
@@ -381,10 +404,10 @@ namespace PDMLite
             }
         }
 
-        // Click a sub-assembly's Component cell (the ▸/▾ row) to expand/collapse it.
+        // Click a sub-assembly's No. (the ▸/▾ arrow) or name to expand/collapse it.
         private void Grid_CellClick(object sender, DataGridViewCellEventArgs e)
         {
-            if (e.RowIndex < 0 || e.ColumnIndex != 0) return; // Component column only
+            if (e.RowIndex < 0 || e.ColumnIndex > 1) return; // No. / Component only
             if (e.RowIndex >= _rowToComp.Count) return;
             int comp = _rowToComp[e.RowIndex];
             if (comp < 0 || comp >= _hasKids.Length || !_hasKids[comp]) return;
@@ -402,9 +425,9 @@ namespace PDMLite
             if (e.RowIndex < 0) return;
             string header = _grid.Columns[e.ColumnIndex].HeaderText;
 
-            if (header == "Component" &&
+            if ((header == "No." || header == "Component") &&
                 (_grid.Rows[e.RowIndex].Tag as string) == "sub")
-                e.CellStyle.Font = _fGridHead; // bold sub-assembly headings
+                e.CellStyle.Font = _fGridHead; // bold sub-assembly rows
 
             if (header != "Status") return;
             string s = (e.Value as string) ?? "";
@@ -451,17 +474,23 @@ namespace PDMLite
                         Csv(b.ReleasedBy), Csv(FmtDate(b.ReleasedDate))
                     }));
                     sb.AppendLine();
-                    // Level column + indented name preserve the tree in Excel.
-                    sb.AppendLine("Level,Component,PartNo,Revision,Status,Qty");
-                    foreach (var c in b.Components)
+                    // ALWAYS the FULL tree (ignores on-screen collapse). The No.
+                    // (outline) column + indented name preserve the structure in
+                    // Excel. _outline is parallel to b.Components (== _full).
+                    sb.AppendLine("No.,Level,Component,PartNo,Revision,Status,Qty");
+                    for (int i = 0; i < b.Components.Count; i++)
+                    {
+                        var c = b.Components[i];
                         sb.AppendLine(string.Join(",", new[]
                         {
+                            Csv(i < _outline.Length ? _outline[i] : ""),
                             Csv(c.Level.ToString()),
                             Csv(new string(' ', Math.Max(c.Level, 0) * 2) +
                                 Path.GetFileNameWithoutExtension(c.Name ?? "")),
                             Csv(c.PartNo), Csv(c.Revision), Csv(c.Status),
                             Csv(c.Qty.ToString())
                         }));
+                    }
                     File.WriteAllText(sfd.FileName, sb.ToString());
                     MessageBox.Show("Baseline exported to:\n" + sfd.FileName,
                         "BCore PDM — Baseline Exported",
