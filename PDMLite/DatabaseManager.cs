@@ -2753,7 +2753,8 @@ namespace PDMLite
                         new XAttribute("Revision", cRev),
                         new XAttribute("Status",
                             string.IsNullOrEmpty(cStatus) ? "Untracked" : cStatus),
-                        new XAttribute("Qty", comp.Qty)));
+                        new XAttribute("Qty", comp.Qty),
+                        new XAttribute("Level", comp.Level)));
                 }
 
                 baselines.Add(bEl);
@@ -2794,6 +2795,8 @@ namespace PDMLite
                     {
                         int qty;
                         int.TryParse((string)c.Attribute("Qty"), out qty);
+                        int level; // absent on pre-indent baselines → 0 (flat)
+                        int.TryParse((string)c.Attribute("Level"), out level);
                         ab.Components.Add(new BaselineComponent
                         {
                             Path     = (string)c.Attribute("Path")     ?? "",
@@ -2801,7 +2804,8 @@ namespace PDMLite
                             PartNo   = (string)c.Attribute("PartNo")   ?? "",
                             Revision = (string)c.Attribute("Revision") ?? "",
                             Status   = (string)c.Attribute("Status")   ?? "",
-                            Qty      = qty
+                            Qty      = qty,
+                            Level    = level
                         });
                     }
                     result.Add(ab);

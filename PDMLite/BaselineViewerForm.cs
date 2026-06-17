@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Drawing;
+using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Text;
@@ -121,12 +122,13 @@ namespace PDMLite
                 Font = _fLabel,
                 DropDownStyle = ComboBoxStyle.DropDownList,
                 Location = new Point(S(70), S(31)),
-                Width = S(220)
+                Width = S(380),                 // wide enough for "REV x (cfg) — date"
+                DropDownWidth = S(420)          // so the open list never clips
             };
             foreach (var b in _baselines)
                 _revPicker.Items.Add("REV " + b.Revision +
                     (string.IsNullOrEmpty(b.Config) ? "" : "   (" + b.Config + ")") +
-                    "   —   " + b.ReleasedDate);
+                    "   —   " + FmtDate(b.ReleasedDate));
             if (_revPicker.Items.Count > 0) _revPicker.SelectedIndex = 0;
             _revPicker.SelectedIndexChanged += (s, e) => LoadSelected();
             top.Controls.Add(_revPicker);
@@ -282,36 +284,43 @@ namespace PDMLite
             _metaLabel.Text =
                 "Part No " + (string.IsNullOrEmpty(b.PartNo) ? "(none)" : b.PartNo) +
                 "   ·   REV " + b.Revision +
-                "   ·   Released by " + b.ReleasedBy + " on " + b.ReleasedDate;
+                "   ·   Released by " + b.ReleasedBy + " on " + FmtDate(b.ReleasedDate);
 
-            // Stable order: parts then sub-assemblies, alphabetically.
-            var ordered = b.Components
-                .OrderBy(c => (Path.GetExtension(c.Name ?? "") ?? "")
-                    .Equals(".sldasm", StringComparison.OrdinalIgnoreCase) ? 1 : 0)
-                .ThenBy(c => c.Name, StringComparer.OrdinalIgnoreCase)
-                .ToList();
-
-            foreach (var c in ordered)
+            // INDENTED tree: keep the stored depth-first order (do NOT re-sort)
+            // and indent the Component name by its Level so sub-assemblies and
+            // the parts inside them are visible. Old (pre-indent) baselines have
+            // every Level = 0, so they render as the original flat list.
+            foreach (var c in b.Components)
             {
-                _grid.Rows.Add(
-                    Path.GetFileNameWithoutExtension(c.Name ?? ""),
-                    c.PartNo,
-                    c.Revision,
-                    c.Status,
-                    c.Qty);
+                string baseName = Path.GetFileNameWithoutExtension(c.Name ?? "");
+                bool isSub = (Path.GetExtension(c.Name ?? "") ?? "")
+                    .Equals(".sldasm", StringComparison.OrdinalIgnoreCase);
+                // Two spaces per level, plus a small marker so a sub-assembly
+                // reads as a heading for the indented rows beneath it.
+                string indent = new string(' ', Math.Max(c.Level, 0) * 4);
+                string label = indent + (isSub ? "▸ " : "") + baseName;
+                int row = _grid.Rows.Add(label, c.PartNo, c.Revision, c.Status, c.Qty);
+                if (isSub) _grid.Rows[row].Tag = "sub"; // bolded in CellFormatting
             }
 
-            int total = ordered.Sum(c => Math.Max(c.Qty, 0));
-            _countLabel.Text = ordered.Count + " unique component" +
-                (ordered.Count == 1 ? "" : "s") + "  ·  " + total + " total";
-            if (_btnExport != null) _btnExport.Enabled = ordered.Count > 0;
+            int total = b.Components.Sum(c => Math.Max(c.Qty, 0));
+            _countLabel.Text = b.Components.Count + " line" +
+                (b.Components.Count == 1 ? "" : "s") + "  ·  " + total + " total qty";
+            if (_btnExport != null) _btnExport.Enabled = b.Components.Count > 0;
         }
 
-        // Colour the Status cell to match the rest of the app.
+        // Colour the Status cell; bold the Component cell on sub-assembly rows so
+        // the structure reads as a tree.
         private void Grid_CellFormatting(object sender, DataGridViewCellFormattingEventArgs e)
         {
-            if (e.RowIndex < 0 || _grid.Columns[e.ColumnIndex].HeaderText != "Status")
-                return;
+            if (e.RowIndex < 0) return;
+            string header = _grid.Columns[e.ColumnIndex].HeaderText;
+
+            if (header == "Component" &&
+                (_grid.Rows[e.RowIndex].Tag as string) == "sub")
+                e.CellStyle.Font = _fGridHead; // bold sub-assembly headings
+
+            if (header != "Status") return;
             string s = (e.Value as string) ?? "";
             if (s.Equals("Released", StringComparison.OrdinalIgnoreCase))
                 e.CellStyle.ForeColor = cGreen;
@@ -321,6 +330,17 @@ namespace PDMLite
                 e.CellStyle.ForeColor = cOrange;
             else
                 e.CellStyle.ForeColor = Color.FromArgb(140, 140, 140);
+        }
+
+        // Display a stored "yyyy-MM-dd HH:mm:ss" timestamp as MM/dd/yyyy HH:mm:ss
+        // (house convention). Storage stays ISO so it sorts chronologically.
+        private static string FmtDate(string stored)
+        {
+            DateTime dt;
+            if (DateTime.TryParseExact(stored, "yyyy-MM-dd HH:mm:ss",
+                    CultureInfo.InvariantCulture, DateTimeStyles.None, out dt))
+                return dt.ToString("MM/dd/yyyy HH:mm:ss", CultureInfo.InvariantCulture);
+            return stored ?? "";
         }
 
         private void ExportCsv()
@@ -342,14 +362,17 @@ namespace PDMLite
                     sb.AppendLine(string.Join(",", new[]
                     {
                         Csv(_asmName), Csv(b.PartNo), Csv(b.Revision), Csv(b.Config),
-                        Csv(b.ReleasedBy), Csv(b.ReleasedDate)
+                        Csv(b.ReleasedBy), Csv(FmtDate(b.ReleasedDate))
                     }));
                     sb.AppendLine();
-                    sb.AppendLine("Component,PartNo,Revision,Status,Qty");
+                    // Level column + indented name preserve the tree in Excel.
+                    sb.AppendLine("Level,Component,PartNo,Revision,Status,Qty");
                     foreach (var c in b.Components)
                         sb.AppendLine(string.Join(",", new[]
                         {
-                            Csv(Path.GetFileNameWithoutExtension(c.Name ?? "")),
+                            Csv(c.Level.ToString()),
+                            Csv(new string(' ', Math.Max(c.Level, 0) * 2) +
+                                Path.GetFileNameWithoutExtension(c.Name ?? "")),
                             Csv(c.PartNo), Csv(c.Revision), Csv(c.Status),
                             Csv(c.Qty.ToString())
                         }));

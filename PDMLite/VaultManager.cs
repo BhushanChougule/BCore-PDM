@@ -1484,7 +1484,7 @@ namespace PDMLite
             {
                 string baselineCfg = (doc.GetActiveConfiguration()
                     as SolidWorks.Interop.sldworks.Configuration)?.Name ?? "";
-                BaselineManager.CaptureAssemblyBaseline(filePath, partNo, rev,
+                BaselineManager.CaptureAssemblyBaseline(doc, filePath, partNo, rev,
                     baselineCfg, user);
             }
 

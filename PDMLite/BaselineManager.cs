@@ -1,3 +1,5 @@
+using SolidWorks.Interop.sldworks;
+using SolidWorks.Interop.swconst;
 using System;
 using System.Collections.Generic;
 using System.IO;
@@ -23,7 +25,10 @@ namespace PDMLite
 
     // One child file inside a captured baseline. PartNo/Revision/Status are the
     // values the child carried AT RELEASE TIME (snapshotted, never live-read on
-    // viewing) so the baseline is a true historical record.
+    // viewing) so the baseline is a true historical record. The list is stored in
+    // DEPTH-FIRST tree order; Level is the indent depth (0 = a top-level child of
+    // the assembly, 1 = inside a sub-assembly, …) so the viewer can show the
+    // structure. Qty is the per-immediate-parent instance count.
     public class BaselineComponent
     {
         public string Path     { get; set; }
@@ -32,21 +37,123 @@ namespace PDMLite
         public string Revision { get; set; }
         public string Status   { get; set; }
         public int    Qty      { get; set; }
+        public int    Level    { get; set; }
     }
 
-    // Captures as-released baselines for assemblies. The expensive part — walking
-    // the assembly's dependency tree — is done here from disk (no UI open needed,
-    // same primitive GetUnreleasedComponentsByPath / GetParentAssemblies use);
-    // the DB read/write lives in DatabaseManager so it shares the cross-machine
-    // lock and atomic save with every other vault mutation.
+    // Captures as-released baselines for assemblies. At release the assembly is
+    // open and resolved, so the structure is read from the LIVE component tree
+    // (true hierarchy + per-parent quantities — same enumeration ExportBom uses,
+    // extended to recurse). If the live tree can't be read it falls back to a
+    // flat disk dependency walk. The DB read/write lives in DatabaseManager so it
+    // shares the cross-machine lock and atomic save with every other mutation.
     public static class BaselineManager
     {
-        // Walk the assembly's FULL dependency tree from disk and return each
-        // unique component file (part or sub-assembly) with an occurrence count.
-        // PartNo/Revision/Status are left blank here — DatabaseManager fills them
-        // from the live File records in ONE load when it persists the baseline
-        // (so we never re-acquire the vault lock per component). Toolbox/standard
-        // hardware is skipped (not vault-managed); drawings are not components.
+        private const int MaxDepth = 12; // runaway-recursion guard
+
+        // Walk the LIVE assembly component tree depth-first and return every
+        // component (part or sub-assembly) with its indent Level and per-parent
+        // Qty, in tree order. PartNo/Revision/Status are filled later from the
+        // File records (DatabaseManager.SaveAssemblyBaseline). Returns empty if
+        // the doc isn't a resolvable assembly (caller falls back to the disk walk).
+        public static List<BaselineComponent> ResolveTree(ModelDoc2 doc)
+        {
+            var output = new List<BaselineComponent>();
+            try
+            {
+                if (doc == null) return output;
+                var cfg = doc.GetActiveConfiguration() as Configuration;
+                Component2 root = cfg?.GetRootComponent3(true);
+                if (root == null) return output;
+                WalkChildren(root, 0, output);
+            }
+            catch { }
+            return output;
+        }
+
+        // Append the direct children of `parent` (grouped to one row per unique
+        // path+config with an instance Qty, first-seen order preserved), then
+        // recurse into each sub-assembly child. Mirrors ExportBom's filters
+        // (GetSuppression2 not IsSuppressed; honour ExcludeFromBOM; skip Toolbox).
+        private static void WalkChildren(Component2 parent, int level,
+            List<BaselineComponent> output)
+        {
+            if (level > MaxDepth) return;
+            object[] kids = null;
+            try { kids = parent.GetChildren() as object[]; }
+            catch { }
+            if (kids == null) return;
+
+            var order = new List<string>();
+            var group = new Dictionary<string, BaselineComponent>(
+                StringComparer.OrdinalIgnoreCase);
+            var firstComp = new Dictionary<string, Component2>(
+                StringComparer.OrdinalIgnoreCase);
+
+            foreach (object o in kids)
+            {
+                Component2 c = o as Component2;
+                if (c == null) continue;
+
+                // Suppressed components are not in the product — skip. Use
+                // GetSuppression2 (IsSuppressed false-positives on lightweight).
+                int sup = -1;
+                try { sup = c.GetSuppression2(); }
+                catch { }
+                if (sup == (int)swComponentSuppressionState_e.swComponentSuppressed)
+                    continue;
+
+                try { if (c.ExcludeFromBOM) continue; } catch { }
+
+                string path = "";
+                try { path = c.GetPathName(); } catch { }
+                if (string.IsNullOrEmpty(path)) continue;
+
+                // Skip Toolbox / standard hardware — not vault-managed.
+                if (path.IndexOf("\\Toolbox\\",
+                        StringComparison.OrdinalIgnoreCase) >= 0)
+                    continue;
+
+                string ext = Path.GetExtension(path).ToLower();
+                if (ext != ".sldprt" && ext != ".sldasm") continue;
+
+                string norm;
+                try { norm = Path.GetFullPath(path); }
+                catch { norm = path; }
+
+                string refCfg = "";
+                try { refCfg = c.ReferencedConfiguration ?? ""; } catch { }
+
+                string key = norm.ToLowerInvariant() + "|" +
+                    refCfg.ToLowerInvariant();
+
+                BaselineComponent bc;
+                if (group.TryGetValue(key, out bc)) { bc.Qty++; continue; }
+
+                bc = new BaselineComponent
+                {
+                    Path = norm,
+                    Name = Path.GetFileName(norm),
+                    Level = level,
+                    Qty = 1
+                };
+                group[key] = bc;
+                firstComp[key] = c;
+                order.Add(key);
+            }
+
+            foreach (string key in order)
+            {
+                output.Add(group[key]);
+                // Recurse into sub-assemblies (one representative instance).
+                if (Path.GetExtension(group[key].Name)
+                        .Equals(".sldasm", StringComparison.OrdinalIgnoreCase))
+                    WalkChildren(firstComp[key], level + 1, output);
+            }
+        }
+
+        // Flat fallback: walk the assembly's FULL dependency tree from disk and
+        // return each unique component once (Level 0, occurrence-count Qty). Used
+        // only when the live tree can't be read. Toolbox skipped; drawings excluded.
         public static List<BaselineComponent> ResolveComponents(string asmPath)
         {
             var result = new List<BaselineComponent>();
@@ -61,8 +168,6 @@ namespace PDMLite
                 try { asmNorm = Path.GetFullPath(asmPath); }
                 catch { asmNorm = asmPath; }
 
-                // traverse=true → the WHOLE multi-level tree (every descendant),
-                // which is exactly the resolved set a baseline must record.
                 // Alternating array: name, path, name, path…
                 object depsObj = PDMLiteAddin.SwApp.GetDocumentDependencies2(
                     asmPath, true, true, false);
@@ -74,7 +179,6 @@ namespace PDMLite
                     string path = deps[i];
                     if (string.IsNullOrEmpty(path)) continue;
 
-                    // Skip Toolbox / standard hardware — not vault-managed.
                     if (path.IndexOf("\\Toolbox\\",
                             StringComparison.OrdinalIgnoreCase) >= 0)
                         continue;
@@ -83,7 +187,6 @@ namespace PDMLite
                     try { norm = Path.GetFullPath(path); }
                     catch { norm = path; }
 
-                    // Skip the assembly itself.
                     if (string.Equals(norm, asmNorm,
                             StringComparison.OrdinalIgnoreCase)) continue;
 
@@ -100,6 +203,7 @@ namespace PDMLite
                     {
                         Path = norm,
                         Name = Path.GetFileName(norm),
+                        Level = 0,
                         Qty = 1
                     };
                     index[norm] = comp;
@@ -113,15 +217,20 @@ namespace PDMLite
         // Capture + persist the as-released baseline for an assembly. NON-FATAL:
         // any failure is swallowed and audit-logged so it can never block a
         // release (same contract as ExportBom). Called from ReleaseFile right
-        // after the assembly's status flips to Released — at which point the
-        // release gate has already guaranteed every tracked child is Released,
-        // so each child's File record carries its released revision.
-        public static void CaptureAssemblyBaseline(string asmPath, string partNo,
-            string rev, string config, string user)
+        // after the assembly's status flips to Released — the release gate has
+        // already guaranteed every tracked child is Released, so each child's
+        // File record carries its released revision.
+        public static void CaptureAssemblyBaseline(ModelDoc2 doc, string asmPath,
+            string partNo, string rev, string config, string user)
         {
             try
             {
-                var comps = ResolveComponents(asmPath);
+                // Prefer the live tree (true hierarchy + quantities); fall back
+                // to the flat disk walk if the doc isn't a resolvable assembly.
+                var comps = ResolveTree(doc);
+                if (comps.Count == 0)
+                    comps = ResolveComponents(asmPath);
+
                 DatabaseManager.SaveAssemblyBaseline(asmPath,
                     Path.GetFileName(asmPath), partNo, rev, config, user, comps);
                 AuditLogger.Log("BaselineCaptured", user,
