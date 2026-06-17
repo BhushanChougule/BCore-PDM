@@ -2,7 +2,9 @@ using SolidWorks.Interop.sldworks;
 using SolidWorks.Interop.swconst;
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.IO;
+using System.Text;
 
 namespace PDMLite
 {
@@ -31,13 +33,16 @@ namespace PDMLite
     // structure. Qty is the per-immediate-parent instance count.
     public class BaselineComponent
     {
-        public string Path     { get; set; }
-        public string Name     { get; set; }
-        public string PartNo   { get; set; }
-        public string Revision { get; set; }
-        public string Status   { get; set; }
-        public int    Qty      { get; set; }
-        public int    Level    { get; set; }
+        public string Path        { get; set; }
+        public string Name        { get; set; }
+        public string PartNo      { get; set; }
+        public string Description { get; set; }
+        public string Config      { get; set; } // referenced configuration of this child
+        public string Revision    { get; set; }
+        public string Status      { get; set; }
+        public int    Qty         { get; set; }
+        public int    Level       { get; set; }
+        public double Weight      { get; set; } // unit PartWeight in lb (0 = unknown)
     }
 
     // Captures as-released baselines for assemblies. At release the assembly is
@@ -133,8 +138,10 @@ namespace PDMLite
                 {
                     Path = norm,
                     Name = Path.GetFileName(norm),
+                    Config = refCfg,
                     Level = level,
-                    Qty = 1
+                    Qty = 1,
+                    Weight = ReadWeightLbs(c, refCfg) // best-effort, 0 if unreadable
                 };
                 group[key] = bc;
                 firstComp[key] = c;
@@ -149,6 +156,44 @@ namespace PDMLite
                         .Equals(".sldasm", StringComparison.OrdinalIgnoreCase))
                     WalkChildren(firstComp[key], level + 1, output);
             }
+        }
+
+        // Best-effort unit PartWeight (lb) of a component, read via the same
+        // config-specific property path the rest of the add-in uses. Only the
+        // already-loaded model is consulted (resolved at release time) — no
+        // read-only OpenDoc fallback, so this never opens files during capture;
+        // an unreadable weight is just 0 (blank line, omitted from the total).
+        private static double ReadWeightLbs(Component2 c, string refCfg)
+        {
+            try
+            {
+                ModelDoc2 m = c.GetModelDoc2() as ModelDoc2;
+                if (m == null)
+                    m = PDMLiteAddin.SwApp?.GetOpenDocumentByName(c.GetPathName())
+                        as ModelDoc2;
+                if (m == null) return 0;
+                string pw = PropertyValidator.GetProperty(m, "PartWeight", refCfg);
+                if (string.IsNullOrEmpty(pw))
+                    pw = PropertyValidator.GetProperty(m, "PartWeight");
+                return ParseLbs(pw);
+            }
+            catch { return 0; }
+        }
+
+        // Pull the leading number out of a "12.345 lbs" PartWeight string. The
+        // value is stamped InvariantCulture, so parse invariant.
+        private static double ParseLbs(string s)
+        {
+            if (string.IsNullOrEmpty(s)) return 0;
+            var sb = new StringBuilder();
+            foreach (char ch in s.Trim())
+            {
+                if (char.IsDigit(ch) || ch == '.' || ch == '-') sb.Append(ch);
+                else if (sb.Length > 0) break; // stop at the unit suffix
+            }
+            double v;
+            return double.TryParse(sb.ToString(), NumberStyles.Any,
+                CultureInfo.InvariantCulture, out v) ? v : 0;
         }
 
         // Flat fallback: walk the assembly's FULL dependency tree from disk and

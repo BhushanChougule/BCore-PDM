@@ -1445,16 +1445,23 @@ namespace PDMLite
         }
 
         // Show the assembly's captured as-released baselines (read-only). Opens
-        // ON TOP of the dashboard (nested modal) rather than via OpenDeferred —
-        // it is not a file to open, so the dashboard stays put underneath.
+        // ON TOP of the dashboard (nested modal) so the dashboard stays put. If
+        // the user double-clicks a component there, the viewer closes with a
+        // FileToOpen — bubble it up through the dashboard's deferred-open so the
+        // file opens AFTER both modals close (like double-clicking a dashboard row).
         private void MenuViewBaseline()
         {
             var f = MenuRow();
             if (f == null) return;
             try
             {
+                string toOpen = null;
                 using (var v = new BaselineViewerForm(f.FilePath, f.FileName))
+                {
                     v.ShowDialog(this);
+                    toOpen = v.FileToOpen;
+                }
+                if (!string.IsNullOrEmpty(toOpen)) OpenDeferred(toOpen);
             }
             catch (Exception ex)
             {

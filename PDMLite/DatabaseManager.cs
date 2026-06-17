@@ -2726,11 +2726,13 @@ namespace PDMLite
                     string cPartNo = comp.PartNo ?? "";
                     string cRev    = comp.Revision ?? "";
                     string cStatus = comp.Status ?? "";
+                    string cDesc   = comp.Description ?? "";
 
-                    // Enrich the un-filled fields from the child's File record
-                    // (same load, no extra lock acquisition).
+                    // Enrich the un-filled fields (PartNo/Rev/Status/Description)
+                    // from the child's File record (same load, no extra lock).
                     if ((string.IsNullOrEmpty(cPartNo) || string.IsNullOrEmpty(cRev)
-                         || string.IsNullOrEmpty(cStatus)) && files != null)
+                         || string.IsNullOrEmpty(cStatus) || string.IsNullOrEmpty(cDesc))
+                        && files != null)
                     {
                         var fr = files.Elements("File").FirstOrDefault(f =>
                             string.Equals((string)f.Element("FilePath"), comp.Path,
@@ -2743,6 +2745,8 @@ namespace PDMLite
                                 cRev = (string)fr.Element("Revision") ?? "";
                             if (string.IsNullOrEmpty(cStatus))
                                 cStatus = (string)fr.Element("Status") ?? "";
+                            if (string.IsNullOrEmpty(cDesc))
+                                cDesc = (string)fr.Element("Description") ?? "";
                         }
                     }
 
@@ -2750,11 +2754,16 @@ namespace PDMLite
                         new XAttribute("Path", comp.Path ?? ""),
                         new XAttribute("Name", comp.Name ?? ""),
                         new XAttribute("PartNo", cPartNo),
+                        new XAttribute("Description", cDesc),
+                        new XAttribute("Config", comp.Config ?? ""),
                         new XAttribute("Revision", cRev),
                         new XAttribute("Status",
                             string.IsNullOrEmpty(cStatus) ? "Untracked" : cStatus),
                         new XAttribute("Qty", comp.Qty),
-                        new XAttribute("Level", comp.Level)));
+                        new XAttribute("Level", comp.Level),
+                        new XAttribute("Weight",
+                            comp.Weight.ToString("0.###",
+                                System.Globalization.CultureInfo.InvariantCulture))));
                 }
 
                 baselines.Add(bEl);
@@ -2797,15 +2806,23 @@ namespace PDMLite
                         int.TryParse((string)c.Attribute("Qty"), out qty);
                         int level; // absent on pre-indent baselines → 0 (flat)
                         int.TryParse((string)c.Attribute("Level"), out level);
+                        double weight; // absent on older baselines → 0 (blank)
+                        double.TryParse((string)c.Attribute("Weight"),
+                            System.Globalization.NumberStyles.Any,
+                            System.Globalization.CultureInfo.InvariantCulture,
+                            out weight);
                         ab.Components.Add(new BaselineComponent
                         {
-                            Path     = (string)c.Attribute("Path")     ?? "",
-                            Name     = (string)c.Attribute("Name")     ?? "",
-                            PartNo   = (string)c.Attribute("PartNo")   ?? "",
-                            Revision = (string)c.Attribute("Revision") ?? "",
-                            Status   = (string)c.Attribute("Status")   ?? "",
-                            Qty      = qty,
-                            Level    = level
+                            Path        = (string)c.Attribute("Path")        ?? "",
+                            Name        = (string)c.Attribute("Name")        ?? "",
+                            PartNo      = (string)c.Attribute("PartNo")      ?? "",
+                            Description = (string)c.Attribute("Description") ?? "",
+                            Config      = (string)c.Attribute("Config")      ?? "",
+                            Revision    = (string)c.Attribute("Revision")    ?? "",
+                            Status      = (string)c.Attribute("Status")      ?? "",
+                            Qty         = qty,
+                            Level       = level,
+                            Weight      = weight
                         });
                     }
                     result.Add(ab);

@@ -28,17 +28,24 @@ namespace PDMLite
         private Label _countLabel;
         private Button _btnExport;
         private Button _btnExportAll;
-        private Button _btnExpandAll, _btnCollapseAll;
+        private Button _btnExpandAll, _btnCollapseAll, _btnFlatten;
+
+        // Double-click a row to open that component (deferred — see the dashboard
+        // caller); null when the viewer is just closed.
+        public string FileToOpen { get; private set; }
 
         // Tree state for the SELECTED baseline. _full = its components in stored
         // depth-first order; _hasKids[i] = component i is a sub-assembly with
-        // children; _collapsed = component indices whose subtree is hidden;
-        // _rowToComp maps a grid row back to its _full index (for click toggling).
+        // children; _extQty[i] = extended (rolled-up) quantity; _collapsed =
+        // component indices whose subtree is hidden; _rowToComp maps a grid row
+        // back to its _full index (click toggling, double-click open).
         private List<BaselineComponent> _full = new List<BaselineComponent>();
         private bool[] _hasKids = new bool[0];
+        private long[] _extQty = new long[0];
         private string[] _outline = new string[0]; // outline number per _full row (1, 1.1, 1.3.1)
         private readonly HashSet<int> _collapsed = new HashSet<int>();
         private readonly List<int> _rowToComp = new List<int>();
+        private bool _flat; // false = indented tree, true = flattened parts list
 
         private float _scale = 1f;
         private int S(float v) => (int)(v * _scale);
@@ -84,8 +91,8 @@ namespace PDMLite
             this.MinimizeBox = false;
             this.BackColor = cBg;
             this.KeyPreview = true;
-            this.ClientSize = new Size(S(600), S(560));
-            this.MinimumSize = new Size(S(540), S(360));
+            this.ClientSize = new Size(S(780), S(560));
+            this.MinimumSize = new Size(S(600), S(360));
 
             // ── Header bar ────────────────────────────────────────────
             var headerBar = new Panel
@@ -157,8 +164,9 @@ namespace PDMLite
             };
             top.Controls.Add(_metaLabel);
 
-            // Tree controls: collapse to top-level-only, or expand everything.
-            // (Per sub-assembly: click its ▸/▾ row to toggle.)
+            // Tree controls: expand everything, collapse to top-level-only, or
+            // flatten to a rolled-up parts list. (Per sub-assembly: click its
+            // ▸/▾ row to toggle.)
             _btnExpandAll = MakeButton("Expand All", cBrand, Color.White);
             _btnExpandAll.Location = new Point(S(14), S(84));
             _btnExpandAll.Click += (s, e) => { _collapsed.Clear(); RenderRows(); };
@@ -175,12 +183,19 @@ namespace PDMLite
             };
             top.Controls.Add(_btnCollapseAll);
 
+            // Flatten = rolled-up parts list (each leaf part once, EXTENDED total
+            // qty across all sub-assembly levels). Toggle back to the tree.
+            _btnFlatten = MakeButton("Flatten", cBrandDark, Color.White);
+            _btnFlatten.Location = new Point(_btnCollapseAll.Right + S(8), S(84));
+            _btnFlatten.Click += (s, e) => SetFlat(!_flat);
+            top.Controls.Add(_btnFlatten);
+
             top.Controls.Add(new Label
             {
-                Text = "Tip: Click a ▸/▾ sub-assembly row to expand or collapse it.",
+                Text = "Tip: Click a ▸/▾ row to expand/collapse; double-click a row to open it.",
                 Font = _fMeta, ForeColor = Color.FromArgb(140, 146, 156),
-                Location = new Point(_btnCollapseAll.Right + S(12), S(89)),
-                AutoSize = true, MaximumSize = new Size(S(360), 0)
+                Location = new Point(_btnFlatten.Right + S(12), S(86)),
+                AutoSize = true, MaximumSize = new Size(S(260), 0)
             });
 
             // ── Bottom button row ─────────────────────────────────────
@@ -244,15 +259,18 @@ namespace PDMLite
             _grid.RowTemplate.Height = S(22);
 
             // No. column FIRST = the tree column (indent + arrow + outline number
-            // like 1 / 1.1 / 1.3.1). Rev + Qty VALUES centered; the rest left.
-            AddCol("No.", 0.14f);
-            AddCol("Component", 0.28f);
-            AddCol("Part No", 0.20f);
-            AddCol("Rev", 0.10f, DataGridViewContentAlignment.MiddleCenter);
-            AddCol("Status", 0.16f);
-            AddCol("Qty", 0.10f, DataGridViewContentAlignment.MiddleCenter);
+            // like 1 / 1.1 / 1.3.1). Rev + Qty + Weight VALUES centered; rest left.
+            AddCol("No.", 0.09f);
+            AddCol("Component", 0.16f);
+            AddCol("Part No", 0.14f);
+            AddCol("Description", 0.21f);
+            AddCol("Rev", 0.07f, DataGridViewContentAlignment.MiddleCenter);
+            AddCol("Status", 0.12f);
+            AddCol("Qty", 0.08f, DataGridViewContentAlignment.MiddleCenter);
+            AddCol("Weight (lb)", 0.13f, DataGridViewContentAlignment.MiddleCenter);
             _grid.CellFormatting += Grid_CellFormatting;
-            _grid.CellClick += Grid_CellClick; // toggle a sub-assembly's subtree
+            _grid.CellClick += Grid_CellClick;            // toggle a subtree
+            _grid.CellDoubleClick += Grid_CellDoubleClick; // open the component
 
             // Docking resolves by z-order: the Fill control must be added FIRST
             // (it is resolved LAST, so it takes the leftover middle), then the
@@ -312,6 +330,7 @@ namespace PDMLite
             var b = Selected();
             _full = b?.Components ?? new List<BaselineComponent>();
             _collapsed.Clear(); // start fully expanded on every release switch
+            _flat = false;      // each release opens as a tree
 
             // A component is an expandable sub-assembly if the NEXT row is deeper
             // (depth-first order guarantees a node's descendants follow it).
@@ -320,12 +339,14 @@ namespace PDMLite
                 _hasKids[i] = i + 1 < _full.Count &&
                               _full[i + 1].Level > _full[i].Level;
 
-            // Outline (BOM item) numbers: 1, 2 … at the top; N.1, N.2 … under N;
-            // N.M.1 … one level deeper. Intrinsic to the tree position, so it's
-            // the SAME whether the row is shown expanded or collapsed.
+            // Outline (BOM item) numbers: 1, 2 … at the top; N.1, N.2 … under N.
+            // Intrinsic to tree position, so unchanged by collapse.
             _outline = ComputeOutline(_full);
+            // Extended (rolled-up) quantity = product of Qty along the path to root.
+            _extQty = ComputeExtQty(_full);
 
             bool enable = b != null;
+            if (_btnFlatten != null) { _btnFlatten.Enabled = enable; _btnFlatten.Text = "Flatten"; }
             if (_btnExpandAll != null) _btnExpandAll.Enabled = enable;
             if (_btnCollapseAll != null) _btnCollapseAll.Enabled = enable;
 
@@ -348,23 +369,33 @@ namespace PDMLite
                 "   ·   Released by " + b.ReleasedBy + " on " + FmtDate(b.ReleasedDate);
 
             RenderRows();
-
-            int total = _full.Sum(c => Math.Max(c.Qty, 0));
-            _countLabel.Text = _full.Count + " line" +
-                (_full.Count == 1 ? "" : "s") + "  ·  " + total + " total qty";
             if (_btnExport != null) _btnExport.Enabled = _full.Count > 0;
         }
 
-        // Rebuild the visible grid rows from _full, honouring _collapsed: a
-        // collapsed sub-assembly hides every deeper row until the tree returns
-        // to its level or shallower (works for nested collapses). The arrow
-        // shows ▾ (expanded) / ▸ (collapsed) on sub-assemblies; leaves align
-        // under the name. _rowToComp maps each grid row back to its _full index.
-        private void RenderRows()
+        // Switch between the indented tree and the flattened parts list.
+        private void SetFlat(bool flat)
+        {
+            _flat = flat;
+            if (_btnFlatten != null) _btnFlatten.Text = flat ? "Show Tree" : "Flatten";
+            // Tree-only controls don't apply to the flattened list.
+            if (_btnExpandAll != null) _btnExpandAll.Enabled = !flat && _full.Count > 0;
+            if (_btnCollapseAll != null) _btnCollapseAll.Enabled = !flat && _full.Count > 0;
+            RenderRows();
+        }
+
+        private void RenderRows() { if (_flat) RenderFlat(); else RenderTree(); }
+
+        // Indented tree. Honours _collapsed: a collapsed sub-assembly hides every
+        // deeper row until the tree returns to its level (works for nested
+        // collapses). Arrow ▾ (expanded) / ▸ (collapsed) on sub-assemblies; Qty
+        // is per-immediate-parent; Weight is the unit weight. _rowToComp maps
+        // each grid row back to its _full index (click toggle, double-click open).
+        private void RenderTree()
         {
             if (_grid == null) return;
             _grid.Rows.Clear();
             _rowToComp.Clear();
+            _grid.Columns[6].HeaderText = "Qty"; // per-parent in tree mode
 
             int hideDeeperThan = -1; // -1 = not hiding; else hide rows with Level >
             for (int i = 0; i < _full.Count; i++)
@@ -379,22 +410,83 @@ namespace PDMLite
                 bool kids = i < _hasKids.Length && _hasKids[i];
                 bool collapsed = kids && _collapsed.Contains(i);
                 string arrow = kids ? (collapsed ? "▸ " : "▾ ") : "   ";
-                // No. column carries the tree: indent + arrow + outline number.
                 string no = new string(' ', level * 3) + arrow +
                     (i < _outline.Length ? _outline[i] : "");
                 string name = Path.GetFileNameWithoutExtension(c.Name ?? "");
 
-                int row = _grid.Rows.Add(no, name, c.PartNo, c.Revision, c.Status, c.Qty);
+                int row = _grid.Rows.Add(no, name, c.PartNo, c.Description,
+                    c.Revision, c.Status, c.Qty, FmtWeight(c.Weight));
                 if (kids) _grid.Rows[row].Tag = "sub"; // bolded in CellFormatting
                 _rowToComp.Add(i);
 
                 if (collapsed) hideDeeperThan = level; // hide its subtree
             }
+            UpdateCount(_full.Count, "line", _full.Sum(c => Math.Max(c.Qty, 0)));
         }
 
-        // Click a sub-assembly's No. (the ▸/▾ arrow) or name to expand/collapse it.
+        // Flattened parts list: every LEAF part once (grouped by Part No / file),
+        // with the EXTENDED total quantity rolled up across all sub-assembly
+        // levels — the purchasing view. Sub-assembly lines are omitted (their
+        // children are promoted), so quantities never double-count.
+        private void RenderFlat()
+        {
+            if (_grid == null) return;
+            _grid.Rows.Clear();
+            _rowToComp.Clear();
+            _grid.Columns[6].HeaderText = "Total Qty"; // extended in flat mode
+
+            var order = new List<string>();
+            var firstIdx = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+            var totalQty = new Dictionary<string, long>(StringComparer.OrdinalIgnoreCase);
+            for (int i = 0; i < _full.Count; i++)
+            {
+                if (!IsLeaf(_full, i)) continue; // parts only
+                var c = _full[i];
+                string key = !string.IsNullOrEmpty(c.PartNo)
+                    ? c.PartNo.ToLowerInvariant()
+                    : (c.Path ?? "").ToLowerInvariant() + "|" +
+                      (c.Config ?? "").ToLowerInvariant();
+                if (!totalQty.ContainsKey(key))
+                {
+                    totalQty[key] = 0; firstIdx[key] = i; order.Add(key);
+                }
+                totalQty[key] += i < _extQty.Length ? _extQty[i] : Math.Max(c.Qty, 1);
+            }
+            order.Sort((x, y) => string.Compare(
+                _full[firstIdx[x]].PartNo ?? "", _full[firstIdx[y]].PartNo ?? "",
+                StringComparison.OrdinalIgnoreCase));
+
+            int item = 1;
+            long sumQty = 0;
+            foreach (string key in order)
+            {
+                int i = firstIdx[key];
+                var c = _full[i];
+                long qty = totalQty[key];
+                sumQty += qty;
+                _grid.Rows.Add((item++).ToString(),
+                    Path.GetFileNameWithoutExtension(c.Name ?? ""),
+                    c.PartNo, c.Description, c.Revision, c.Status,
+                    qty.ToString(), FmtWeight(c.Weight));
+                _rowToComp.Add(i);
+            }
+            UpdateCount(order.Count, "part", sumQty);
+        }
+
+        // Footer: "{n} {noun}s · {qty} total qty · Mass {m} lb" (mass only when known).
+        private void UpdateCount(int n, string noun, long qty)
+        {
+            double mass = TotalMassLb(_full, _extQty);
+            _countLabel.Text = n + " " + noun + (n == 1 ? "" : "s") +
+                "  ·  " + qty + " total qty" +
+                (mass > 0 ? "  ·  Mass " + mass.ToString("0.###",
+                    CultureInfo.InvariantCulture) + " lb" : "");
+        }
+
+        // Click a sub-assembly's No./name to expand/collapse it (tree mode only).
         private void Grid_CellClick(object sender, DataGridViewCellEventArgs e)
         {
+            if (_flat) return;
             if (e.RowIndex < 0 || e.ColumnIndex > 1) return; // No. / Component only
             if (e.RowIndex >= _rowToComp.Count) return;
             int comp = _rowToComp[e.RowIndex];
@@ -404,6 +496,19 @@ namespace PDMLite
             // Defer the rebuild so we don't mutate Rows inside the grid's own
             // click processing (avoids re-entrancy on the cell that was clicked).
             BeginInvoke((Action)RenderRows);
+        }
+
+        // Double-click any row → open that component (current copy). Deferred:
+        // the dashboard caller opens it AFTER this modal closes (see MenuViewBaseline).
+        private void Grid_CellDoubleClick(object sender, DataGridViewCellEventArgs e)
+        {
+            if (e.RowIndex < 0 || e.RowIndex >= _rowToComp.Count) return;
+            int comp = _rowToComp[e.RowIndex];
+            if (comp < 0 || comp >= _full.Count) return;
+            string path = _full[comp].Path;
+            if (string.IsNullOrEmpty(path)) return;
+            FileToOpen = path;
+            this.Close();
         }
 
         // Colour the Status cell; bold the Component cell on sub-assembly rows so
@@ -447,6 +552,44 @@ namespace PDMLite
             return outline;
         }
 
+        // Extended (rolled-up) quantity per node = product of Qty along the path
+        // from the root. mult[L] tracks the current node's extended qty at level L;
+        // a node at level L multiplies its parent's (mult[L-1]).
+        private static long[] ComputeExtQty(List<BaselineComponent> comps)
+        {
+            var ext = new long[comps.Count];
+            var mult = new List<long>();
+            for (int i = 0; i < comps.Count; i++)
+            {
+                int level = Math.Max(comps[i].Level, 0);
+                long parent = level == 0 ? 1
+                    : (level - 1 < mult.Count ? mult[level - 1] : 1);
+                long e = parent * Math.Max(comps[i].Qty, 1);
+                while (mult.Count <= level) mult.Add(1);
+                mult[level] = e;
+                ext[i] = e;
+            }
+            return ext;
+        }
+
+        // A leaf has no deeper row immediately after it (depth-first order).
+        private static bool IsLeaf(List<BaselineComponent> comps, int i)
+            => i + 1 >= comps.Count || comps[i + 1].Level <= comps[i].Level;
+
+        // Total assembly mass = Σ over LEAF parts (unit weight × extended qty),
+        // so sub-assembly weights never double-count their children.
+        private static double TotalMassLb(List<BaselineComponent> comps, long[] ext)
+        {
+            double total = 0;
+            for (int i = 0; i < comps.Count; i++)
+                if (IsLeaf(comps, i) && i < ext.Length)
+                    total += comps[i].Weight * ext[i];
+            return total;
+        }
+
+        private static string FmtWeight(double lb)
+            => lb > 0 ? lb.ToString("0.###", CultureInfo.InvariantCulture) : "";
+
         // Display a stored "yyyy-MM-dd HH:mm:ss" timestamp as MM/dd/yyyy HH:mm:ss
         // (house convention). Storage stays ISO so it sorts chronologically.
         private static string FmtDate(string stored)
@@ -472,29 +615,35 @@ namespace PDMLite
                 if (sfd.ShowDialog(this) != DialogResult.OK) return;
                 try
                 {
+                    // ALWAYS the FULL tree (ignores on-screen collapse).
+                    var outline = ComputeOutline(b.Components);
+                    var ext = ComputeExtQty(b.Components);
+                    double mass = TotalMassLb(b.Components, ext);
+
                     var sb = new StringBuilder();
-                    sb.AppendLine("Assembly,PartNo,Revision,Config,ReleasedBy,ReleasedDate");
+                    sb.AppendLine("Assembly,PartNo,Revision,Config,ReleasedBy,ReleasedDate,Total Mass (lb)");
                     sb.AppendLine(string.Join(",", new[]
                     {
                         Csv(_asmName), Csv(b.PartNo), Csv(b.Revision), Csv(b.Config),
-                        Csv(b.ReleasedBy), Csv(FmtDate(b.ReleasedDate))
+                        Csv(b.ReleasedBy), Csv(FmtDate(b.ReleasedDate)),
+                        Csv(mass > 0 ? mass.ToString("0.###", CultureInfo.InvariantCulture) : "")
                     }));
                     sb.AppendLine();
-                    // ALWAYS the FULL tree (ignores on-screen collapse). The No.
-                    // (outline) column + indented name preserve the structure in
-                    // Excel. _outline is parallel to b.Components (== _full).
-                    sb.AppendLine("No.,Level,Component,PartNo,Revision,Status,Qty");
+                    sb.AppendLine("No.,Level,Component,Part No,Config,Description,Revision,Status,Qty,Ext Qty,Weight (lb)");
                     for (int i = 0; i < b.Components.Count; i++)
                     {
                         var c = b.Components[i];
                         sb.AppendLine(string.Join(",", new[]
                         {
-                            Csv(i < _outline.Length ? _outline[i] : ""),
+                            Csv(i < outline.Length ? outline[i] : ""),
                             Csv(c.Level.ToString()),
                             Csv(new string(' ', Math.Max(c.Level, 0) * 2) +
                                 Path.GetFileNameWithoutExtension(c.Name ?? "")),
-                            Csv(c.PartNo), Csv(c.Revision), Csv(c.Status),
-                            Csv(c.Qty.ToString())
+                            Csv(c.PartNo), Csv(c.Config), Csv(c.Description),
+                            Csv(c.Revision), Csv(c.Status),
+                            Csv(c.Qty.ToString()),
+                            Csv((i < ext.Length ? ext[i] : c.Qty).ToString()),
+                            Csv(FmtWeight(c.Weight))
                         }));
                     }
                     File.WriteAllText(sfd.FileName, sb.ToString());
@@ -561,6 +710,10 @@ namespace PDMLite
                     var sheets = new List<XlsxWriter.Sheet>();
                     foreach (var b in _baselines)
                     {
+                        var outline = ComputeOutline(b.Components);
+                        var ext = ComputeExtQty(b.Components);
+                        double mass = TotalMassLb(b.Components, ext);
+
                         var sh = new XlsxWriter.Sheet("REV " + b.Revision +
                             (string.IsNullOrEmpty(b.Config) ? "" : " " + b.Config));
                         sh.Add("Assembly", _asmName ?? "");
@@ -569,11 +722,13 @@ namespace PDMLite
                         sh.Add("Config", b.Config);
                         sh.Add("Released By", b.ReleasedBy);
                         sh.Add("Released", FmtDate(b.ReleasedDate));
+                        sh.Add("Total Mass (lb)",
+                            mass > 0 ? mass.ToString("0.###", CultureInfo.InvariantCulture) : "");
                         sh.AddBlank();
-                        sh.Add("No.", "Level", "Component", "Part No",
-                            "Revision", "Status", "Qty");
+                        sh.Add("No.", "Level", "Component", "Part No", "Config",
+                            "Description", "Revision", "Status", "Qty", "Ext Qty",
+                            "Weight (lb)");
 
-                        var outline = ComputeOutline(b.Components);
                         for (int i = 0; i < b.Components.Count; i++)
                         {
                             var c = b.Components[i];
@@ -582,8 +737,11 @@ namespace PDMLite
                                 c.Level.ToString(),
                                 new string(' ', Math.Max(c.Level, 0) * 2) +
                                     Path.GetFileNameWithoutExtension(c.Name ?? ""),
-                                c.PartNo ?? "", c.Revision ?? "", c.Status ?? "",
-                                c.Qty.ToString());
+                                c.PartNo ?? "", c.Config ?? "", c.Description ?? "",
+                                c.Revision ?? "", c.Status ?? "",
+                                c.Qty.ToString(),
+                                (i < ext.Length ? ext[i] : c.Qty).ToString(),
+                                FmtWeight(c.Weight));
                         }
                         sheets.Add(sh);
                     }
