@@ -1623,10 +1623,7 @@ namespace PDMLite
         // (BulkApprove / ApproveRequest) must gate on this, NOT on a
         // GetFileStatus()=="WIP" re-read, which false-positives whenever the
         // file was ALREADY WIP before a failed attempt.
-        // reason = the reason-for-change for this bump; an interactive New
-        // Revision with none supplied prompts for one (required) in the Core.
-        public static bool StartNewRevision(ModelDoc2 doc, bool suppressPrompts = false,
-            string reason = null)
+        public static bool StartNewRevision(ModelDoc2 doc, bool suppressPrompts = false)
         {
             string user = PDMLiteAddin.CurrentUser;
             if (!IsMaster(user)) { NotMaster(); return false; }
@@ -1654,7 +1651,7 @@ namespace PDMLite
             if (!BeginVaultOperation(opPath, user, "New Revision")) return false;
             try
             {
-                return StartNewRevisionCore(doc, suppressPrompts, reason);
+                return StartNewRevisionCore(doc, suppressPrompts);
             }
             finally
             {
@@ -1664,8 +1661,7 @@ namespace PDMLite
 
         // The revision flow proper. Master/saved/lock/claim guards live in the
         // public wrapper above; this method assumes them done.
-        private static bool StartNewRevisionCore(ModelDoc2 doc, bool suppressPrompts,
-            string reason)
+        private static bool StartNewRevisionCore(ModelDoc2 doc, bool suppressPrompts)
         {
             string user = PDMLiteAddin.CurrentUser;
             string filePath   = doc.GetPathName();
@@ -1742,23 +1738,6 @@ namespace PDMLite
                         MessageBoxIcon.Question);
 
                     if (confirm != DialogResult.Yes) return false;
-                }
-            }
-
-            // ── Reason for change (interactive New Revision only) ─────────
-            // REQUIRED; Cancel aborts before anything is archived or bumped.
-            if (reason == null && !suppressPrompts)
-            {
-                while (true)
-                {
-                    reason = ShowNoteDialog("New Revision — Reason for Change",
-                        "Describe the reason for this revision (required):");
-                    if (reason == null) return false; // cancelled → abort
-                    if (!string.IsNullOrWhiteSpace(reason)) break;
-                    MessageBox.Show(
-                        "A reason for the new revision is required.",
-                        "BCore PDM — Reason Required",
-                        MessageBoxButtons.OK, MessageBoxIcon.Information);
                 }
             }
 
@@ -1916,12 +1895,10 @@ namespace PDMLite
 
             // Reset to WIP — source path only (no separate entry for RELEASED copy)
             DatabaseManager.UnlockFile(filePath);
-            string snrNote = string.IsNullOrWhiteSpace(reason)
-                ? "New revision started: REV " + nextRev
-                : "New revision started: REV " + nextRev + " — " + reason;
-            DatabaseManager.SetFileStatus(filePath, "WIP", user, snrNote);
+            DatabaseManager.SetFileStatus(filePath, "WIP", user,
+                "New revision started: REV " + nextRev);
             AuditLogger.Log("NewRevision", user, Path.GetFileName(filePath),
-                partNo, nextRev, reason ?? "");
+                partNo, nextRev);
 
             // ── Auto-start the associated drawing revision (Option B) ─────
             // Done AFTER the model is writable/bumped so the drawing reopens
