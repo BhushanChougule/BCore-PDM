@@ -387,7 +387,9 @@ namespace PDMLite
             _metaLabel.Text =
                 "Part No " + (string.IsNullOrEmpty(b.PartNo) ? "(none)" : b.PartNo) +
                 "   ·   REV " + b.Revision +
-                "   ·   Released by " + b.ReleasedBy + " on " + FmtDate(b.ReleasedDate);
+                "   ·   Released by " + b.ReleasedBy + " on " + FmtDate(b.ReleasedDate) +
+                (string.IsNullOrWhiteSpace(b.Reason)
+                    ? "" : "   ·   Reason: " + b.Reason);
 
             RenderRows();
             if (_btnExport != null) _btnExport.Enabled = _full.Count > 0;
@@ -647,11 +649,11 @@ namespace PDMLite
                     double mass = TotalMassLb(b.Components, ext);
 
                     var sb = new StringBuilder();
-                    sb.AppendLine("Assembly,PartNo,Revision,Config,ReleasedBy,ReleasedDate,Total Mass (lb)");
+                    sb.AppendLine("Assembly,PartNo,Revision,Config,ReleasedBy,ReleasedDate,Reason,Total Mass (lb)");
                     sb.AppendLine(string.Join(",", new[]
                     {
                         Csv(_asmName), Csv(b.PartNo), Csv(b.Revision), Csv(b.Config),
-                        Csv(b.ReleasedBy), Csv(FmtDate(b.ReleasedDate)),
+                        Csv(b.ReleasedBy), Csv(FmtDate(b.ReleasedDate)), Csv(b.Reason),
                         Csv(mass > 0 ? mass.ToString("0.###", CultureInfo.InvariantCulture) : "")
                     }));
                     sb.AppendLine();
@@ -748,6 +750,7 @@ namespace PDMLite
                         sh.Add("Config", b.Config);
                         sh.Add("Released By", b.ReleasedBy);
                         sh.Add("Released", FmtDate(b.ReleasedDate));
+                        sh.Add("Reason", b.Reason ?? "");
                         sh.Add("Total Mass (lb)",
                             mass > 0 ? mass.ToString("0.###", CultureInfo.InvariantCulture) : "");
                         sh.AddBlank();

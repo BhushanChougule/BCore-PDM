@@ -21,6 +21,7 @@ namespace PDMLite
         public string Config       { get; set; } // active config at release time
         public string ReleasedBy   { get; set; }
         public string ReleasedDate { get; set; } // "yyyy-MM-dd HH:mm:ss"
+        public string Reason       { get; set; } // reason-for-change at release ("" on older baselines)
         public List<BaselineComponent> Components { get; set; }
             = new List<BaselineComponent>();
     }
@@ -266,7 +267,7 @@ namespace PDMLite
         // already guaranteed every tracked child is Released, so each child's
         // File record carries its released revision.
         public static void CaptureAssemblyBaseline(ModelDoc2 doc, string asmPath,
-            string partNo, string rev, string config, string user)
+            string partNo, string rev, string config, string user, string reason = null)
         {
             try
             {
@@ -277,7 +278,8 @@ namespace PDMLite
                     comps = ResolveComponents(asmPath);
 
                 DatabaseManager.SaveAssemblyBaseline(asmPath,
-                    Path.GetFileName(asmPath), partNo, rev, config, user, comps);
+                    Path.GetFileName(asmPath), partNo, rev, config, user, comps,
+                    reason);
                 AuditLogger.Log("BaselineCaptured", user,
                     Path.GetFileName(asmPath), partNo, rev,
                     comps.Count + " components");

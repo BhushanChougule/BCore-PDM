@@ -37,6 +37,9 @@ namespace PDMLite
         // from ModifiedDate/ModifiedBy (last save).
         public DateTime ReleasedDate { get; set; }
         public string ReleasedBy { get; set; }
+        // Populated by GetAllFiles: the ChangeNote of that most-recent "Released"
+        // history entry — the reason-for-change of the latest release ("" if none).
+        public string ReleaseReason { get; set; }
         public bool HasBrokenRefs { get; set; }
         // Per-configuration metadata (parts/assemblies). Empty for drawings and for
         // old records that haven't been re-saved since this feature shipped.
@@ -1670,6 +1673,8 @@ namespace PDMLite
                     StringComparer.OrdinalIgnoreCase);
                 var relUserByPath = new Dictionary<string, string>(
                     StringComparer.OrdinalIgnoreCase);
+                var relReasonByPath = new Dictionary<string, string>(
+                    StringComparer.OrdinalIgnoreCase);
                 var hist = doc.Root.Element("RevisionHistory");
                 if (hist != null)
                 {
@@ -1690,6 +1695,7 @@ namespace PDMLite
                         {
                             relDateByPath[fp] = d;
                             relUserByPath[fp] = (string)en.Element("ChangedBy") ?? "";
+                            relReasonByPath[fp] = (string)en.Element("ChangeNote") ?? "";
                         }
                     }
                 }
@@ -1715,6 +1721,9 @@ namespace PDMLite
                     string relBy;
                     if (!relUserByPath.TryGetValue(filePath, out relBy))
                         relBy = "";
+                    string relReason;
+                    if (!relReasonByPath.TryGetValue(filePath, out relReason))
+                        relReason = "";
 
                     results.Add(new VaultFile
                     {
@@ -1728,6 +1737,7 @@ namespace PDMLite
                         ModifiedDate = modDate,
                         ReleasedDate = relDate,
                         ReleasedBy  = relBy,
+                        ReleaseReason = relReason,
                         LockedBy    = (string)el.Element("LockedBy")    ?? "",
                         ReferencedModel = (string)el.Element("ReferencedModel") ?? "",
                         ReferencedConfigs = (string)el.Element("ReferencedConfigs") ?? "",
@@ -2681,7 +2691,7 @@ namespace PDMLite
         // even in degraded-lock mode, exactly like SetFileStatus/UpsertFile.
         public static void SaveAssemblyBaseline(string asmPath, string asmName,
             string partNo, string rev, string config, string user,
-            List<BaselineComponent> components)
+            List<BaselineComponent> components, string reason = null)
         {
             if (string.IsNullOrEmpty(asmPath)) return;
             lock (_lock) using (AcquireProcessLock())
@@ -2718,7 +2728,8 @@ namespace PDMLite
                     new XAttribute("Config", config ?? ""),
                     new XAttribute("ReleasedBy", user ?? ""),
                     new XAttribute("ReleasedDate",
-                        DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss")));
+                        DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss")),
+                    new XAttribute("Reason", reason ?? ""));
 
                 var files = root.Element("Files");
                 foreach (var comp in components ?? new List<BaselineComponent>())
@@ -2807,7 +2818,8 @@ namespace PDMLite
                         Revision     = (string)b.Attribute("Revision")     ?? "",
                         Config       = (string)b.Attribute("Config")       ?? "",
                         ReleasedBy   = (string)b.Attribute("ReleasedBy")   ?? "",
-                        ReleasedDate = (string)b.Attribute("ReleasedDate") ?? ""
+                        ReleasedDate = (string)b.Attribute("ReleasedDate") ?? "",
+                        Reason       = (string)b.Attribute("Reason")       ?? ""
                     };
                     foreach (var c in b.Elements("Component"))
                     {

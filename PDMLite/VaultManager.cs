@@ -425,6 +425,22 @@ namespace PDMLite
                     MessageBoxButtons.YesNo, MessageBoxIcon.Warning)
                     != DialogResult.Yes) return;
 
+            // ── Reason for retirement (recorded in the AUDIT trail) ───────
+            // Removal deletes the vault record, so there is no history entry to
+            // carry the "why" — but the append-only audit log survives the
+            // record delete and is exactly where a Master looks for "why was
+            // this retired". Captured after the confirm, before any file moves,
+            // so Cancel aborts with nothing touched.
+            string reason;
+            using (var rf = new ReasonForChangeForm(
+                "Remove from Vault — Reason",
+                "Select the reason for retiring " + fileName + ":",
+                RemoveReasonCodes))
+            {
+                if (rf.ShowDialog() != DialogResult.OK) return; // cancelled → abort
+                reason = rf.Reason;
+            }
+
             // Close open documents before moving files on disk (Windows holds a
             // lock on an open file). Close the drawings first — they reference
             // the model, so the model can't close while a drawing is open.
@@ -474,7 +490,7 @@ namespace PDMLite
             }
             DatabaseManager.RemoveFileRecord(filePath);
             AuditLogger.Log("RemoveFromVault", user, fileName, partNo, rev,
-                "moved to SCRAP");
+                "moved to SCRAP — " + reason);
 
             // Move every associated drawing's artifacts (PDFs were already
             // scrapped above via the per-config DrawingNos). Same move-gate as
@@ -496,7 +512,7 @@ namespace PDMLite
                 MoveToScrap(Path.Combine(RelFolder, drwName));
                 DatabaseManager.RemoveFileRecord(dp);
                 AuditLogger.Log("RemoveFromVault", user, drwName, partNo, rev,
-                    "drawing of " + fileName + ", moved to SCRAP");
+                    "drawing of " + fileName + ", moved to SCRAP — " + reason);
             }
 
             MessageBox.Show(
@@ -644,6 +660,27 @@ namespace PDMLite
                 StringComparison.OrdinalIgnoreCase);
         }
 
+        // Standard reason-for-change codes (the SW-PDM / ECO reason-code
+        // pattern) offered by ReasonForChangeForm at each Master operation. A
+        // controlled vocabulary keeps the "why" consistent across the three
+        // divisions and groupable in the Audit Report; "Other" is the free-form
+        // escape hatch (requires a detail). Each operation gets its own list.
+        private static readonly string[] ReleaseReasonCodes =
+        {
+            "Initial Release", "Design Change", "Customer Request",
+            "Cost Reduction", "Manufacturing Improvement", "Supplier Change",
+            "Document / Drawing Error", "Regulatory / Compliance", "Other"
+        };
+        private static readonly string[] RollbackReasonCodes =
+        {
+            "Released in Error", "Change Reverted", "Data / Export Error",
+            "Superseded", "Other"
+        };
+        private static readonly string[] RemoveReasonCodes =
+        {
+            "Obsolete", "Superseded", "Created in Error", "Duplicate", "Other"
+        };
+
         // ── RELEASE ───────────────────────────────────────────────────────
         // suppressPrompts skips the confirm + success dialogs (used when this
         // file is being released as part of a chained drawing+model release so
@@ -732,16 +769,15 @@ namespace PDMLite
             // is REQUIRED (Cancel aborts the whole release).
             if (reason == null && !suppressPrompts)
             {
-                while (true)
+                // Categorised reason capture (the dialog enforces "required" —
+                // OK is disabled until a code is chosen, so no re-prompt loop).
+                using (var rf = new ReasonForChangeForm(
+                    "Release — Reason for Change",
+                    "Select the reason for releasing this file:",
+                    ReleaseReasonCodes))
                 {
-                    reason = ShowNoteDialog("Release — Reason for Change",
-                        "Describe the reason for this release (required):");
-                    if (reason == null) return; // cancelled → abort release
-                    if (!string.IsNullOrWhiteSpace(reason)) break;
-                    MessageBox.Show(
-                        "A reason for the release is required.",
-                        "BCore PDM — Reason Required",
-                        MessageBoxButtons.OK, MessageBoxIcon.Information);
+                    if (rf.ShowDialog() != DialogResult.OK) return; // cancelled → abort
+                    reason = rf.Reason;
                 }
             }
 
@@ -1523,7 +1559,7 @@ namespace PDMLite
                 string baselineCfg = (doc.GetActiveConfiguration()
                     as SolidWorks.Interop.sldworks.Configuration)?.Name ?? "";
                 BaselineManager.CaptureAssemblyBaseline(doc, filePath, partNo, rev,
-                    baselineCfg, user);
+                    baselineCfg, user, reason);
             }
 
             if (chainedRelease)
@@ -2926,6 +2962,22 @@ namespace PDMLite
 
             if (confirm != DialogResult.Yes) return;
 
+            // ── Reason for change (the rollback IS a change worth recording) ──
+            // Captured AFTER the final confirm but BEFORE anything is archived
+            // or moved, so Cancel aborts cleanly with nothing touched. Stored
+            // reason-led on the history note + the audit "Rollback" Note, and
+            // shared with the chained drawing rollback below so the model and
+            // its drawing record ONE reason.
+            string reason;
+            using (var rf = new ReasonForChangeForm(
+                "Rollback — Reason for Change",
+                "Select the reason for rolling back to " + targetRev + ":",
+                RollbackReasonCodes))
+            {
+                if (rf.ShowDialog() != DialogResult.OK) return; // cancelled → abort
+                reason = rf.Reason;
+            }
+
             // Read everything still needed from the document BEFORE closing
             // it below — after CloseDoc the COM reference is dead.
             // DRAWING: its own PartNo/DrawingNo properties are typically
@@ -3111,9 +3163,9 @@ namespace PDMLite
                 // ── Step 8: Update database ───────────────────────────────
                 DatabaseManager.LockFile(filePath, user);
                 DatabaseManager.SetFileStatus(filePath, "Released", user,
-                    "Rolled back to " + targetRev);
+                    reason + "  (Rolled back to " + targetRev + ")");
                 AuditLogger.Log("Rollback", user, Path.GetFileName(filePath),
-                    partNo, targetRev);
+                    partNo, targetRev, reason);
 
                 // ── Step 8.5: Sync the record with the RESTORED file ──────
                 // The record's PartNo/Description/Revision/configs are
@@ -3260,7 +3312,8 @@ namespace PDMLite
                                 SetReadOnly(drwTarget, true);
                                 DatabaseManager.LockFile(drwTarget, user);
                                 DatabaseManager.SetFileStatus(drwTarget, "Released",
-                                    user, "Drawing rolled back to " + targetRev);
+                                    user, reason + "  (Drawing rolled back to " +
+                                    targetRev + ")");
                                 // Sync the drawing's record to the rolled-back rev so
                                 // search/dashboard show it correctly (the model is
                                 // synced via Step 8.5; a drawing only needs its

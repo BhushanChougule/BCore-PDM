@@ -931,6 +931,14 @@ namespace PDMLite
             else if (e.ColumnIndex == 3 && Eq(f.Status, "Locked") &&
                      !string.IsNullOrEmpty(f.LockedBy))
                 e.ToolTipText = "Locked by " + f.LockedBy;
+            // Reason-for-change of the latest release — surfaced on the Status
+            // (when Released), Released By and Released Date cells, so the "why"
+            // is one hover away without adding a column. Cols: Status=3,
+            // Released By=7, Released Date=8.
+            else if (!string.IsNullOrWhiteSpace(f.ReleaseReason) &&
+                     (e.ColumnIndex == 7 || e.ColumnIndex == 8 ||
+                      (e.ColumnIndex == 3 && Eq(f.Status, "Released"))))
+                e.ToolTipText = "Reason: " + f.ReleaseReason;
         }
 
         private void ClearAllFilters()
