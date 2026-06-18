@@ -673,9 +673,12 @@ namespace PDMLite
 
             foreach (SearchGroup g in cards)
             {
-                Color statusColor = g.Status == "Released" ? cGreen
-                                  : g.Status == "Locked" ? cOrange
-                                  : cBrand;
+                // Route through the shared StatusColor helper (single source of
+                // truth) — the old inline Released/Locked/else mapping here had no
+                // Obsolete case, so an Obsolete card's bar fell through to cBrand
+                // (the same blue as WIP). StatusColor returns green/orange/grey/
+                // blue for Released/Locked/Obsolete/default, identical otherwise.
+                Color statusColor = StatusColor(g.Status);
                 string statusText = (string.IsNullOrEmpty(g.Status)
                                         ? "WIP" : g.Status).ToUpper();
 
