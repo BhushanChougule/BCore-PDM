@@ -299,7 +299,18 @@ namespace PDMLite
             {
                 pick.ShowDialog();
                 if (pick.Selected != null)
-                    supersededBy = pick.Selected.PartNumber ?? "";
+                {
+                    // Prefer the replacement's Part No, but FALL BACK to its file
+                    // name when the file-level PartNo is empty (common on a multi-
+                    // config part, whose PartNo lives per-config) — otherwise a
+                    // picked replacement would store nothing and "superseded by X"
+                    // would never appear.
+                    var sel = pick.Selected;
+                    supersededBy = !string.IsNullOrWhiteSpace(sel.PartNumber)
+                        ? sel.PartNumber.Trim()
+                        : Path.GetFileNameWithoutExtension(
+                            sel.FileName ?? sel.FilePath ?? "");
+                }
             }
 
             // Claim the file for the status change (same guard as UnlockFile)
@@ -309,7 +320,12 @@ namespace PDMLite
             try
             {
                 SetReadOnly(filePath, true); // freeze on disk (best-effort)
-                DatabaseManager.SetFileStatus(filePath, "Obsolete", user, reason);
+                // History note carries the reason AND the replacement, so File
+                // History reads e.g. "Superseded by New Design  (replaced by X)".
+                string obsNote = string.IsNullOrEmpty(supersededBy)
+                    ? reason
+                    : reason + "  (replaced by " + supersededBy + ")";
+                DatabaseManager.SetFileStatus(filePath, "Obsolete", user, obsNote);
                 // Always write the link (empty clears any stale value) so the
                 // record and the disk/UI never disagree about the replacement.
                 DatabaseManager.SetSupersededBy(filePath, supersededBy);

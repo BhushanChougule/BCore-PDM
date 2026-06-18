@@ -56,6 +56,7 @@ namespace PDMLite
                 ((SldWorks)SwApp).FileOpenPostNotify += OnFileOpenPost;
                 HookAllOpenDocs();
                 UpdateActivePresence();
+                WarnObsoleteOnOpen();
                 return true;
             }
             catch (Exception ex)
@@ -83,7 +84,7 @@ namespace PDMLite
         // On every active-doc change, re-scan ALL open documents.
         // This catches new files and any document that lost its handler
         // (e.g. due to a spurious DestroyNotify from the Custom Properties tab).
-        private int OnActiveDocChange() { HookAllOpenDocs(); UpdateActivePresence(); return 0; }
+        private int OnActiveDocChange() { HookAllOpenDocs(); UpdateActivePresence(); WarnObsoleteOnOpen(); return 0; }
 
         // File→New / File→Open into an EMPTY session never fires
         // ActiveDocChangeNotify — these cover that gap (see ConnectToSW).
@@ -94,7 +95,7 @@ namespace PDMLite
         { TryHookDoc(newDoc as ModelDoc2); HookAllOpenDocs(); return 0; }
 
         private int OnFileOpenPost(string fileName)
-        { HookAllOpenDocs(); UpdateActivePresence(); return 0; }
+        { HookAllOpenDocs(); UpdateActivePresence(); WarnObsoleteOnOpen(); return 0; }
 
         internal void HookAllOpenDocs()
         {
@@ -205,6 +206,49 @@ namespace PDMLite
         private readonly HashSet<string> _presenceChecked =
             new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
+        // Tracks assemblies already WARNED about obsolete components this open.
+        // Distinct from _presenceChecked: a path is added here ONLY once we
+        // actually warn — so if the FIRST activation's dependency read came back
+        // empty (deps not resolved yet, or the child was obsoleted after this
+        // assembly was already open), a later activation re-checks and still
+        // warns, instead of being permanently guarded out. Cleared on close.
+        private readonly HashSet<string> _obsoleteWarned =
+            new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+        // Design-time guard: opening/activating an assembly that still contains
+        // OBSOLETE (superseded) components warns ONCE per open (the release gate
+        // blocks it later, but flag it early so an obsolete part doesn't quietly
+        // spread into new work). Non-blocking. Re-evaluates every activation
+        // until it finds obsolete children (then guards to avoid nagging) — see
+        // _obsoleteWarned. Independent of UpdateActivePresence so the presence
+        // flow's Released-skip can't suppress it.
+        private void WarnObsoleteOnOpen()
+        {
+            try
+            {
+                var doc = SwApp?.ActiveDoc as ModelDoc2;
+                if (doc == null) return;
+                if (doc.GetType() != (int)swDocumentTypes_e.swDocASSEMBLY) return;
+
+                string path = doc.GetPathName();
+                if (string.IsNullOrEmpty(path)) return;
+
+                var obs = VaultManager.GetObsoleteComponentsByPath(path);
+                if (obs.Count == 0) return;          // nothing (or not resolvable yet)
+                if (!_obsoleteWarned.Add(path)) return; // already warned this open
+
+                SwApp.SendMsgToUser2(
+                    "⚠  OBSOLETE COMPONENTS — BCore PDM\n\n" +
+                    "This assembly contains components that are OBSOLETE " +
+                    "(superseded):\n\n  • " + string.Join("\n  • ", obs) + "\n\n" +
+                    "Replace them with their current versions — an obsolete " +
+                    "component will block this assembly's release.",
+                    (int)swMessageBoxIcon_e.swMbWarning,
+                    (int)swMessageBoxBtn_e.swMbOk);
+            }
+            catch { }
+        }
+
         private void UpdateActivePresence()
         {
             try
@@ -215,32 +259,6 @@ namespace PDMLite
                 string path = doc.GetPathName();
                 if (string.IsNullOrEmpty(path)) return;        // unsaved — not tracked
                 if (!_presenceChecked.Add(path)) return;        // already handled this open
-
-                // Design-time guard: opening an assembly that still contains
-                // OBSOLETE components warns ONCE (the release gate blocks it later,
-                // but flag it early so an obsolete part doesn't quietly spread into
-                // new work). Non-blocking — the user may be mid-revision-away. Runs
-                // for any assembly regardless of its own status (a child can be
-                // obsoleted after the parent was released).
-                try
-                {
-                    if (doc.GetType() == (int)swDocumentTypes_e.swDocASSEMBLY)
-                    {
-                        var obs = VaultManager.GetObsoleteComponentsByPath(path);
-                        if (obs.Count > 0)
-                            SwApp.SendMsgToUser2(
-                                "⚠  OBSOLETE COMPONENTS — BCore PDM\n\n" +
-                                "This assembly contains components that are " +
-                                "OBSOLETE (superseded):\n\n  • " +
-                                string.Join("\n  • ", obs) + "\n\n" +
-                                "Replace them with their current versions — an " +
-                                "obsolete component will block this assembly's " +
-                                "release.",
-                                (int)swMessageBoxIcon_e.swMbWarning,
-                                (int)swMessageBoxBtn_e.swMbOk);
-                    }
-                }
-                catch { }
 
                 // Released files are read-only for editing, so two people can
                 // never produce a save conflict on them — skip presence there.
@@ -289,6 +307,7 @@ namespace PDMLite
             // which were never registered — a harmless no-op). Also forget the
             // in-memory check so reopening the file warns/registers afresh.
             _presenceChecked.Remove(id);
+            _obsoleteWarned.Remove(id);   // re-warn about obsolete children on reopen
             try { DatabaseManager.ClearOpenSession(id, CurrentUser,
                 System.Environment.MachineName); } catch { }
 
