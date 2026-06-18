@@ -1494,9 +1494,17 @@ namespace PDMLite
             // A second entry would cause duplicate search results and false
             // part-number conflict warnings.
             DatabaseManager.LockFile(filePath, user);
+            // History note LEADS with the reason — the entry's own status line
+            // already says "Released" and the card shows the rev, so prefixing
+            // the note with "Released REV x — " only duplicated both and, in the
+            // narrow task-pane history panel, pushed the actual reason past the
+            // ellipsis (the reason looked "missing" in File History even though
+            // it was stored — and shows in the Audit Report). Reason first, rev
+            // kept as a short trailing tag; bulk/suppressed releases (no reason)
+            // fall back to the rev tag alone.
             string relNote = string.IsNullOrWhiteSpace(reason)
-                ? "Released REV " + rev
-                : "Released REV " + rev + " — " + reason;
+                ? "Released at REV " + rev
+                : reason + "  (REV " + rev + ")";
             DatabaseManager.SetFileStatus(filePath, "Released", user, relNote);
             AuditLogger.Log("Release", user, Path.GetFileName(filePath),
                 partNo, rev, reason ?? "");

@@ -1277,6 +1277,17 @@ namespace PDMLite
 
                 if (!string.IsNullOrEmpty(entry.ChangeNote))
                 {
+                    // WRAP the note (up to ~3 lines) instead of hard-truncating
+                    // on one line — a reason-for-change can be a full sentence,
+                    // and a single ellipsised line hid it in the narrow panel.
+                    int noteW = _historyPanel.Width - S(20);
+                    int oneLine = S(14);
+                    int noteH = TextRenderer.MeasureText(
+                        entry.ChangeNote, _fReg33,
+                        new Size(noteW, int.MaxValue),
+                        TextFormatFlags.WordBreak).Height;
+                    if (noteH < oneLine) noteH = oneLine;
+                    if (noteH > oneLine * 3) noteH = oneLine * 3; // cap at 3 lines
                     _historyPanel.Controls.Add(new Label
                     {
                         Text = entry.ChangeNote,
@@ -1284,11 +1295,11 @@ namespace PDMLite
                         ForeColor = cTextLight,
                         Location = new Point(S(4), hy),
                         AutoSize = false,
-                        Width = _historyPanel.Width - S(20),
-                        Height = S(14),
+                        Width = noteW,
+                        Height = noteH,
                         AutoEllipsis = true
                     });
-                    hy += S(15);
+                    hy += noteH + S(1);
                 }
 
                 _historyPanel.Controls.Add(new Panel
