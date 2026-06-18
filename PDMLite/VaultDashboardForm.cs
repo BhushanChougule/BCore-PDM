@@ -963,6 +963,16 @@ namespace PDMLite
                      (e.ColumnIndex == 7 || e.ColumnIndex == 8 ||
                       (e.ColumnIndex == 3 && Eq(f.Status, "Released"))))
                 e.ToolTipText = "Reason: " + f.ReleaseReason;
+            // Obsolete row Status cell: the obsolete reason + the replacement
+            // part (if recorded), so the "why" and "use-instead" are one hover away.
+            else if (e.ColumnIndex == 3 && Eq(f.Status, "Obsolete"))
+            {
+                string t = string.IsNullOrWhiteSpace(f.ObsoleteReason)
+                    ? "Obsolete" : "Obsolete: " + f.ObsoleteReason;
+                if (!string.IsNullOrWhiteSpace(f.SupersededBy))
+                    t += "\nSuperseded by: " + f.SupersededBy;
+                e.ToolTipText = t;
+            }
         }
 
         private void ClearAllFilters()

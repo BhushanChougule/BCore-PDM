@@ -216,6 +216,32 @@ namespace PDMLite
                 if (string.IsNullOrEmpty(path)) return;        // unsaved — not tracked
                 if (!_presenceChecked.Add(path)) return;        // already handled this open
 
+                // Design-time guard: opening an assembly that still contains
+                // OBSOLETE components warns ONCE (the release gate blocks it later,
+                // but flag it early so an obsolete part doesn't quietly spread into
+                // new work). Non-blocking — the user may be mid-revision-away. Runs
+                // for any assembly regardless of its own status (a child can be
+                // obsoleted after the parent was released).
+                try
+                {
+                    if (doc.GetType() == (int)swDocumentTypes_e.swDocASSEMBLY)
+                    {
+                        var obs = VaultManager.GetObsoleteComponentsByPath(path);
+                        if (obs.Count > 0)
+                            SwApp.SendMsgToUser2(
+                                "⚠  OBSOLETE COMPONENTS — BCore PDM\n\n" +
+                                "This assembly contains components that are " +
+                                "OBSOLETE (superseded):\n\n  • " +
+                                string.Join("\n  • ", obs) + "\n\n" +
+                                "Replace them with their current versions — an " +
+                                "obsolete component will block this assembly's " +
+                                "release.",
+                                (int)swMessageBoxIcon_e.swMbWarning,
+                                (int)swMessageBoxBtn_e.swMbOk);
+                    }
+                }
+                catch { }
+
                 // Released files are read-only for editing, so two people can
                 // never produce a save conflict on them — skip presence there.
                 if (DatabaseManager.GetFileStatus(path) == "Released") return;
@@ -401,7 +427,11 @@ namespace PDMLite
                 // even if the read-only attribute was cleared out of band.
                 if (status == "Obsolete")
                 {
+                    string repl = "";
+                    try { repl = DatabaseManager.GetSupersededBy(filePath); } catch { }
                     Block("This file is OBSOLETE (superseded).\n\n" +
+                          (string.IsNullOrEmpty(repl)
+                              ? "" : "Superseded by: " + repl + "\n\n") +
                           "Obsolete files are kept for reference but cannot be " +
                           "edited.\n\nA Master can Reinstate it (Vault Dashboard " +
                           "→ right-click the row → Reinstate) to return it to " +

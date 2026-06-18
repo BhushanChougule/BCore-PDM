@@ -290,6 +290,18 @@ namespace PDMLite
                 reason = rf.Reason;
             }
 
+            // Optional: which file SUPERSEDES this one (the replacement). Recorded
+            // so "→ superseded by X" shows wherever the obsolete file appears (the
+            // save-block message, the dashboard tooltip, the search card) — telling
+            // engineers what to use instead. Skipping is allowed (no replacement).
+            string supersededBy = "";
+            using (var pick = new SupersededByPickerForm(filePath))
+            {
+                pick.ShowDialog();
+                if (pick.Selected != null)
+                    supersededBy = pick.Selected.PartNumber ?? "";
+            }
+
             // Claim the file for the status change (same guard as UnlockFile)
             // so a Mark-Obsolete can't interleave with a Release/Unlock racing
             // on the same file from another Master.
@@ -298,11 +310,20 @@ namespace PDMLite
             {
                 SetReadOnly(filePath, true); // freeze on disk (best-effort)
                 DatabaseManager.SetFileStatus(filePath, "Obsolete", user, reason);
-                AuditLogger.Log("MarkObsolete", user, name, "", "", reason);
+                // Always write the link (empty clears any stale value) so the
+                // record and the disk/UI never disagree about the replacement.
+                DatabaseManager.SetSupersededBy(filePath, supersededBy);
+                AuditLogger.Log("MarkObsolete", user, name, "", "",
+                    string.IsNullOrEmpty(supersededBy)
+                        ? reason
+                        : reason + " — superseded by " + supersededBy);
 
                 MessageBox.Show(
-                    name + " is now Obsolete.\n\nIt remains in the vault for " +
-                    "reference but cannot be edited or released until Reinstated.",
+                    name + " is now Obsolete." +
+                    (string.IsNullOrEmpty(supersededBy)
+                        ? "" : "\nSuperseded by: " + supersededBy) +
+                    "\n\nIt remains in the vault for reference but cannot be " +
+                    "edited or released until Reinstated.",
                     "BCore PDM — Obsolete",
                     MessageBoxButtons.OK, MessageBoxIcon.Information);
             }
@@ -352,6 +373,7 @@ namespace PDMLite
                 SetReadOnly(filePath, false);
                 DatabaseManager.SetFileStatus(filePath, "WIP", user,
                     "Reinstated from Obsolete to WIP");
+                DatabaseManager.SetSupersededBy(filePath, ""); // no longer superseded
                 AuditLogger.Log("Reinstate", user, name);
 
                 // Capture the open doc BEFORE the message so we can refresh SW's
@@ -3639,6 +3661,63 @@ namespace PDMLite
             catch { }
             return unreleased;
         }
+
+        // Returns the OBSOLETE components of an assembly (from the disk dependency
+        // walk, like GetUnreleasedComponentsByPath) — each as "name (superseded by
+        // X)" when a replacement is recorded, else just the name. Drives the
+        // design-time warning shown when an assembly with obsolete children is
+        // opened, so an obsolete part can't quietly spread into new work (the
+        // release gate already blocks it, but this catches it far earlier).
+        public static List<string> GetObsoleteComponentsByPath(string asmPath)
+        {
+            var obsolete = new List<string>();
+            var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            try
+            {
+                if (string.IsNullOrEmpty(asmPath) || !File.Exists(asmPath))
+                    return obsolete;
+
+                string asmNorm;
+                try { asmNorm = Path.GetFullPath(asmPath); }
+                catch { asmNorm = asmPath; }
+
+                object depsObj = PDMLiteAddin.SwApp.GetDocumentDependencies2(
+                    asmPath, true, true, false);
+                string[] deps = depsObj as string[];
+                if (deps == null) return obsolete;
+
+                for (int i = 1; i < deps.Length; i += 2)
+                {
+                    string path = deps[i];
+                    if (string.IsNullOrEmpty(path)) continue;
+                    if (path.IndexOf("\\Toolbox\\",
+                            StringComparison.OrdinalIgnoreCase) >= 0)
+                        continue;
+
+                    string norm;
+                    try { norm = Path.GetFullPath(path); }
+                    catch { norm = path; }
+                    if (string.Equals(norm, asmNorm,
+                            StringComparison.OrdinalIgnoreCase)) continue;
+                    if (!seen.Add(norm)) continue;
+
+                    string ext = Path.GetExtension(norm).ToLower();
+                    if (ext != ".sldprt" && ext != ".sldasm") continue;
+
+                    if (string.Equals(DatabaseManager.GetFileStatus(norm),
+                            "Obsolete", StringComparison.OrdinalIgnoreCase))
+                    {
+                        string repl = DatabaseManager.GetSupersededBy(norm);
+                        obsolete.Add(Path.GetFileName(norm) +
+                            (string.IsNullOrEmpty(repl)
+                                ? "" : "   (superseded by " + repl + ")"));
+                    }
+                }
+            }
+            catch { }
+            return obsolete;
+        }
+
         // ── REQUEST REVISION — Engineer requests a new revision ───────
         public static void RequestRevision(ModelDoc2 doc)
         {

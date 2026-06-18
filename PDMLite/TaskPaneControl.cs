@@ -753,13 +753,22 @@ namespace PDMLite
                     AutoEllipsis = true
                 });
 
-                // ── Description ───────────────────────────────────────────
+                // ── Description (for an Obsolete card WITH a recorded
+                // replacement, show "→ Superseded by X" here instead — the
+                // replacement is what an engineer needs from a retired part, and
+                // it reuses this line so the fixed card height is unchanged) ──
+                bool obsoleteWithRepl =
+                    string.Equals(g.Status, "Obsolete",
+                        StringComparison.OrdinalIgnoreCase) &&
+                    !string.IsNullOrEmpty(g.SupersededBy);
                 card.Controls.Add(new Label
                 {
-                    Text = string.IsNullOrEmpty(g.Description)
-                                ? "(no description)" : g.Description,
+                    Text = obsoleteWithRepl
+                        ? "→ Superseded by " + g.SupersededBy
+                        : (string.IsNullOrEmpty(g.Description)
+                                ? "(no description)" : g.Description),
                     Font = _fReg33,
-                    ForeColor = cTextLight,
+                    ForeColor = obsoleteWithRepl ? cMaroon : cTextLight,
                     Location = new Point(contentLeft, S(34)),
                     AutoSize = false,
                     Width = contentW,
@@ -980,6 +989,7 @@ namespace PDMLite
                             DisplayName = Path.GetFileNameWithoutExtension(f.FileName),
                             DrawingPath = f.FilePath,
                             Status = f.Status,
+                            SupersededBy = f.SupersededBy,
                             PartNumber = "",
                             Description = ""
                         });
@@ -1040,6 +1050,7 @@ namespace PDMLite
                                      ? model.Description : c.Description,
                     Revision     = c.Revision,
                     Status       = model.Status,
+                    SupersededBy = model.SupersededBy,
                     DrawingPath  = drawingPath,
                     TotalConfigs = total
                 });
@@ -1060,6 +1071,7 @@ namespace PDMLite
             public string Description;   // this config's description
             public string Revision;      // this config's revision
             public string Status;        // file-level status
+            public string SupersededBy;  // replacement Part No (Obsolete files only)
             public int    TotalConfigs;  // number of configs in the file
         }
 
