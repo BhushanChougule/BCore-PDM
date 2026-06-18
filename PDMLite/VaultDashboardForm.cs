@@ -87,6 +87,10 @@ namespace PDMLite
         private ContextMenuStrip _rowMenu;
         private ToolStripMenuItem _miOpen, _miOpenLinked, _miCopyPath, _miOpenFolder;
         private ToolStripMenuItem _miBaseline; // "View As-Released Baseline" (assembly rows)
+        // Master-only lifecycle items — constructed ONLY for a Master (see
+        // _isMaster) so engineers never see them or a dangling separator.
+        private ToolStripMenuItem _miObsolete, _miReinstate;
+        private bool _isMaster;
         private VaultFile _menuRow;       // the ROW OBJECT the menu was opened on —
                                           // not an index: the search debounce can
                                           // rebuild _view while the menu is up, and
@@ -140,6 +144,14 @@ namespace PDMLite
         public VaultDashboardForm(float scale)
         {
             _scale = scale;
+            // Role decides whether the Master-only lifecycle menu items exist.
+            try
+            {
+                _isMaster = string.Equals(
+                    DatabaseManager.GetUserRole(System.Environment.UserName),
+                    "Master", StringComparison.OrdinalIgnoreCase);
+            }
+            catch { _isMaster = false; }
             BuildForm();
             LoadData();
         }
@@ -412,10 +424,22 @@ namespace PDMLite
             _miBaseline   = new ToolStripMenuItem("View As-Released Baseline", null, (s, e) => MenuViewBaseline());
             _miCopyPath   = new ToolStripMenuItem("Copy File Path", null, (s, e) => MenuCopyPath());
             _miOpenFolder = new ToolStripMenuItem("Open Containing Folder", null, (s, e) => MenuOpenFolder());
-            _rowMenu.Items.AddRange(new ToolStripItem[]
+            var menuItems = new List<ToolStripItem>
             {
                 _miOpen, _miOpenLinked, _miBaseline, new ToolStripSeparator(), _miCopyPath, _miOpenFolder
-            });
+            };
+            // Master-only lifecycle actions (Grid_MouseDown shows exactly one per
+            // row by status). Built only for Masters → engineers never see them
+            // or a dangling separator.
+            if (_isMaster)
+            {
+                _miObsolete  = new ToolStripMenuItem("Mark Obsolete…", null, (s, e) => MenuMarkObsolete());
+                _miReinstate = new ToolStripMenuItem("Reinstate from Obsolete", null, (s, e) => MenuReinstate());
+                menuItems.Add(new ToolStripSeparator());
+                menuItems.Add(_miObsolete);
+                menuItems.Add(_miReinstate);
+            }
+            _rowMenu.Items.AddRange(menuItems.ToArray());
             foreach (ToolStripItem it in _rowMenu.Items)
                 it.Padding = new Padding(S(6), S(3), S(18), S(3));
             // VirtualMode providers — the grid pulls value / colour / tooltip for
@@ -1318,6 +1342,7 @@ namespace PDMLite
             if (Eq(status, "Released")) return cGreen;
             if (Eq(status, "Locked"))   return cMaroon;
             if (Eq(status, "WIP"))      return cOrange;
+            if (Eq(status, "Obsolete")) return Color.FromArgb(120, 120, 120);
             return cTextGray;
         }
 
@@ -1358,6 +1383,16 @@ namespace PDMLite
             // Baselines are an assembly-only concept (the resolved child set).
             _miBaseline.Visible = (f.FileName ?? "")
                 .EndsWith(".sldasm", StringComparison.OrdinalIgnoreCase);
+
+            // Master lifecycle items: show exactly one per row by current status
+            // (Mark Obsolete for a non-Obsolete row, Reinstate for an Obsolete one).
+            if (_miObsolete != null)
+            {
+                bool isObsolete = (f.Status ?? "")
+                    .Equals("Obsolete", StringComparison.OrdinalIgnoreCase);
+                _miObsolete.Visible = !isObsolete;
+                _miReinstate.Visible = isObsolete;
+            }
 
             _rowMenu.Show(_grid, e.Location);
         }
@@ -1450,6 +1485,28 @@ namespace PDMLite
         {
             var f = MenuRow();
             if (f != null) OpenDeferred(f.FilePath);
+        }
+
+        // ── Master lifecycle actions (Obsolete) ─────────────────────────────
+        // Act on the right-clicked file BY PATH (no open needed). VaultManager
+        // confirms, prompts for a reason and re-checks the Master role itself;
+        // its dialogs are modal ON TOP of the dashboard (it stays open, like
+        // MenuViewBaseline). Refresh the snapshot afterwards so the row's new
+        // status shows.
+        private void MenuMarkObsolete()
+        {
+            var f = MenuRow();
+            if (f == null) return;
+            VaultManager.MarkObsolete(f.FilePath);
+            LoadData();
+        }
+
+        private void MenuReinstate()
+        {
+            var f = MenuRow();
+            if (f == null) return;
+            VaultManager.ReinstateFromObsolete(f.FilePath);
+            LoadData();
         }
 
         // Show the assembly's captured as-released baselines (read-only). Opens

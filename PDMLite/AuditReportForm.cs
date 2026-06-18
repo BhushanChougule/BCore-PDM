@@ -927,6 +927,8 @@ namespace PDMLite
             if (Eq(action, "NewRevision")) return cBrand;
             if (Eq(action, "Rollback")) return cOrange;
             if (Eq(action, "RemoveFromVault") || Eq(action, "RejectRequest")) return cRed;
+            if (Eq(action, "MarkObsolete")) return cMaroon;
+            if (Eq(action, "Reinstate")) return cBrand;
             if (Eq(action, "Lock") || Eq(action, "Unlock")) return cMaroon;
             if (action != null && action.StartsWith("Request",
                     StringComparison.OrdinalIgnoreCase)) return cPurple;
