@@ -92,6 +92,9 @@
       <SubType>Form</SubType>
     </Compile>
     <Compile Include="PropertyValidator.cs" />
+    <Compile Include="ReasonForChangeForm.cs">
+      <SubType>Form</SubType>
+    </Compile>
     <Compile Include="ReferenceChecker.cs" />
     <Compile Include="RollbackDialog.cs">
       <SubType>Form</SubType>
