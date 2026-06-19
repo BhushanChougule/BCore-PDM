@@ -2823,16 +2823,16 @@ namespace PDMLite
         // before). ParentPassesConfigFilter then drops a direct parent ONLY when
         // its baseline PROVES a different config — verified matches AND unverified
         // (no-baseline WIP) parents are kept, so a real usage is never hidden.
-        private static DatabaseManager.BaselineChildUsage BuildConfigUsage(
+        private static DatabaseManager.ChildConfigUsage BuildConfigUsage(
             string filePath, string targetPartNo)
         {
             if (string.IsNullOrEmpty(targetPartNo)) return null;
-            try { return DatabaseManager.GetBaselineChildUsage(filePath, targetPartNo); }
+            try { return DatabaseManager.GetChildConfigUsage(filePath, targetPartNo); }
             catch { return null; } // any failure ⇒ degrade to file-level (never crash)
         }
 
         private static bool ParentPassesConfigFilter(string parentPath,
-            DatabaseManager.BaselineChildUsage usage)
+            DatabaseManager.ChildConfigUsage usage)
         {
             if (usage == null) return true;            // file-level — keep everything
             string pf;
@@ -2840,6 +2840,65 @@ namespace PDMLite
             if (usage.ParentsUsingTarget.Contains(pf)) return true;          // verified: uses target config
             if (usage.ParentsWithDifferentConfig.Contains(pf)) return false; // verified: uses a DIFFERENT config
             return true;                                                     // unverified ⇒ keep
+        }
+
+        // Capture the assembly's DIRECT (top-level) children + the config each
+        // references, AT SAVE TIME (the doc is already open, so this opens nothing
+        // and is cheap). Reads ReferencedConfiguration WITHOUT resolving lightweight
+        // components — GetRootComponent3(FALSE) — because the referenced-config is
+        // stored in the assembly itself, so loading the child models is unnecessary
+        // (that resolve is the expensive call, and we deliberately avoid it to keep
+        // saves fast). Instances grouped by path+config with a Qty. Suppressed
+        // components are skipped (GetSuppression2, NOT IsSuppressed — same rule as
+        // the BOM/baseline), so the snapshot agrees with the baseline. Best-effort
+        // + non-fatal: any failure → empty list, and the post-save upsert then
+        // PRESERVES the previous snapshot. Powers config-accurate Where Used for WIP
+        // assemblies (which have no baseline yet). Assemblies only.
+        public static List<ComponentRef> GetTopLevelComponentConfigs(ModelDoc2 doc)
+        {
+            var list = new List<ComponentRef>();
+            try
+            {
+                if (doc == null ||
+                    doc.GetType() != (int)swDocumentTypes_e.swDocASSEMBLY) return list;
+                var cfg = doc.GetActiveConfiguration() as Configuration;
+                Component2 root = cfg?.GetRootComponent3(false); // false = no resolve
+                object[] kids = root?.GetChildren() as object[];
+                if (kids == null) return list;
+
+                var index = new Dictionary<string, ComponentRef>(
+                    StringComparer.OrdinalIgnoreCase);
+                foreach (object o in kids)
+                {
+                    var comp = o as Component2;
+                    if (comp == null) continue;
+                    int sup = -1;
+                    try { sup = comp.GetSuppression2(); } catch { }
+                    if (sup == (int)swComponentSuppressionState_e.swComponentSuppressed)
+                        continue;
+                    string path = "";
+                    try { path = comp.GetPathName() ?? ""; } catch { }
+                    if (string.IsNullOrEmpty(path)) continue;
+                    string ext = Path.GetExtension(path).ToLowerInvariant();
+                    if (ext != ".sldprt" && ext != ".sldasm") continue;
+                    string refCfg = "";
+                    try { refCfg = comp.ReferencedConfiguration ?? ""; } catch { }
+                    // A flat-pattern view config resolves to its parent (real config).
+                    refCfg = PropertyValidator.ParentConfigOf(refCfg);
+
+                    string key = path.ToLowerInvariant() + "|" + refCfg.ToLowerInvariant();
+                    ComponentRef cr;
+                    if (index.TryGetValue(key, out cr)) cr.Qty++;
+                    else
+                    {
+                        cr = new ComponentRef { Path = path, Config = refCfg, Qty = 1 };
+                        index[key] = cr;
+                        list.Add(cr);
+                    }
+                }
+            }
+            catch { list.Clear(); }
+            return list;
         }
 
         // Public, on-demand: returns the tracked assemblies that DIRECTLY
@@ -2986,7 +3045,7 @@ namespace PDMLite
             HashSet<string> expanded,
             Dictionary<string, Dictionary<string, int>> qtyCache,
             List<WhereUsedEntry> result,
-            DatabaseManager.BaselineChildUsage usage = null)
+            DatabaseManager.ChildConfigUsage usage = null)
         {
             if (level >= maxDepth) return;
             List<WhereUsedEntry> parents;
@@ -3094,28 +3153,35 @@ namespace PDMLite
             Dictionary<string, int> level0;
             if (!cache.TryGetValue(parentPath, out level0))
             {
-                level0 = null; // null = no baseline
+                level0 = null; // null = no data (no <Components> snapshot AND no baseline)
                 try
                 {
-                    var bls = DatabaseManager.GetBaselines(parentPath);
-                    if (bls != null && bls.Count > 0 && bls[0].Components != null)
+                    // CURRENT direct-children snapshot first (captured at save, so a
+                    // WIP assembly has a real Qty too); fall back to the latest
+                    // baseline only when the assembly has no snapshot yet.
+                    level0 = DatabaseManager.GetComponentQtys(parentPath);
+                    if (level0 == null)
                     {
-                        level0 = new Dictionary<string, int>(
-                            StringComparer.OrdinalIgnoreCase);
-                        foreach (var c in bls[0].Components) // most-recent first
+                        var bls = DatabaseManager.GetBaselines(parentPath);
+                        if (bls != null && bls.Count > 0 && bls[0].Components != null)
                         {
-                            if (c == null || c.Level != 0) continue;
-                            string cn = Path.GetFileName(c.Path ?? "");
-                            if (string.IsNullOrEmpty(cn)) continue;
-                            int q; level0.TryGetValue(cn, out q);
-                            level0[cn] = q + (c.Qty > 0 ? c.Qty : 0);
+                            level0 = new Dictionary<string, int>(
+                                StringComparer.OrdinalIgnoreCase);
+                            foreach (var c in bls[0].Components) // most-recent first
+                            {
+                                if (c == null || c.Level != 0) continue;
+                                string cn = Path.GetFileName(c.Path ?? "");
+                                if (string.IsNullOrEmpty(cn)) continue;
+                                int q; level0.TryGetValue(cn, out q);
+                                level0[cn] = q + (c.Qty > 0 ? c.Qty : 0);
+                            }
                         }
                     }
                 }
                 catch { level0 = null; }
                 cache[parentPath] = level0;
             }
-            if (level0 == null) return null;       // no baseline → unknown
+            if (level0 == null) return null;       // no snapshot / baseline → unknown
             int qty;
             return level0.TryGetValue(childFileName, out qty) ? qty : 0;
         }

@@ -17,6 +17,18 @@ namespace PDMLite
         public string Revision    { get; set; }
     }
 
+    // One DIRECT child of an assembly, captured at SAVE time (the assembly is open
+    // then, so this is cheap and needs no file opening): which file it is, which
+    // CONFIG of that file the assembly references, and how many instances. Stored
+    // per assembly in <Components>; powers config-accurate Where Used for WIP
+    // assemblies (which have no baseline yet). Config == Part No by convention.
+    public class ComponentRef
+    {
+        public string Path   { get; set; }
+        public string Config { get; set; }
+        public int    Qty    { get; set; }
+    }
+
     public class VaultFile
     {
         public string FilePath    { get; set; }
@@ -50,6 +62,10 @@ namespace PDMLite
         // Per-configuration metadata (parts/assemblies). Empty for drawings and for
         // old records that haven't been re-saved since this feature shipped.
         public List<ConfigEntry> Configurations { get; set; } = new List<ConfigEntry>();
+        // Direct (top-level) child components captured at save (ASSEMBLIES only) —
+        // {child path, referenced config, qty}. Drives config-accurate Where Used
+        // for WIP assemblies. Empty for parts/drawings and old records.
+        public List<ComponentRef> Components { get; set; } = new List<ComponentRef>();
         // Drawing-only: which model file and which of its configs this drawing documents.
         // ReferencedConfigs = "" means "all configs" (e.g. a config-table drawing).
         public string ReferencedModel   { get; set; }
@@ -570,6 +586,19 @@ namespace PDMLite
             return el;
         }
 
+        // <Components><Comp Path Config Qty/>…</Components> — the assembly's direct
+        // children + the config each uses, captured at save (attributes, compact).
+        private static XElement BuildComponentsElement(List<ComponentRef> comps)
+        {
+            var el = new XElement("Components");
+            foreach (var c in comps)
+                el.Add(new XElement("Comp",
+                    new XAttribute("Path",   c.Path   ?? ""),
+                    new XAttribute("Config", c.Config ?? ""),
+                    new XAttribute("Qty",    c.Qty)));
+            return el;
+        }
+
         // Read <Configurations> from a File element. If the element doesn't exist
         // (old record saved before multi-config shipped) synthesise a single entry
         // from the file-level PartNumber / Description / Revision fields so callers
@@ -702,6 +731,16 @@ namespace PDMLite
                         existing.Element("Configurations")?.Remove();
                         existing.Add(BuildConfigsElement(f.Configurations));
                     }
+
+                    // Direct-children snapshot (assemblies). Same preserve-on-empty
+                    // rule as Configurations: an empty list means the capture failed
+                    // transiently (or this isn't an assembly), so keep the old block
+                    // rather than wiping the config-accurate Where Used data.
+                    if (f.Components != null && f.Components.Count > 0)
+                    {
+                        existing.Element("Components")?.Remove();
+                        existing.Add(BuildComponentsElement(f.Components));
+                    }
                 }
                 else
                 {
@@ -722,6 +761,8 @@ namespace PDMLite
                     );
                     if (f.Configurations != null && f.Configurations.Count > 0)
                         fileEl.Add(BuildConfigsElement(f.Configurations));
+                    if (f.Components != null && f.Components.Count > 0)
+                        fileEl.Add(BuildComponentsElement(f.Components));
                     files.Add(fileEl);
                 }
 
@@ -2928,25 +2969,29 @@ namespace PDMLite
             return result;
         }
 
-        // WHERE-USED CONFIG FILTER source. A multi-config part is ONE file used as
-        // a specific CONFIG (= Part No) in each assembly; the dependency walk
-        // returns paths with no per-instance config, but the as-released BASELINES
-        // record each component's referenced CONFIG. This reads <Baselines> in ONE
-        // load (no file opening) and classifies every parent assembly's LATEST
-        // baseline against a target configuration:
-        //   ParentsUsingTarget        = its baseline has the child under targetConfig.
-        //   ParentsWithDifferentConfig = its baseline has the child under a KNOWN
-        //     (non-empty) config that is NOT the target — provably a different one.
-        // A parent in NEITHER set has no baseline (WIP/never released) OR an older
-        // baseline that captured no config — the where-used filter then KEEPS it
-        // (unverified) rather than hiding a possible real usage.
+        // WHERE-USED CONFIG FILTER source (so Where Used works by PART NUMBER, not
+        // just file). A multi-config part is ONE file used as a specific CONFIG
+        // (= Part No) in each assembly; the dependency walk returns paths with no
+        // per-instance config. Two STORED sources record it, neither needing a file
+        // open:
+        //   1. <Components> on each assembly's File record — the CURRENT direct
+        //      children + config, captured at EVERY save (WIP and Released alike).
+        //      Authoritative.
+        //   2. <Baselines> — the as-released snapshot; FALLBACK only for assemblies
+        //      with no <Components> block yet (records saved before this shipped).
+        // Classifies each parent against a target configuration:
+        //   ParentsUsingTarget         = it uses the child under targetConfig.
+        //   ParentsWithDifferentConfig = it uses the child under a KNOWN (non-empty)
+        //     config that is NOT the target — provably a different one.
+        // A parent in NEITHER set has no data for this child — the where-used filter
+        // KEEPS it (unverified) rather than hiding a possible real usage.
         //
-        // Matches on the component CONFIG only (NOT PartNo): the baseline's PartNo
-        // is enriched from the child's PRIMARY record, so it is the SAME for every
-        // configuration of that child and can't tell configs apart. Config == Part
-        // No by convention, so the target IS the config name. Keys are normalised
-        // FULL paths so they compare cleanly with the disk-walk parents.
-        public class BaselineChildUsage
+        // Matches on the component CONFIG only (NOT PartNo): a baseline's PartNo is
+        // enriched from the child's PRIMARY record (same for every config); the
+        // referenced Config tells configs apart. Config == Part No by convention, so
+        // the target IS the config name. Keys are normalised FULL paths so they
+        // compare cleanly with the disk-walk parents.
+        public class ChildConfigUsage
         {
             public HashSet<string> ParentsUsingTarget =
                 new HashSet<string>(StringComparer.OrdinalIgnoreCase);
@@ -2954,10 +2999,10 @@ namespace PDMLite
                 new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         }
 
-        public static BaselineChildUsage GetBaselineChildUsage(string childFilePath,
+        public static ChildConfigUsage GetChildConfigUsage(string childFilePath,
             string targetConfig)
         {
-            var usage = new BaselineChildUsage();
+            var usage = new ChildConfigUsage();
             if (string.IsNullOrEmpty(childFilePath) ||
                 string.IsNullOrEmpty(targetConfig)) return usage;
             string childFull;
@@ -2966,59 +3011,119 @@ namespace PDMLite
             string childName = Path.GetFileName(childFilePath);
             string target = targetConfig.Trim();
 
+            // Classify one parent from a set of component elements (each carrying a
+            // "Path" + "Config" attribute) into the usage sets.
+            Action<string, IEnumerable<XElement>> classify = (apFull, comps) =>
+            {
+                bool usesTarget = false, knownOther = false;
+                foreach (var c in comps)
+                {
+                    string cp = (string)c.Attribute("Path") ?? "";
+                    if (cp.Length == 0) continue;
+                    string cpFull;
+                    try { cpFull = Path.GetFullPath(cp); } catch { cpFull = cp; }
+                    bool match = string.Equals(cpFull, childFull,
+                                     StringComparison.OrdinalIgnoreCase)
+                              || string.Equals(Path.GetFileName(cp), childName,
+                                     StringComparison.OrdinalIgnoreCase);
+                    if (!match) continue;
+                    string cfg = ((string)c.Attribute("Config") ?? "").Trim();
+                    if (cfg.Length == 0) continue;   // no config captured → can't classify
+                    if (string.Equals(cfg, target, StringComparison.OrdinalIgnoreCase))
+                        usesTarget = true;
+                    else
+                        knownOther = true;
+                }
+                // Using the target in ANY instance wins, even if it ALSO uses others.
+                if (usesTarget) usage.ParentsUsingTarget.Add(apFull);
+                else if (knownOther) usage.ParentsWithDifferentConfig.Add(apFull);
+            };
+
             lock (_lock) using (AcquireProcessLock())
             {
                 var doc = LoadOrCreate();
-                var baselines = doc.Root.Element("Baselines");
-                if (baselines == null) return usage;
 
-                // LATEST baseline per assembly (max ReleasedDate; the ISO stamp
-                // ordinal-sorts chronologically — same rule as GetBaselines/Qty).
-                var latest = new Dictionary<string, XElement>(
-                    StringComparer.OrdinalIgnoreCase);
-                var latestDate = new Dictionary<string, string>(
-                    StringComparer.OrdinalIgnoreCase);
-                foreach (var b in baselines.Elements("Baseline"))
-                {
-                    string ap = (string)b.Attribute("AssemblyPath") ?? "";
-                    if (ap.Length == 0) continue;
-                    string date = (string)b.Attribute("ReleasedDate") ?? "";
-                    string prev;
-                    if (!latestDate.TryGetValue(ap, out prev) ||
-                        string.Compare(date, prev, StringComparison.Ordinal) > 0)
-                    { latest[ap] = b; latestDate[ap] = date; }
-                }
-
-                foreach (var kv in latest)
-                {
-                    string apFull;
-                    try { apFull = Path.GetFullPath(kv.Key); } catch { apFull = kv.Key; }
-                    bool usesTarget = false, knownOther = false;
-                    foreach (var c in kv.Value.Elements("Component"))
+                // PASS 1 — CURRENT composition from <Components> (all statuses, WIP
+                // included). Authoritative; covers everything saved since shipping.
+                var covered = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                var files = doc.Root.Element("Files");
+                if (files != null)
+                    foreach (var fileEl in files.Elements("File"))
                     {
-                        string cp = (string)c.Attribute("Path") ?? "";
-                        if (cp.Length == 0) continue;
-                        string cpFull;
-                        try { cpFull = Path.GetFullPath(cp); } catch { cpFull = cp; }
-                        bool match = string.Equals(cpFull, childFull,
-                                         StringComparison.OrdinalIgnoreCase)
-                                  || string.Equals(Path.GetFileName(cp), childName,
-                                         StringComparison.OrdinalIgnoreCase);
-                        if (!match) continue;
-                        string cfg = ((string)c.Attribute("Config") ?? "").Trim();
-                        if (cfg.Length == 0) continue;   // no config captured → can't classify
-                        if (string.Equals(cfg, target, StringComparison.OrdinalIgnoreCase))
-                            usesTarget = true;
-                        else
-                            knownOther = true;
+                        var compsEl = fileEl.Element("Components");
+                        if (compsEl == null) continue;
+                        string ap = (string)fileEl.Element("FilePath") ?? "";
+                        if (ap.Length == 0) continue;
+                        string apFull;
+                        try { apFull = Path.GetFullPath(ap); } catch { apFull = ap; }
+                        covered.Add(apFull); // has current data — baseline must not override
+                        classify(apFull, compsEl.Elements("Comp"));
                     }
-                    // A parent that uses the target in ANY instance is a keeper,
-                    // even if it ALSO uses other configs of the child.
-                    if (usesTarget) usage.ParentsUsingTarget.Add(apFull);
-                    else if (knownOther) usage.ParentsWithDifferentConfig.Add(apFull);
+
+                // PASS 2 — BASELINE fallback, only for assemblies with no
+                // <Components> block yet (old records). Latest baseline per assembly.
+                var baselines = doc.Root.Element("Baselines");
+                if (baselines != null)
+                {
+                    var latest = new Dictionary<string, XElement>(
+                        StringComparer.OrdinalIgnoreCase);
+                    var latestDate = new Dictionary<string, string>(
+                        StringComparer.OrdinalIgnoreCase);
+                    foreach (var b in baselines.Elements("Baseline"))
+                    {
+                        string ap = (string)b.Attribute("AssemblyPath") ?? "";
+                        if (ap.Length == 0) continue;
+                        string date = (string)b.Attribute("ReleasedDate") ?? "";
+                        string prev;
+                        if (!latestDate.TryGetValue(ap, out prev) ||
+                            string.Compare(date, prev, StringComparison.Ordinal) > 0)
+                        { latest[ap] = b; latestDate[ap] = date; }
+                    }
+                    foreach (var kv in latest)
+                    {
+                        string apFull;
+                        try { apFull = Path.GetFullPath(kv.Key); } catch { apFull = kv.Key; }
+                        if (covered.Contains(apFull)) continue; // current data wins
+                        classify(apFull, kv.Value.Elements("Component"));
+                    }
                 }
             }
             return usage;
+        }
+
+        // Direct-child instance counts (filename → summed Qty) for an assembly's
+        // CURRENT <Components> snapshot, or null when it has none (caller falls back
+        // to the baseline). Powers Where Used Qty for WIP assemblies too.
+        public static Dictionary<string, int> GetComponentQtys(string asmPath)
+        {
+            if (string.IsNullOrEmpty(asmPath)) return null;
+            string target = asmPath.Trim();
+            lock (_lock) using (AcquireProcessLock())
+            {
+                var doc = LoadOrCreate();
+                var files = doc.Root.Element("Files");
+                if (files == null) return null;
+                foreach (var fileEl in files.Elements("File"))
+                {
+                    if (!string.Equals(((string)fileEl.Element("FilePath") ?? "").Trim(),
+                            target, StringComparison.OrdinalIgnoreCase))
+                        continue;
+                    var compsEl = fileEl.Element("Components");
+                    if (compsEl == null) return null;   // no snapshot → caller uses baseline
+                    var map = new Dictionary<string, int>(
+                        StringComparer.OrdinalIgnoreCase);
+                    foreach (var c in compsEl.Elements("Comp"))
+                    {
+                        string cn = Path.GetFileName((string)c.Attribute("Path") ?? "");
+                        if (string.IsNullOrEmpty(cn)) continue;
+                        int q; int.TryParse((string)c.Attribute("Qty"), out q);
+                        int cur; map.TryGetValue(cn, out cur);
+                        map[cn] = cur + (q > 0 ? q : 0);
+                    }
+                    return map;
+                }
+            }
+            return null;
         }
     }
 }
