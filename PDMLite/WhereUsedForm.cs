@@ -17,12 +17,16 @@ namespace PDMLite
     // Self-contained (own palette / S() / CSV escaping) per the one-form-one-
     // file convention. Never writes the vault.
     //
-    // TWO MODES (radio toggle): DIRECT (default, 1 level) = the assemblies that
+    // TWO MODES (radio toggle): SINGLE LEVEL (default) = the assemblies that
     // directly contain this file; ALL LEVELS = the full usage chain up to the
     // top-level assemblies (a part inside a sub-assembly that sits inside a
     // bigger assembly shows the whole path), rendered as an indented tree. The
     // all-levels walk is computed lazily on first switch (one disk pass) and
     // cached.
+    //
+    // Double-clicking a row sets FileToOpen and closes; the dashboard caller
+    // then OpenDeferred()s it (opens the canonical WIP copy via OpenByPath),
+    // mirroring the dashboard's own double-click and BaselineViewerForm.
     public class WhereUsedForm : Form
     {
         private readonly string _filePath;
@@ -33,11 +37,14 @@ namespace PDMLite
         private List<WhereUsedEntry> _parents;          // the active list
         private bool _multi;                            // current mode
 
-        private DataGridView _grid;
-        private Label _subtitle;
-        private Label _countLabel;
+        // Set on double-click; the dashboard opens it after this modal closes.
+        public string FileToOpen { get; private set; }
+
+        private Panel _top, _bottom;
+        private Label _fileLabel, _subtitle, _hint, _countLabel;
         private RadioButton _rbDirect, _rbAll;
-        private Button _btnExport;
+        private DataGridView _grid;
+        private Button _btnExport, _btnClose;
 
         private float _scale = 1f;
         private int S(float v) => (int)(v * _scale);
@@ -49,9 +56,10 @@ namespace PDMLite
         private static readonly Color cMaroon    = Color.FromArgb(140, 60, 60);
         private static readonly Color cTextDark  = Color.FromArgb(60, 64, 72);
         private static readonly Color cSubText   = Color.FromArgb(110, 116, 126);
+        private static readonly Color cHintText  = Color.FromArgb(135, 141, 151);
         private static readonly Color cBg         = Color.FromArgb(245, 247, 250);
 
-        private Font _fHeader, _fSub, _fMeta, _fBtn, _fGrid, _fGridHead;
+        private Font _fHeader, _fSub, _fMeta, _fHint, _fBtn, _fGrid, _fGridHead;
 
         public WhereUsedForm(string filePath, string fileName)
         {
@@ -63,12 +71,13 @@ namespace PDMLite
             _fHeader   = new Font("Segoe UI", 6f * _scale, FontStyle.Bold);
             _fSub      = new Font("Segoe UI", 4f * _scale, FontStyle.Bold);
             _fMeta     = new Font("Segoe UI", 3.5f * _scale);
+            _fHint     = new Font("Segoe UI", 3.2f * _scale, FontStyle.Italic);
             _fBtn      = new Font("Segoe UI", 3.7f * _scale, FontStyle.Bold);
             _fGrid     = new Font("Segoe UI", 3.5f * _scale);
             _fGridHead = new Font("Segoe UI", 3.5f * _scale, FontStyle.Bold);
 
-            // Default mode (Direct) is cheap — one walk; the multi-level walk is
-            // deferred until the user asks for it.
+            // Default mode (Single Level) is cheap — one walk; the multi-level
+            // walk is deferred until the user asks for it.
             try { _directParents = VaultManager.GetWhereUsed(_filePath); }
             catch { _directParents = new List<WhereUsedEntry>(); }
             _parents = _directParents;
@@ -86,8 +95,8 @@ namespace PDMLite
             this.MinimizeBox = false;
             this.BackColor = cBg;
             this.KeyPreview = true;
-            this.ClientSize = new Size(S(520), S(486));
-            this.MinimumSize = new Size(S(420), S(320));
+            this.ClientSize = new Size(S(520), S(500));
+            this.MinimumSize = new Size(S(420), S(340));
 
             var headerBar = new Panel
             {
@@ -102,46 +111,55 @@ namespace PDMLite
                 TextAlign = ContentAlignment.MiddleCenter
             });
 
-            var top = new Panel { Dock = DockStyle.Top, Height = S(82), BackColor = cBg };
-            top.Controls.Add(new Label
+            // ── Top block (centred, like the other BCore forms) ──────────────
+            _top = new Panel { Dock = DockStyle.Top, Height = S(98), BackColor = cBg };
+            _fileLabel = new Label
             {
                 Text = string.IsNullOrEmpty(_fileName)
                     ? Path.GetFileName(_filePath ?? "") : _fileName,
-                Font = _fSub,
-                ForeColor = cTextDark,
+                Font = _fSub, ForeColor = cTextDark,
                 Location = new Point(S(14), S(8)),
-                AutoSize = false, Width = S(480), Height = S(20),
-                AutoEllipsis = true
-            });
+                AutoSize = false, Height = S(20), AutoEllipsis = true,
+                TextAlign = ContentAlignment.MiddleCenter
+            };
             _subtitle = new Label
             {
-                Font = _fMeta,
-                ForeColor = cSubText,
+                Font = _fMeta, ForeColor = cSubText,
                 Location = new Point(S(14), S(30)),
-                AutoSize = false, Width = S(480), Height = S(16),
-                AutoEllipsis = true
+                AutoSize = false, Height = S(16), AutoEllipsis = true,
+                TextAlign = ContentAlignment.MiddleCenter
             };
-            top.Controls.Add(_subtitle);
-
-            // Mode toggle: Direct (1 level) vs All levels (full usage chain).
             _rbDirect = new RadioButton
             {
-                Text = "Direct parents (1 level)", Font = _fMeta,
+                Text = "Single Level", Font = _fMeta,
                 ForeColor = cTextDark, AutoSize = true, Checked = true,
                 Location = new Point(S(14), S(52))
             };
             _rbAll = new RadioButton
             {
-                Text = "All levels (incl. sub-assemblies)", Font = _fMeta,
+                Text = "All Levels (Incl. Sub-assemblies)", Font = _fMeta,
                 ForeColor = cTextDark, AutoSize = true,
-                Location = new Point(S(190), S(52))
+                Location = new Point(S(150), S(52))
             };
             _rbDirect.CheckedChanged += (s, e) => { if (_rbDirect.Checked) SetMode(false); };
             _rbAll.CheckedChanged    += (s, e) => { if (_rbAll.Checked)    SetMode(true);  };
-            top.Controls.Add(_rbDirect);
-            top.Controls.Add(_rbAll);
+            _hint = new Label
+            {
+                Text = "Tip: double-click a row to open that assembly.",
+                Font = _fHint, ForeColor = cHintText,
+                Location = new Point(S(14), S(78)),
+                AutoSize = false, Height = S(15), AutoEllipsis = true,
+                TextAlign = ContentAlignment.MiddleCenter
+            };
+            _top.Controls.Add(_fileLabel);
+            _top.Controls.Add(_subtitle);
+            _top.Controls.Add(_rbDirect);
+            _top.Controls.Add(_rbAll);
+            _top.Controls.Add(_hint);
+            _top.Resize += (s, e) => LayoutTop();
 
-            var bottom = new Panel { Dock = DockStyle.Bottom, Height = S(44), BackColor = cBg };
+            // ── Footer (count line + buttons) ────────────────────────────────
+            _bottom = new Panel { Dock = DockStyle.Bottom, Height = S(44), BackColor = cBg };
             _countLabel = new Label
             {
                 Font = _fMeta, ForeColor = cTextDark,
@@ -150,16 +168,17 @@ namespace PDMLite
                 Height = S(18), Width = S(240),
                 TextAlign = ContentAlignment.MiddleLeft
             };
-            bottom.Controls.Add(_countLabel);
+            _bottom.Controls.Add(_countLabel);
 
-            var btnClose = MakeButton("Close", Color.FromArgb(220, 220, 220), cTextDark);
-            btnClose.Click += (s, e) => this.Close();
+            _btnClose = MakeButton("Close", Color.FromArgb(220, 220, 220), cTextDark);
+            _btnClose.Click += (s, e) => this.Close();
             _btnExport = MakeButton("Export CSV", cBrand, Color.White);
             _btnExport.Click += (s, e) => ExportCsv();
-            bottom.Controls.Add(_btnExport);
-            bottom.Controls.Add(btnClose);
-            bottom.Resize += (s, e) => LayoutBottom(bottom, btnClose);
+            _bottom.Controls.Add(_btnExport);
+            _bottom.Controls.Add(_btnClose);
+            _bottom.Resize += (s, e) => LayoutBottom();
 
+            // ── Grid ─────────────────────────────────────────────────────────
             _grid = new DataGridView
             {
                 Dock = DockStyle.Fill,
@@ -190,31 +209,59 @@ namespace PDMLite
             AddCol("Rev", 0.12f);
             AddCol("Status", 0.18f);
             _grid.CellFormatting += Grid_CellFormatting;
+            _grid.CellMouseDoubleClick += Grid_CellMouseDoubleClick;
 
             // Fill control added FIRST (resolved last → takes the middle), then
             // edge panels; the inner top panel before the header bar so the
             // header docks outermost (house z-order convention).
             this.Controls.Add(_grid);
-            this.Controls.Add(bottom);
-            this.Controls.Add(top);
+            this.Controls.Add(_bottom);
+            this.Controls.Add(_top);
             this.Controls.Add(headerBar);
 
-            LayoutBottom(bottom, btnClose);
+            LayoutTop();
+            LayoutBottom();
 
             this.FormClosed += (s, e) =>
             {
                 _fHeader?.Dispose(); _fSub?.Dispose(); _fMeta?.Dispose();
-                _fBtn?.Dispose(); _fGrid?.Dispose(); _fGridHead?.Dispose();
+                _fHint?.Dispose(); _fBtn?.Dispose(); _fGrid?.Dispose();
+                _fGridHead?.Dispose();
             };
             this.KeyDown += (s, e) => { if (e.KeyCode == Keys.Escape) this.Close(); };
         }
 
-        // Right-align the buttons and bound the count label so its text can never
-        // run under them (the overlap bug) at any width or DPI.
-        private void LayoutBottom(Panel bottom, Button btnClose)
+        // Centre the filename / subtitle / hint (full-width, centre-aligned text)
+        // and the radio PAIR (as one unit) — matches the centred top blocks of
+        // the other BCore forms.
+        private void LayoutTop()
         {
-            btnClose.Location = new Point(bottom.Width - btnClose.Width - S(14), S(9));
-            _btnExport.Location = new Point(btnClose.Left - _btnExport.Width - S(8), S(9));
+            if (_top == null) return;
+            int w = _top.Width;
+            int margin = S(14);
+            int innerW = Math.Max(S(40), w - 2 * margin);
+            _fileLabel.Location = new Point(margin, _fileLabel.Top); _fileLabel.Width = innerW;
+            _subtitle.Location  = new Point(margin, _subtitle.Top);  _subtitle.Width  = innerW;
+            _hint.Location      = new Point(margin, _hint.Top);      _hint.Width      = innerW;
+
+            // PreferredSize measures text+glyph reliably even before the form is
+            // shown (an AutoSize control's .Width may not be finalised yet).
+            int wDirect = _rbDirect.PreferredSize.Width;
+            int wAll    = _rbAll.PreferredSize.Width;
+            int gap = S(28);
+            int total = wDirect + gap + wAll;
+            int x0 = Math.Max(margin, (w - total) / 2);
+            _rbDirect.Location = new Point(x0, _rbDirect.Top);
+            _rbAll.Location    = new Point(x0 + wDirect + gap, _rbAll.Top);
+        }
+
+        // Right-align the buttons and bound the count label so its text can never
+        // run under them (the overlap/clip bug) at any width or DPI.
+        private void LayoutBottom()
+        {
+            if (_bottom == null) return;
+            _btnClose.Location  = new Point(_bottom.Width - _btnClose.Width - S(14), S(9));
+            _btnExport.Location = new Point(_btnClose.Left - _btnExport.Width - S(8), S(9));
             if (_countLabel != null)
                 _countLabel.Width = Math.Max(S(40),
                     _btnExport.Left - _countLabel.Left - S(10));
@@ -232,7 +279,7 @@ namespace PDMLite
             });
         }
 
-        // Switch between Direct (1 level) and All levels. The all-levels walk is
+        // Switch between Single Level and All Levels. The all-levels walk is
         // computed once (one disk pass) on first request and cached.
         private void SetMode(bool multi)
         {
@@ -278,17 +325,30 @@ namespace PDMLite
             }
             else if (!_multi)
             {
-                _countLabel.Text = "Used by " + total + " assembly" +
-                    (total == 1 ? "" : "(ies)") + ".";
+                _countLabel.Text = total == 1
+                    ? "Used by 1 assembly."
+                    : "Used by " + total + " assemblies.";
             }
             else
             {
                 int direct = _parents.Count(p => p.Level == 0);
                 _countLabel.Text = "Used by " + total + " reference" +
-                    (total == 1 ? "" : "s") + " across the usage chain  ·  " +
-                    direct + " direct.";
+                    (total == 1 ? "" : "s") + "  ·  " + direct + " direct.";
             }
             if (_btnExport != null) _btnExport.Enabled = total > 0;
+            LayoutBottom(); // re-bound the label width to the current panel width
+        }
+
+        // Double-click a row → open that assembly (deferred via the dashboard
+        // caller so it opens after this nested modal closes). Mirrors the
+        // dashboard's own double-click-to-open.
+        private void Grid_CellMouseDoubleClick(object sender, DataGridViewCellMouseEventArgs e)
+        {
+            if (e.RowIndex < 0 || e.RowIndex >= _parents.Count) return;
+            string path = _parents[e.RowIndex].Path;
+            if (string.IsNullOrEmpty(path)) return;
+            FileToOpen = path;
+            this.Close();
         }
 
         private void Grid_CellFormatting(object sender, DataGridViewCellFormattingEventArgs e)
@@ -335,7 +395,7 @@ namespace PDMLite
                     var sb = new StringBuilder();
                     sb.AppendLine("File,Path,Mode");
                     sb.AppendLine(Csv(_fileName) + "," + Csv(_filePath) + "," +
-                        Csv(_multi ? "All levels" : "Direct (1 level)"));
+                        Csv(_multi ? "All levels" : "Single level"));
                     sb.AppendLine();
                     sb.AppendLine("Level,Assembly,PartNo,Revision,Status,Path");
                     foreach (var p in _parents)

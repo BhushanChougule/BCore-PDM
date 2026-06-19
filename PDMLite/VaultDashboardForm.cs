@@ -1534,17 +1534,24 @@ namespace PDMLite
             LoadData();
         }
 
-        // Show which assemblies directly reference this file (read-only, on
-        // demand). Opens ON TOP of the dashboard (nested modal) — not a deferred
-        // open — so the dashboard stays put underneath.
+        // Show which assemblies reference this file (read-only, on demand).
+        // Opens ON TOP of the dashboard (nested modal) so the dashboard stays
+        // put. If the user double-clicks a parent row there, the viewer closes
+        // with a FileToOpen — bubble it up through the dashboard's deferred-open
+        // so the file opens AFTER both modals close (like View Baseline).
         private void MenuWhereUsed()
         {
             var f = MenuRow();
             if (f == null) return;
             try
             {
+                string toOpen = null;
                 using (var v = new WhereUsedForm(f.FilePath, f.FileName))
+                {
                     v.ShowDialog(this);
+                    toOpen = v.FileToOpen;
+                }
+                if (!string.IsNullOrEmpty(toOpen)) OpenDeferred(toOpen);
             }
             catch (Exception ex)
             {
