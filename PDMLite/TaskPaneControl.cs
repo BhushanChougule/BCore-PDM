@@ -571,6 +571,9 @@ namespace PDMLite
                                 if (doc != null)
                                     doc.ShowConfiguration2(form.FileToOpenConfig);
                             }
+                            // API open from the dashboard — same as the search
+                            // card, drive the obsolete-components warning explicitly.
+                            PDMLiteAddin.Instance?.WarnObsoleteOnOpen();
                         }
                         catch { }
                     }
@@ -934,14 +937,22 @@ namespace PDMLite
         private void OpenFileConfig(string filePath, string configName)
         {
             OpenFile(filePath);
-            if (string.IsNullOrEmpty(configName)) return;
-            try
+            if (!string.IsNullOrEmpty(configName))
             {
-                ModelDoc2 doc = PDMLiteAddin.SwApp
-                    ?.GetOpenDocumentByName(filePath) as ModelDoc2;
-                if (doc != null) doc.ShowConfiguration2(configName);
+                try
+                {
+                    ModelDoc2 doc = PDMLiteAddin.SwApp
+                        ?.GetOpenDocumentByName(filePath) as ModelDoc2;
+                    if (doc != null) doc.ShowConfiguration2(configName);
+                }
+                catch { }
             }
-            catch { }
+            // Opening from a search card is an API open (OpenDoc6/ActivateDoc3)
+            // inside this click handler — SOLIDWORKS' open/activate notifications
+            // don't reliably drive the obsolete-components warning here the way a
+            // File > Open does, so trigger it explicitly (it self-filters to
+            // assemblies and is guarded once-per-open).
+            try { PDMLiteAddin.Instance?.WarnObsoleteOnOpen(); } catch { }
         }
 
         // Expand the flat search results into per-configuration cards. A model

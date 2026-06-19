@@ -15,6 +15,10 @@ namespace PDMLite
     {
         public static ISldWorks SwApp { get; private set; }
         public static string CurrentUser => System.Environment.UserName;
+        // The live add-in instance, so the task pane can drive add-in helpers
+        // (e.g. WarnObsoleteOnOpen after it opens a file from a search card,
+        // where SOLIDWORKS' own open/activate notifications don't reliably fire).
+        internal static PDMLiteAddin Instance { get; private set; }
 
         // Set by VaultManager around its own internal Save3 calls (release,
         // new revision) so those programmatic saves are not blocked by the
@@ -36,6 +40,7 @@ namespace PDMLite
             try
             {
                 SwApp = (ISldWorks)thisSW;
+                Instance = this;   // so the task pane can reach add-in helpers
                 _addinId = cookie;
                 DatabaseManager.Initialize();
                 // Clear any open-session entries this PC left behind after a
@@ -78,6 +83,7 @@ namespace PDMLite
                 try { h.Detach(); } catch { }
             _docHandlers.Clear();
             SwApp = null;
+            Instance = null;
             return true;
         }
 
@@ -222,7 +228,7 @@ namespace PDMLite
         // until it finds obsolete children (then guards to avoid nagging) — see
         // _obsoleteWarned. Independent of UpdateActivePresence so the presence
         // flow's Released-skip can't suppress it.
-        private void WarnObsoleteOnOpen()
+        internal void WarnObsoleteOnOpen()
         {
             try
             {

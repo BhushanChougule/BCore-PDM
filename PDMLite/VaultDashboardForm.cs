@@ -1394,13 +1394,18 @@ namespace PDMLite
             _miBaseline.Visible = (f.FileName ?? "")
                 .EndsWith(".sldasm", StringComparison.OrdinalIgnoreCase);
 
-            // Master lifecycle items: show exactly one per row by current status
-            // (Mark Obsolete for a non-Obsolete row, Reinstate for an Obsolete one).
+            // Master lifecycle items. Mark Obsolete shows on every row — on an
+            // already-Obsolete row it relabels to "Update Obsolete Details…" so a
+            // Master can set/change the reason or replacement after the fact
+            // (VaultManager.MarkObsolete handles both). Reinstate shows only on
+            // an Obsolete row.
             if (_miObsolete != null)
             {
                 bool isObsolete = (f.Status ?? "")
                     .Equals("Obsolete", StringComparison.OrdinalIgnoreCase);
-                _miObsolete.Visible = !isObsolete;
+                _miObsolete.Visible = true;
+                _miObsolete.Text = isObsolete
+                    ? "Update Obsolete Details…" : "Mark Obsolete…";
                 _miReinstate.Visible = isObsolete;
             }
 

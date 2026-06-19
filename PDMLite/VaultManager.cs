@@ -242,14 +242,13 @@ namespace PDMLite
             if (!IsMaster(user)) { NotMaster(); return; }
             if (string.IsNullOrEmpty(filePath)) return;
 
-            if (string.Equals(DatabaseManager.GetFileStatus(filePath), "Obsolete",
-                    StringComparison.OrdinalIgnoreCase))
-            {
-                MessageBox.Show("This file is already Obsolete.",
-                    "BCore PDM — Obsolete",
-                    MessageBoxButtons.OK, MessageBoxIcon.Information);
-                return;
-            }
+            // Already Obsolete? Don't hard-stop — allow UPDATING the reason +
+            // replacement (a file obsoleted before a replacement was known, or
+            // whose replacement changed). The flow below re-confirms, re-asks the
+            // reason and re-runs the picker, then re-writes status + <SupersededBy>.
+            bool alreadyObsolete = string.Equals(
+                DatabaseManager.GetFileStatus(filePath), "Obsolete",
+                StringComparison.OrdinalIgnoreCase);
 
             string name = Path.GetFileName(filePath);
 
@@ -268,12 +267,14 @@ namespace PDMLite
             }
             catch { }
 
-            if (MessageBox.Show(
-                    "Mark this file OBSOLETE (superseded)?\n\n  • " + name + "\n\n" +
-                    "It stays in the vault for reference (history preserved) and " +
-                    "is frozen read-only, but flagged not-for-new-use: it cannot " +
-                    "be edited or released until a Master Reinstates it." + parentWarn,
-                    "BCore PDM — Mark Obsolete",
+            string confirmMsg = alreadyObsolete
+                ? "This file is already OBSOLETE.\n\n  • " + name + "\n\n" +
+                  "Update its reason / replacement part?" + parentWarn
+                : "Mark this file OBSOLETE (superseded)?\n\n  • " + name + "\n\n" +
+                  "It stays in the vault for reference (history preserved) and " +
+                  "is frozen read-only, but flagged not-for-new-use: it cannot " +
+                  "be edited or released until a Master Reinstates it." + parentWarn;
+            if (MessageBox.Show(confirmMsg, "BCore PDM — Mark Obsolete",
                     MessageBoxButtons.YesNo, MessageBoxIcon.Warning) != DialogResult.Yes)
                 return;
 
@@ -335,7 +336,9 @@ namespace PDMLite
                         : reason + " — superseded by " + supersededBy);
 
                 MessageBox.Show(
-                    name + " is now Obsolete." +
+                    name + (alreadyObsolete
+                        ? " — obsolete details updated."
+                        : " is now Obsolete.") +
                     (string.IsNullOrEmpty(supersededBy)
                         ? "" : "\nSuperseded by: " + supersededBy) +
                     "\n\nIt remains in the vault for reference but cannot be " +
