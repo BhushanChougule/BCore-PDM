@@ -44,7 +44,9 @@ namespace PDMLite
     // Status/Revision/PartNo come from the parent's vault record. Level is the
     // depth in a multi-level where-used walk (0 = a DIRECT parent of the queried
     // file, 1 = an assembly that contains a level-0 parent, …); single-level
-    // results leave it 0.
+    // results leave it 0. Qty = how many instances of THIS ROW'S immediate child
+    // the parent contains, read from the parent's latest as-released baseline
+    // (null = unknown, i.e. the parent has never been released).
     public class WhereUsedEntry
     {
         public string Path     { get; set; }
@@ -53,6 +55,7 @@ namespace PDMLite
         public string Revision { get; set; }
         public string Status   { get; set; }
         public int    Level    { get; set; }
+        public int?   Qty      { get; set; }
     }
 
     public static class VaultManager
@@ -2737,6 +2740,9 @@ namespace PDMLite
             var result = new List<WhereUsedEntry>();
             if (string.IsNullOrEmpty(filePath)) return result;
             var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            var qtyCache = new Dictionary<string, Dictionary<string, int>>(
+                StringComparer.OrdinalIgnoreCase);
+            string childName = Path.GetFileName(filePath);
             try
             {
                 string target;
@@ -2792,6 +2798,7 @@ namespace PDMLite
                         }
                     }
                     catch { }
+                    entry.Qty = DirectChildQty(asmPath, childName, qtyCache);
                     result.Add(entry);
                 }
             }
@@ -2830,22 +2837,30 @@ namespace PDMLite
 
             var expanded = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
                 { root };
-            WalkUp(root, 0, maxDepth, map, expanded, result);
+            var qtyCache = new Dictionary<string, Dictionary<string, int>>(
+                StringComparer.OrdinalIgnoreCase);
+            // childName is the immediate child of each parent being listed — at the
+            // top it's the queried file; deeper, it's the assembly we walked up FROM.
+            WalkUp(filePath, root, 0, maxDepth, map, expanded, qtyCache, result);
             return result;
         }
 
         // Depth-first ancestry walk over the prebuilt reverse map. Each parent is
         // CLONED per occurrence (the same map entry can appear at several levels
-        // under different children, so a shared object would have its Level
+        // under different children, so a shared object would have its Level/Qty
         // overwritten). expanded bounds the recursion to one expansion per
-        // assembly.
-        private static void WalkUp(string fullPath, int level, int maxDepth,
-            Dictionary<string, List<WhereUsedEntry>> map,
-            HashSet<string> expanded, List<WhereUsedEntry> result)
+        // assembly. childPath is the file each listed parent immediately contains
+        // (the node we're walking up from), so Qty is the per-edge instance count.
+        private static void WalkUp(string childPath, string childFull, int level,
+            int maxDepth, Dictionary<string, List<WhereUsedEntry>> map,
+            HashSet<string> expanded,
+            Dictionary<string, Dictionary<string, int>> qtyCache,
+            List<WhereUsedEntry> result)
         {
             if (level >= maxDepth) return;
             List<WhereUsedEntry> parents;
-            if (!map.TryGetValue(fullPath, out parents)) return;
+            if (!map.TryGetValue(childFull, out parents)) return;
+            string childName = Path.GetFileName(childPath ?? childFull);
             foreach (var parent in parents) // already name-sorted in the map
             {
                 result.Add(new WhereUsedEntry
@@ -2855,13 +2870,110 @@ namespace PDMLite
                     PartNo   = parent.PartNo,
                     Revision = parent.Revision,
                     Status   = parent.Status,
-                    Level    = level
+                    Level    = level,
+                    Qty      = DirectChildQty(parent.Path, childName, qtyCache)
                 });
                 string pf;
                 try { pf = Path.GetFullPath(parent.Path); } catch { pf = parent.Path; }
                 if (expanded.Add(pf))
-                    WalkUp(pf, level + 1, maxDepth, map, expanded, result);
+                    WalkUp(parent.Path, pf, level + 1, maxDepth, map, expanded,
+                        qtyCache, result);
             }
+        }
+
+        // TOP-LEVEL where-used: only the ROOT assemblies that ULTIMATELY contain
+        // the file — i.e. the final products, skipping every intermediate sub-
+        // assembly. Collects every ancestor (BFS up the reverse map) then keeps
+        // only those that are themselves used by nothing (their path is not a
+        // child key in the map). Flat list (all Level 0); Qty left null (a top-
+        // level product rarely contains the file directly). WhereUsedForm's "Top
+        // Level Only" mode.
+        public static List<WhereUsedEntry> GetWhereUsedTopLevel(string filePath)
+        {
+            var result = new List<WhereUsedEntry>();
+            if (string.IsNullOrEmpty(filePath)) return result;
+
+            Dictionary<string, List<WhereUsedEntry>> map;
+            try { map = BuildReverseDependencyMap(); }
+            catch { return result; }
+
+            string root;
+            try { root = Path.GetFullPath(filePath); } catch { root = filePath; }
+
+            var collected = new Dictionary<string, WhereUsedEntry>(
+                StringComparer.OrdinalIgnoreCase);
+            var visited = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { root };
+            var queue = new Queue<string>();
+            queue.Enqueue(root);
+            while (queue.Count > 0)
+            {
+                string cur = queue.Dequeue();
+                List<WhereUsedEntry> parents;
+                if (!map.TryGetValue(cur, out parents)) continue;
+                foreach (var parent in parents)
+                {
+                    string pf;
+                    try { pf = Path.GetFullPath(parent.Path); } catch { pf = parent.Path; }
+                    if (!collected.ContainsKey(pf)) collected[pf] = parent;
+                    if (visited.Add(pf)) queue.Enqueue(pf);
+                }
+            }
+            foreach (var kv in collected)
+            {
+                // A root is used by nothing → its path is not a child key.
+                if (map.ContainsKey(kv.Key)) continue;
+                var p = kv.Value;
+                result.Add(new WhereUsedEntry
+                {
+                    Path = p.Path, Name = p.Name, PartNo = p.PartNo,
+                    Revision = p.Revision, Status = p.Status, Level = 0, Qty = null
+                });
+            }
+            result.Sort((a, b) => string.Compare(a.Name, b.Name,
+                StringComparison.OrdinalIgnoreCase));
+            return result;
+        }
+
+        // How many instances of childFileName the parent (asmPath) DIRECTLY
+        // contains, read from the parent's LATEST as-released baseline (its
+        // level-0 components, summed across configs). null = the parent has no
+        // baseline (never released) → unknown. Cached per parent path for the
+        // duration of one where-used computation (a parent's baseline is read at
+        // most once). Best-effort; any failure → null. Released-parents-only by
+        // design — WIP assemblies have no baseline yet.
+        private static int? DirectChildQty(string parentPath, string childFileName,
+            Dictionary<string, Dictionary<string, int>> cache)
+        {
+            if (string.IsNullOrEmpty(parentPath) ||
+                string.IsNullOrEmpty(childFileName)) return null;
+
+            Dictionary<string, int> level0;
+            if (!cache.TryGetValue(parentPath, out level0))
+            {
+                level0 = null; // null = no baseline
+                try
+                {
+                    var bls = DatabaseManager.GetBaselines(parentPath);
+                    if (bls != null && bls.Count > 0 && bls[0].Components != null)
+                    {
+                        level0 = new Dictionary<string, int>(
+                            StringComparer.OrdinalIgnoreCase);
+                        foreach (var c in bls[0].Components) // most-recent first
+                        {
+                            if (c == null || c.Level != 0) continue;
+                            string cn = Path.GetFileName(c.Path ?? "");
+                            if (string.IsNullOrEmpty(cn)) continue;
+                            int q; level0.TryGetValue(cn, out q);
+                            level0[cn] = q + (c.Qty > 0 ? c.Qty : 0);
+                        }
+                    }
+                }
+                catch { level0 = null; }
+                cache[parentPath] = level0;
+            }
+            if (level0 == null) return null;       // no baseline → unknown
+            int qty;
+            return level0.TryGetValue(childFileName, out qty) ? qty : 0;
         }
 
         // child full-path → the DIRECT parent assemblies that reference it, each
