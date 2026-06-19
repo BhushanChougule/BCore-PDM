@@ -41,7 +41,10 @@ namespace PDMLite
     }
 
     // One assembly that directly references a given file (where-used row).
-    // Status/Revision/PartNo come from the parent's vault record.
+    // Status/Revision/PartNo come from the parent's vault record. Level is the
+    // depth in a multi-level where-used walk (0 = a DIRECT parent of the queried
+    // file, 1 = an assembly that contains a level-0 parent, …); single-level
+    // results leave it 0.
     public class WhereUsedEntry
     {
         public string Path     { get; set; }
@@ -49,6 +52,7 @@ namespace PDMLite
         public string PartNo   { get; set; }
         public string Revision { get; set; }
         public string Status   { get; set; }
+        public int    Level    { get; set; }
     }
 
     public static class VaultManager
@@ -2795,6 +2799,144 @@ namespace PDMLite
             result.Sort((a, b) => string.Compare(a.Name, b.Name,
                 StringComparison.OrdinalIgnoreCase));
             return result;
+        }
+
+        // MULTI-LEVEL where-used: the FULL usage chain above the file — its
+        // direct parents (Level 0), the assemblies that contain THOSE (Level 1),
+        // and so on up to the top-level assemblies — flattened in tree order
+        // (each parent immediately followed by its own ancestry). A part deep in
+        // a sub-assembly that sits inside a bigger assembly therefore shows the
+        // whole path up. WhereUsedForm uses this for its "All levels" mode; the
+        // single-level GetWhereUsed backs the default "Direct" mode.
+        //
+        // Builds the reverse-dependency map in ONE disk pass over every tracked
+        // assembly, then walks it purely in memory — far cheaper than calling
+        // GetWhereUsed per node (which re-scans every assembly on each call). An
+        // assembly is EXPANDED at most once (global guard) so shared sub-
+        // assemblies and any bad-data cycle can't loop or explode; it is still
+        // LISTED everywhere it is referenced. Depth capped at maxDepth.
+        public static List<WhereUsedEntry> GetWhereUsedTree(string filePath,
+            int maxDepth = 12)
+        {
+            var result = new List<WhereUsedEntry>();
+            if (string.IsNullOrEmpty(filePath)) return result;
+
+            Dictionary<string, List<WhereUsedEntry>> map;
+            try { map = BuildReverseDependencyMap(); }
+            catch { return result; }
+
+            string root;
+            try { root = Path.GetFullPath(filePath); } catch { root = filePath; }
+
+            var expanded = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+                { root };
+            WalkUp(root, 0, maxDepth, map, expanded, result);
+            return result;
+        }
+
+        // Depth-first ancestry walk over the prebuilt reverse map. Each parent is
+        // CLONED per occurrence (the same map entry can appear at several levels
+        // under different children, so a shared object would have its Level
+        // overwritten). expanded bounds the recursion to one expansion per
+        // assembly.
+        private static void WalkUp(string fullPath, int level, int maxDepth,
+            Dictionary<string, List<WhereUsedEntry>> map,
+            HashSet<string> expanded, List<WhereUsedEntry> result)
+        {
+            if (level >= maxDepth) return;
+            List<WhereUsedEntry> parents;
+            if (!map.TryGetValue(fullPath, out parents)) return;
+            foreach (var parent in parents) // already name-sorted in the map
+            {
+                result.Add(new WhereUsedEntry
+                {
+                    Path     = parent.Path,
+                    Name     = parent.Name,
+                    PartNo   = parent.PartNo,
+                    Revision = parent.Revision,
+                    Status   = parent.Status,
+                    Level    = level
+                });
+                string pf;
+                try { pf = Path.GetFullPath(parent.Path); } catch { pf = parent.Path; }
+                if (expanded.Add(pf))
+                    WalkUp(pf, level + 1, maxDepth, map, expanded, result);
+            }
+        }
+
+        // child full-path → the DIRECT parent assemblies that reference it, each
+        // enriched once from its vault record. One pass over every tracked
+        // assembly's direct dependencies (traverse=false), so the multi-level
+        // walk above runs entirely in memory afterwards. Same best-effort
+        // path-format caveat as GetWhereUsed/GetParentAssemblies.
+        private static Dictionary<string, List<WhereUsedEntry>>
+            BuildReverseDependencyMap()
+        {
+            var map = new Dictionary<string, List<WhereUsedEntry>>(
+                StringComparer.OrdinalIgnoreCase);
+
+            foreach (string asmPath in
+                     DatabaseManager.GetTrackedFilePathsByExtension(".sldasm"))
+            {
+                if (!File.Exists(asmPath)) continue;
+                string asmFull;
+                try { asmFull = Path.GetFullPath(asmPath); }
+                catch { asmFull = asmPath; }
+
+                object depsObj = PDMLiteAddin.SwApp.GetDocumentDependencies2(
+                    asmPath, false, true, false);
+                string[] deps = depsObj as string[];
+                if (deps == null) continue;
+
+                // Build the parent entry lazily (record lookup once) and only if
+                // this assembly actually has children.
+                WhereUsedEntry entry = null;
+                var childSeen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+                for (int i = 1; i < deps.Length; i += 2)
+                {
+                    if (string.IsNullOrEmpty(deps[i])) continue;
+                    string childFull;
+                    try { childFull = Path.GetFullPath(deps[i]); }
+                    catch { childFull = deps[i]; }
+                    if (string.Equals(childFull, asmFull,
+                            StringComparison.OrdinalIgnoreCase)) continue; // self
+                    if (!childSeen.Add(childFull)) continue; // one edge per child
+
+                    if (entry == null)
+                    {
+                        entry = new WhereUsedEntry
+                        {
+                            Path = asmPath,
+                            Name = Path.GetFileName(asmPath)
+                        };
+                        try
+                        {
+                            var rec = DatabaseManager.GetFileRecord(asmPath);
+                            if (rec != null)
+                            {
+                                entry.PartNo   = rec.PartNumber;
+                                entry.Revision = rec.Revision;
+                                entry.Status   = rec.Status;
+                            }
+                        }
+                        catch { }
+                    }
+
+                    List<WhereUsedEntry> list;
+                    if (!map.TryGetValue(childFull, out list))
+                    {
+                        list = new List<WhereUsedEntry>();
+                        map[childFull] = list;
+                    }
+                    list.Add(entry);
+                }
+            }
+
+            foreach (var list in map.Values)
+                list.Sort((a, b) => string.Compare(a.Name, b.Name,
+                    StringComparison.OrdinalIgnoreCase));
+            return map;
         }
 
         // When a part/assembly starts a new revision, its drawing (same

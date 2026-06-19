@@ -8,22 +8,35 @@ using System.Windows.Forms;
 
 namespace PDMLite
 {
-    // Read-only "Where Used" viewer: the tracked assemblies that DIRECTLY
-    // reference a given part/sub-assembly, with each parent's Part No, Revision
-    // and Status. Computed on demand from disk (VaultManager.GetWhereUsed — the
-    // same dependency-walk primitive the release gate uses), so it needs no
-    // persisted index and is always current. Opened from the Vault Dashboard row
-    // right-click ("Where Used"), nested-modal on top of the dashboard. Self-
-    // contained (own palette / S() / CSV escaping) per the one-form-one-file
-    // convention. Never writes the vault.
+    // Read-only "Where Used" viewer: the tracked assemblies that reference a
+    // given part/sub-assembly, with each parent's Part No, Revision and Status.
+    // Computed on demand from disk (VaultManager.GetWhereUsed / GetWhereUsedTree
+    // — the same dependency-walk primitive the release gate uses), so it needs
+    // no persisted index and is always current. Opened from the Vault Dashboard
+    // row right-click ("Where Used"), nested-modal on top of the dashboard.
+    // Self-contained (own palette / S() / CSV escaping) per the one-form-one-
+    // file convention. Never writes the vault.
+    //
+    // TWO MODES (radio toggle): DIRECT (default, 1 level) = the assemblies that
+    // directly contain this file; ALL LEVELS = the full usage chain up to the
+    // top-level assemblies (a part inside a sub-assembly that sits inside a
+    // bigger assembly shows the whole path), rendered as an indented tree. The
+    // all-levels walk is computed lazily on first switch (one disk pass) and
+    // cached.
     public class WhereUsedForm : Form
     {
         private readonly string _filePath;
         private readonly string _fileName;
-        private List<WhereUsedEntry> _parents = new List<WhereUsedEntry>();
+
+        private List<WhereUsedEntry> _directParents = new List<WhereUsedEntry>();
+        private List<WhereUsedEntry> _allLevels;        // null until first needed
+        private List<WhereUsedEntry> _parents;          // the active list
+        private bool _multi;                            // current mode
 
         private DataGridView _grid;
+        private Label _subtitle;
         private Label _countLabel;
+        private RadioButton _rbDirect, _rbAll;
         private Button _btnExport;
 
         private float _scale = 1f;
@@ -35,6 +48,7 @@ namespace PDMLite
         private static readonly Color cOrange    = Color.FromArgb(185, 115, 55);
         private static readonly Color cMaroon    = Color.FromArgb(140, 60, 60);
         private static readonly Color cTextDark  = Color.FromArgb(60, 64, 72);
+        private static readonly Color cSubText   = Color.FromArgb(110, 116, 126);
         private static readonly Color cBg         = Color.FromArgb(245, 247, 250);
 
         private Font _fHeader, _fSub, _fMeta, _fBtn, _fGrid, _fGridHead;
@@ -53,10 +67,14 @@ namespace PDMLite
             _fGrid     = new Font("Segoe UI", 3.5f * _scale);
             _fGridHead = new Font("Segoe UI", 3.5f * _scale, FontStyle.Bold);
 
-            try { _parents = VaultManager.GetWhereUsed(_filePath); }
-            catch { _parents = new List<WhereUsedEntry>(); }
+            // Default mode (Direct) is cheap — one walk; the multi-level walk is
+            // deferred until the user asks for it.
+            try { _directParents = VaultManager.GetWhereUsed(_filePath); }
+            catch { _directParents = new List<WhereUsedEntry>(); }
+            _parents = _directParents;
 
             BuildUI();
+            UpdateSubtitle();
             LoadRows();
         }
 
@@ -68,8 +86,8 @@ namespace PDMLite
             this.MinimizeBox = false;
             this.BackColor = cBg;
             this.KeyPreview = true;
-            this.ClientSize = new Size(S(520), S(460));
-            this.MinimumSize = new Size(S(400), S(300));
+            this.ClientSize = new Size(S(520), S(486));
+            this.MinimumSize = new Size(S(420), S(320));
 
             var headerBar = new Panel
             {
@@ -84,7 +102,7 @@ namespace PDMLite
                 TextAlign = ContentAlignment.MiddleCenter
             });
 
-            var top = new Panel { Dock = DockStyle.Top, Height = S(54), BackColor = cBg };
+            var top = new Panel { Dock = DockStyle.Top, Height = S(82), BackColor = cBg };
             top.Controls.Add(new Label
             {
                 Text = string.IsNullOrEmpty(_fileName)
@@ -95,21 +113,42 @@ namespace PDMLite
                 AutoSize = false, Width = S(480), Height = S(20),
                 AutoEllipsis = true
             });
-            top.Controls.Add(new Label
+            _subtitle = new Label
             {
-                Text = "Assemblies that directly reference this file:",
                 Font = _fMeta,
-                ForeColor = Color.FromArgb(110, 116, 126),
+                ForeColor = cSubText,
                 Location = new Point(S(14), S(30)),
                 AutoSize = false, Width = S(480), Height = S(16),
                 AutoEllipsis = true
-            });
+            };
+            top.Controls.Add(_subtitle);
+
+            // Mode toggle: Direct (1 level) vs All levels (full usage chain).
+            _rbDirect = new RadioButton
+            {
+                Text = "Direct parents (1 level)", Font = _fMeta,
+                ForeColor = cTextDark, AutoSize = true, Checked = true,
+                Location = new Point(S(14), S(52))
+            };
+            _rbAll = new RadioButton
+            {
+                Text = "All levels (incl. sub-assemblies)", Font = _fMeta,
+                ForeColor = cTextDark, AutoSize = true,
+                Location = new Point(S(190), S(52))
+            };
+            _rbDirect.CheckedChanged += (s, e) => { if (_rbDirect.Checked) SetMode(false); };
+            _rbAll.CheckedChanged    += (s, e) => { if (_rbAll.Checked)    SetMode(true);  };
+            top.Controls.Add(_rbDirect);
+            top.Controls.Add(_rbAll);
 
             var bottom = new Panel { Dock = DockStyle.Bottom, Height = S(44), BackColor = cBg };
             _countLabel = new Label
             {
                 Font = _fMeta, ForeColor = cTextDark,
-                Location = new Point(S(14), S(14)), AutoSize = true
+                Location = new Point(S(14), S(13)),
+                AutoSize = false, AutoEllipsis = true,
+                Height = S(18), Width = S(240),
+                TextAlign = ContentAlignment.MiddleLeft
             };
             bottom.Controls.Add(_countLabel);
 
@@ -119,11 +158,7 @@ namespace PDMLite
             _btnExport.Click += (s, e) => ExportCsv();
             bottom.Controls.Add(_btnExport);
             bottom.Controls.Add(btnClose);
-            bottom.Resize += (s, e) =>
-            {
-                btnClose.Location = new Point(bottom.Width - btnClose.Width - S(14), S(9));
-                _btnExport.Location = new Point(btnClose.Left - _btnExport.Width - S(8), S(9));
-            };
+            bottom.Resize += (s, e) => LayoutBottom(bottom, btnClose);
 
             _grid = new DataGridView
             {
@@ -164,8 +199,7 @@ namespace PDMLite
             this.Controls.Add(top);
             this.Controls.Add(headerBar);
 
-            btnClose.Location = new Point(bottom.Width - btnClose.Width - S(14), S(9));
-            _btnExport.Location = new Point(btnClose.Left - _btnExport.Width - S(8), S(9));
+            LayoutBottom(bottom, btnClose);
 
             this.FormClosed += (s, e) =>
             {
@@ -173,6 +207,17 @@ namespace PDMLite
                 _fBtn?.Dispose(); _fGrid?.Dispose(); _fGridHead?.Dispose();
             };
             this.KeyDown += (s, e) => { if (e.KeyCode == Keys.Escape) this.Close(); };
+        }
+
+        // Right-align the buttons and bound the count label so its text can never
+        // run under them (the overlap bug) at any width or DPI.
+        private void LayoutBottom(Panel bottom, Button btnClose)
+        {
+            btnClose.Location = new Point(bottom.Width - btnClose.Width - S(14), S(9));
+            _btnExport.Location = new Point(btnClose.Left - _btnExport.Width - S(8), S(9));
+            if (_countLabel != null)
+                _countLabel.Width = Math.Max(S(40),
+                    _btnExport.Left - _countLabel.Left - S(10));
         }
 
         private void AddCol(string header, float weight)
@@ -187,35 +232,91 @@ namespace PDMLite
             });
         }
 
+        // Switch between Direct (1 level) and All levels. The all-levels walk is
+        // computed once (one disk pass) on first request and cached.
+        private void SetMode(bool multi)
+        {
+            if (multi == _multi && _parents != null) return;
+            _multi = multi;
+            if (multi && _allLevels == null)
+            {
+                var old = this.Cursor;
+                this.Cursor = Cursors.WaitCursor;
+                try { _allLevels = VaultManager.GetWhereUsedTree(_filePath); }
+                catch { _allLevels = new List<WhereUsedEntry>(); }
+                finally { this.Cursor = old; }
+            }
+            _parents = multi ? _allLevels : _directParents;
+            UpdateSubtitle();
+            LoadRows();
+        }
+
+        private void UpdateSubtitle()
+        {
+            if (_subtitle == null) return;
+            _subtitle.Text = _multi
+                ? "Full usage chain — direct parents and the assemblies that contain them:"
+                : "Assemblies that directly reference this file:";
+        }
+
         private void LoadRows()
         {
             _grid.Rows.Clear();
             foreach (var p in _parents)
-                _grid.Rows.Add(
-                    Path.GetFileNameWithoutExtension(p.Name ?? ""),
-                    p.PartNo, p.Revision, p.Status);
+            {
+                string nm = Path.GetFileNameWithoutExtension(p.Name ?? "");
+                // Indent deeper levels so the usage chain reads as a tree.
+                if (_multi && p.Level > 0)
+                    nm = new string(' ', p.Level * 4) + "↳ " + nm;
+                _grid.Rows.Add(nm, p.PartNo, p.Revision, p.Status);
+            }
 
-            _countLabel.Text = _parents.Count == 0
-                ? "Not used by any tracked assembly."
-                : "Used by " + _parents.Count + " assembly" +
-                  (_parents.Count == 1 ? "" : "(ies)") +
-                  "   ·   right-click a parent in the dashboard to drill up.";
-            if (_btnExport != null) _btnExport.Enabled = _parents.Count > 0;
+            int total = _parents.Count;
+            if (total == 0)
+            {
+                _countLabel.Text = "Not used by any tracked assembly.";
+            }
+            else if (!_multi)
+            {
+                _countLabel.Text = "Used by " + total + " assembly" +
+                    (total == 1 ? "" : "(ies)") + ".";
+            }
+            else
+            {
+                int direct = _parents.Count(p => p.Level == 0);
+                _countLabel.Text = "Used by " + total + " reference" +
+                    (total == 1 ? "" : "s") + " across the usage chain  ·  " +
+                    direct + " direct.";
+            }
+            if (_btnExport != null) _btnExport.Enabled = total > 0;
         }
 
         private void Grid_CellFormatting(object sender, DataGridViewCellFormattingEventArgs e)
         {
-            if (e.RowIndex < 0 || _grid.Columns[e.ColumnIndex].HeaderText != "Status")
+            if (e.RowIndex < 0) return;
+            string col = _grid.Columns[e.ColumnIndex].HeaderText;
+
+            if (col == "Status")
+            {
+                string s = (e.Value as string) ?? "";
+                if (s.Equals("Released", StringComparison.OrdinalIgnoreCase))
+                    e.CellStyle.ForeColor = cGreen;
+                else if (s.Equals("Locked", StringComparison.OrdinalIgnoreCase))
+                    e.CellStyle.ForeColor = cMaroon;
+                else if (s.Equals("WIP", StringComparison.OrdinalIgnoreCase))
+                    e.CellStyle.ForeColor = cOrange;
+                else if (s.Equals("Obsolete", StringComparison.OrdinalIgnoreCase))
+                    e.CellStyle.ForeColor = Color.FromArgb(120, 120, 120);
+                else
+                    e.CellStyle.ForeColor = Color.FromArgb(140, 140, 140);
                 return;
-            string s = (e.Value as string) ?? "";
-            if (s.Equals("Released", StringComparison.OrdinalIgnoreCase))
-                e.CellStyle.ForeColor = cGreen;
-            else if (s.Equals("Locked", StringComparison.OrdinalIgnoreCase))
-                e.CellStyle.ForeColor = cMaroon;
-            else if (s.Equals("WIP", StringComparison.OrdinalIgnoreCase))
-                e.CellStyle.ForeColor = cOrange;
-            else
-                e.CellStyle.ForeColor = Color.FromArgb(140, 140, 140);
+            }
+
+            // Mute the Assembly name of deeper levels so the direct parents stand
+            // out in the tree.
+            if (col == "Assembly" && _multi && e.RowIndex < _parents.Count
+                && _parents[e.RowIndex].Level > 0)
+                e.CellStyle.ForeColor = cSubText;
         }
 
         private void ExportCsv()
@@ -232,13 +333,15 @@ namespace PDMLite
                 try
                 {
                     var sb = new StringBuilder();
-                    sb.AppendLine("File,Path");
-                    sb.AppendLine(Csv(_fileName) + "," + Csv(_filePath));
+                    sb.AppendLine("File,Path,Mode");
+                    sb.AppendLine(Csv(_fileName) + "," + Csv(_filePath) + "," +
+                        Csv(_multi ? "All levels" : "Direct (1 level)"));
                     sb.AppendLine();
-                    sb.AppendLine("Assembly,PartNo,Revision,Status,Path");
+                    sb.AppendLine("Level,Assembly,PartNo,Revision,Status,Path");
                     foreach (var p in _parents)
                         sb.AppendLine(string.Join(",", new[]
                         {
+                            Csv((p.Level + 1).ToString()),
                             Csv(Path.GetFileNameWithoutExtension(p.Name ?? "")),
                             Csv(p.PartNo), Csv(p.Revision), Csv(p.Status), Csv(p.Path)
                         }));
