@@ -572,8 +572,9 @@ namespace PDMLite
                                     doc.ShowConfiguration2(form.FileToOpenConfig);
                             }
                             // API open from the dashboard — same as the search
-                            // card, drive the obsolete-components warning explicitly.
-                            PDMLiteAddin.Instance?.WarnObsoleteOnOpen();
+                            // card, drive the obsolete-components warning (deferred
+                            // so the assembly's refs are resolved by the time it runs).
+                            DeferObsoleteWarning();
                         }
                         catch { }
                     }
@@ -948,11 +949,33 @@ namespace PDMLite
                 catch { }
             }
             // Opening from a search card is an API open (OpenDoc6/ActivateDoc3)
-            // inside this click handler — SOLIDWORKS' open/activate notifications
-            // don't reliably drive the obsolete-components warning here the way a
-            // File > Open does, so trigger it explicitly (it self-filters to
-            // assemblies and is guarded once-per-open).
-            try { PDMLiteAddin.Instance?.WarnObsoleteOnOpen(); } catch { }
+            // inside this click handler — drive the obsolete-components warning
+            // explicitly, but DEFERRED (see DeferObsoleteWarning).
+            DeferObsoleteWarning();
+        }
+
+        // Run the obsolete-components warning AFTER the current open settles.
+        // A search-card / dashboard open is a synchronous API OpenDoc6 from a
+        // click handler; calling WarnObsoleteOnOpen immediately reads the
+        // assembly's dependencies before SOLIDWORKS has resolved them
+        // (GetDocumentDependencies2 returns empty → no warning, and the once-per-
+        // open guard isn't set since it never warned). BeginInvoke posts it to
+        // run once the open completes and the message loop comes back — by then
+        // the references are available. (File > Open already warns because its
+        // own FileOpenPostNotify fires at that later, settled point.)
+        private void DeferObsoleteWarning()
+        {
+            try
+            {
+                if (IsHandleCreated)
+                    BeginInvoke((Action)(() =>
+                    {
+                        try { PDMLiteAddin.Instance?.WarnObsoleteOnOpen(); } catch { }
+                    }));
+                else
+                    PDMLiteAddin.Instance?.WarnObsoleteOnOpen();
+            }
+            catch { }
         }
 
         // Expand the flat search results into per-configuration cards. A model
