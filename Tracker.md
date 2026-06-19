@@ -79,3 +79,13 @@ the window, estimate active hours (drop idle gaps), and write the headline + 6�
 - Reason now "Release only" (New Revision drops the prompt); release reason leads File History.
 - Added ECO-style reason dropdown + detail; reason capture on Rollback and Remove too.
 - Surfaced the reason on the as-released Baseline and a Vault Dashboard hover tooltip.
+
+### 6/18/2026 · 08:58–20:24 · 7 commits · 7.5 hrs
+**Merged PR #64; rebased and extended PR #65 (Obsolete lifecycle state) through supersession + several test-fix rounds**
+- Added Tracker.md — daily work-summary format + log.
+- Adversarial pre-merge review of PR #64 (parallel agents); SAFE TO MERGE; merged to main.
+- Rebased PR #65 (Obsolete state) onto main (86 commits behind) — adapted to operation claims, ReloadOrReplace, categorized reason.
+- Fixed the Obsolete search-card colour (grey, was WIP blue).
+- Built supersession: "superseded by" replacement link (picker + display), design-time obsolete-component open warning, reason tooltip.
+- Hardened it: PartNo→filename fallback, "(replaced by X)" history note, re-checking warning, update-already-obsolete, in-app-open warning.
+- Investigating two reported supersession bugs (search-card display + search-open warning) — awaiting a vault.xml check.
