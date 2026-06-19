@@ -56,7 +56,7 @@ namespace PDMLite
         private DataGridView _grid;
         private ContextMenuStrip _rowMenu;
         private WhereUsedEntry _menuEntry;       // the right-clicked row
-        private Button _btnExport, _btnClose;
+        private Button _btnExport, _btnExportAll, _btnClose;
 
         private float _scale = 1f;
         private int S(float v) => (int)(v * _scale);
@@ -194,6 +194,13 @@ namespace PDMLite
             _btnClose.Click += (s, e) => this.Close();
             _btnExport = MakeButton("Export CSV", cBrand, Color.White);
             _btnExport.Click += (s, e) => ExportCsv();
+            _btnExportAll = MakeButton("Export All Levels", cBrandDark, Color.White);
+            _btnExportAll.Width = S(130);
+            _btnExportAll.Click += (s, e) => ExportAllLevels();
+            // Used nowhere at the direct level ⇒ nothing at any level ⇒ nothing to
+            // export. Independent of the active mode/filter (this dumps all three).
+            _btnExportAll.Enabled = _single != null && _single.Count > 0;
+            _bottom.Controls.Add(_btnExportAll);
             _bottom.Controls.Add(_btnExport);
             _bottom.Controls.Add(_btnClose);
             _bottom.Resize += (s, e) => LayoutBottom();
@@ -320,11 +327,12 @@ namespace PDMLite
         private void LayoutBottom()
         {
             if (_bottom == null) return;
-            _btnClose.Location  = new Point(_bottom.Width - _btnClose.Width - S(14), S(9));
-            _btnExport.Location = new Point(_btnClose.Left - _btnExport.Width - S(8), S(9));
+            _btnClose.Location     = new Point(_bottom.Width - _btnClose.Width - S(14), S(9));
+            _btnExport.Location    = new Point(_btnClose.Left - _btnExport.Width - S(8), S(9));
+            _btnExportAll.Location = new Point(_btnExport.Left - _btnExportAll.Width - S(8), S(9));
             if (_countLabel != null)
                 _countLabel.Width = Math.Max(S(40),
-                    _btnExport.Left - _countLabel.Left - S(10));
+                    _btnExportAll.Left - _countLabel.Left - S(10));
         }
 
         private void AddCol(string header, float weight, bool centre)
@@ -598,6 +606,70 @@ namespace PDMLite
                         MessageBoxButtons.OK, MessageBoxIcon.Error);
                 }
             }
+        }
+
+        // Export ALL THREE modes into one .xlsx (a sheet each), like the baseline
+        // viewer's "Export All Revs". Full data, UNFILTERED (the per-mode Export
+        // CSV covers the current filtered view). Computes the All/Top walks if
+        // they haven't been viewed yet. xlsx cells are inline strings, so no CSV
+        // formula-injection guard is needed (Excel never executes them).
+        private void ExportAllLevels()
+        {
+            var all = _allLevels ?? (_allLevels =
+                ComputeWithWait(() => VaultManager.GetWhereUsedTree(_filePath)));
+            var top = _topLevel ?? (_topLevel =
+                ComputeWithWait(() => VaultManager.GetWhereUsedTopLevel(_filePath)));
+
+            using (var sfd = new SaveFileDialog
+            {
+                Filter = "Excel workbook (*.xlsx)|*.xlsx|All files (*.*)|*.*",
+                FileName = SafeName(Path.GetFileNameWithoutExtension(_fileName ?? "file"))
+                    + "_WHERE-USED.xlsx"
+            })
+            {
+                if (sfd.ShowDialog(this) != DialogResult.OK) return;
+                try
+                {
+                    var sheets = new List<XlsxWriter.Sheet>
+                    {
+                        BuildSheet("Single Level", _single),
+                        BuildSheet("All Levels",   all),
+                        BuildSheet("Top Level",    top)
+                    };
+                    XlsxWriter.Write(sfd.FileName, sheets);
+                    MessageBox.Show(
+                        "Where-used exported (Single / All / Top Level sheets) to:\n"
+                        + sfd.FileName,
+                        "BCore PDM — Exported",
+                        MessageBoxButtons.OK, MessageBoxIcon.Information);
+                }
+                catch (Exception ex)
+                {
+                    MessageBox.Show("Could not export:\n" + ex.Message,
+                        "BCore PDM — Export Failed",
+                        MessageBoxButtons.OK, MessageBoxIcon.Error);
+                }
+            }
+        }
+
+        private XlsxWriter.Sheet BuildSheet(string tab, List<WhereUsedEntry> rows)
+        {
+            var sh = new XlsxWriter.Sheet(tab);
+            sh.Add("File", _fileName ?? "");
+            sh.Add("Path", _filePath ?? "");
+            sh.AddBlank();
+            sh.Add("Level", "Assembly", "Part No", "Revision", "Qty", "Status", "Path");
+            if (rows != null)
+                foreach (var p in rows)
+                    sh.Add(
+                        (p.Level + 1).ToString(),
+                        Path.GetFileNameWithoutExtension(p.Name ?? ""),
+                        p.PartNo ?? "", p.Revision ?? "",
+                        p.Qty.HasValue ? p.Qty.Value.ToString() : "",
+                        p.Status ?? "", p.Path ?? "");
+            if (rows == null || rows.Count == 0)
+                sh.Add("(none)");
+            return sh;
         }
 
         // RFC-4180 escaping + Excel formula-injection guard.
