@@ -36,8 +36,29 @@ namespace PDMLite
     {
         private enum Mode { Single, All, Top }
 
-        private readonly string _filePath;
-        private readonly string _fileName;
+        // The SUBJECT of the where-used query. NOT readonly: the "Find" box lets
+        // the user search the vault and switch the subject in-place (the task-pane
+        // entry point opens the form seeded with the active file, but any tracked
+        // part/assembly can be loaded without reopening the form).
+        private string _filePath;
+        private string _fileName;
+
+        // EM_SETCUEBANNER — grey placeholder in a single-line TextBox (no
+        // PlaceholderText on .NET Framework 4.8). Mirrors the other BCore forms.
+        [System.Runtime.InteropServices.DllImport("user32.dll",
+            CharSet = System.Runtime.InteropServices.CharSet.Unicode)]
+        private static extern IntPtr SendMessage(
+            IntPtr hWnd, int msg, IntPtr wParam, string lParam);
+
+        private static void SetCueBanner(TextBox box, string text)
+        {
+            const int EM_SETCUEBANNER = 0x1501;
+            if (box.IsHandleCreated)
+                SendMessage(box.Handle, EM_SETCUEBANNER, (IntPtr)1, text);
+            else
+                box.HandleCreated += (s, e) =>
+                    SendMessage(box.Handle, EM_SETCUEBANNER, (IntPtr)1, text);
+        }
 
         private List<WhereUsedEntry> _single = new List<WhereUsedEntry>();
         private List<WhereUsedEntry> _allLevels;     // null until first needed
@@ -49,14 +70,23 @@ namespace PDMLite
         // Set on open/double-click; the dashboard opens it after this modal closes.
         public string FileToOpen { get; private set; }
 
-        private Panel _top, _filterPanel, _bottom;
-        private Label _fileLabel, _subtitle, _hint, _countLabel, _filterLabel;
+        private Panel _top, _findPanel, _filterPanel, _bottom;
+        private Label _fileLabel, _subtitle, _hint, _countLabel, _filterLabel, _findLabel;
         private RadioButton _rbSingle, _rbAll, _rbTop;
-        private TextBox _filterBox;
+        private TextBox _filterBox, _findBox;
         private DataGridView _grid;
         private ContextMenuStrip _rowMenu;
         private WhereUsedEntry _menuEntry;       // the right-clicked row
         private Button _btnExport, _btnExportAll, _btnClose;
+
+        // FIND box (search the vault to switch the subject). The results drop down
+        // is a ListBox parented to the FORM (an autocomplete overlay above the
+        // grid), shown on a debounced search and dismissed on commit / Esc / click
+        // away. _findHits is the parallel VaultFile list behind the rendered items.
+        private ListBox _findResults;
+        private List<VaultFile> _findHits = new List<VaultFile>();
+        private Timer _findTimer;
+        private bool _suppressFind;              // set while seeding the box text
 
         private float _scale = 1f;
         private int S(float v) => (int)(v * _scale);
@@ -97,6 +127,7 @@ namespace PDMLite
             BuildUI();
             UpdateSubtitle();
             LoadRows();
+            SeedFindBox();   // autofill the Find box with the subject's Part No
         }
 
         private void BuildUI()
@@ -107,8 +138,10 @@ namespace PDMLite
             this.MinimizeBox = false;
             this.BackColor = cBg;
             this.KeyPreview = true;
-            this.ClientSize = new Size(S(560), S(516));
-            this.MinimumSize = new Size(S(470), S(360));
+            // Height accommodates the Find row added above the Filter row so the
+            // grid keeps its ~14 visible rows.
+            this.ClientSize = new Size(S(560), S(552));
+            this.MinimumSize = new Size(S(470), S(396));
 
             var headerBar = new Panel
             {
@@ -124,8 +157,7 @@ namespace PDMLite
             _top = new Panel { Dock = DockStyle.Top, Height = S(100), BackColor = cBg };
             _fileLabel = new Label
             {
-                Text = string.IsNullOrEmpty(_fileName)
-                    ? Path.GetFileName(_filePath ?? "") : _fileName,
+                Text = SubjectLabelText(),
                 Font = _fSub, ForeColor = cTextDark,
                 Location = new Point(S(14), S(8)),
                 AutoSize = false, Height = S(20), AutoEllipsis = true,
@@ -162,6 +194,51 @@ namespace PDMLite
             _top.Controls.Add(_rbTop);
             _top.Controls.Add(_hint);
             _top.Resize += (s, e) => LayoutTop();
+
+            // ── Find row (search the vault → switch the SUBJECT) ─────────────
+            // Distinct from Filter below: Find CHANGES which part/assembly's
+            // where-used is shown; Filter narrows the rows already shown.
+            _findPanel = new Panel { Dock = DockStyle.Top, Height = S(34), BackColor = cBg };
+            _findLabel = new Label
+            {
+                Text = "Find:", Font = _fMeta, ForeColor = cTextDark,
+                AutoSize = true, Location = new Point(S(14), S(9))
+            };
+            _findBox = new TextBox
+            {
+                Font = _fMeta, Width = S(260), Location = new Point(S(60), S(6))
+            };
+            SetCueBanner(_findBox, "Part no, description or file name…");
+            _findTimer = new Timer { Interval = 400 };
+            _findTimer.Tick += (s, e) => { _findTimer.Stop(); RunFind(); };
+            _findBox.TextChanged += (s, e) =>
+            {
+                if (_suppressFind) return;
+                _findTimer.Stop();
+                if ((_findBox.Text ?? "").Trim().Length >= 2) _findTimer.Start();
+                else HideFindResults();
+            };
+            _findBox.KeyDown += FindBox_KeyDown;
+            _findPanel.Controls.Add(_findLabel);
+            _findPanel.Controls.Add(_findBox);
+            _findPanel.Resize += (s, e) => LayoutFind();
+
+            // The autocomplete overlay — parented to the FORM (so it floats above
+            // the grid), hidden until a search returns hits.
+            _findResults = new ListBox
+            {
+                Font = _fMeta, Visible = false, IntegralHeight = false,
+                BorderStyle = BorderStyle.FixedSingle
+            };
+            // Commit only on a click that lands on a real item (IndexFromPoint
+            // guards against a stray click on the scrollbar committing the
+            // currently-selected row).
+            _findResults.MouseClick += (s, e) =>
+            {
+                int i = _findResults.IndexFromPoint(e.Location);
+                if (i >= 0) { _findResults.SelectedIndex = i; CommitSelectedFind(); }
+            };
+            _findResults.KeyDown += FindResults_KeyDown;
 
             // ── Filter row ───────────────────────────────────────────────────
             _filterPanel = new Panel { Dock = DockStyle.Top, Height = S(34), BackColor = cBg };
@@ -255,25 +332,44 @@ namespace PDMLite
                 (s, e) => OpenContainingFolder(_menuEntry?.Path));
 
             // Fill control added FIRST (resolved last → middle), then edge panels;
-            // header docks outermost (house z-order convention).
+            // header docks outermost (house z-order convention). For same-edge Top
+            // docking the LAST added sits closest to the edge, so the visual order
+            // top→down is: headerBar · _top · _findPanel · _filterPanel · grid.
             this.Controls.Add(_grid);
             this.Controls.Add(_bottom);
             this.Controls.Add(_filterPanel);
+            this.Controls.Add(_findPanel);
             this.Controls.Add(_top);
             this.Controls.Add(headerBar);
+            // Float the autocomplete overlay above the grid (positioned on demand).
+            this.Controls.Add(_findResults);
+            _findResults.BringToFront();
 
             LayoutTop();
+            LayoutFind();
             LayoutFilter();
             LayoutBottom();
 
             this.FormClosed += (s, e) =>
             {
+                _findTimer?.Stop(); _findTimer?.Dispose();
                 _rowMenu?.Dispose();
                 _fHeader?.Dispose(); _fSub?.Dispose(); _fMeta?.Dispose();
                 _fHint?.Dispose(); _fBtn?.Dispose(); _fGrid?.Dispose();
                 _fGridHead?.Dispose();
             };
-            this.KeyDown += (s, e) => { if (e.KeyCode == Keys.Escape) this.Close(); };
+            // Esc dismisses the Find dropdown first (if up), only then closes.
+            this.KeyDown += (s, e) =>
+            {
+                if (e.KeyCode != Keys.Escape) return;
+                if (_findResults != null && _findResults.Visible)
+                { HideFindResults(); e.Handled = true; return; }
+                this.Close();
+            };
+            // The overlay floats over the grid — dismiss it when the window is
+            // resized/moved or loses focus so it can never linger out of place.
+            this.Resize += (s, e) => HideFindResults();
+            this.Deactivate += (s, e) => HideFindResults();
         }
 
         private RadioButton MakeRadio(string text, bool check)
@@ -311,6 +407,17 @@ namespace PDMLite
             _rbTop.Location    = new Point(x0 + w1 + gap + w2 + gap, y);
         }
 
+        // Centre the "Find:" label + box as one unit (matches the Filter row).
+        private void LayoutFind()
+        {
+            if (_findPanel == null) return;
+            int labW = _findLabel.PreferredSize.Width;
+            int total = labW + S(6) + _findBox.Width;
+            int x0 = Math.Max(S(14), (_findPanel.Width - total) / 2);
+            _findLabel.Location = new Point(x0, _findLabel.Top);
+            _findBox.Location   = new Point(x0 + labW + S(6), _findBox.Top);
+        }
+
         // Centre the "Filter:" label + box as one unit.
         private void LayoutFilter()
         {
@@ -333,6 +440,186 @@ namespace PDMLite
             if (_countLabel != null)
                 _countLabel.Width = Math.Max(S(40),
                     _btnExportAll.Left - _countLabel.Left - S(10));
+        }
+
+        // The subject filename shown in the header (or a prompt when no subject is
+        // loaded yet — the task-pane entry point can open with nothing active).
+        private string SubjectLabelText()
+        {
+            if (!string.IsNullOrEmpty(_fileName)) return _fileName;
+            if (!string.IsNullOrEmpty(_filePath)) return Path.GetFileName(_filePath);
+            return "(no file — use Find to choose a part or assembly)";
+        }
+
+        // Switch the SUBJECT of the where-used query in place (Find committed a new
+        // file). Recompute the cheap single-level walk now and invalidate the
+        // cached All/Top walks; reset the view to Single Level.
+        private void SetSubject(string path, string name)
+        {
+            _filePath = path;
+            _fileName = name;
+            _allLevels = null;
+            _topLevel = null;
+            try { _single = VaultManager.GetWhereUsed(_filePath); }
+            catch { _single = new List<WhereUsedEntry>(); }
+            _mode = Mode.Single;
+            _parents = _single;
+
+            if (_fileLabel != null) _fileLabel.Text = SubjectLabelText();
+            if (_btnExportAll != null)
+                _btnExportAll.Enabled = _single != null && _single.Count > 0;
+            // Keep the radios honest (the CheckedChanged → SetMode is a no-op here
+            // because _mode/_parents are already Single).
+            if (_rbSingle != null && !_rbSingle.Checked) _rbSingle.Checked = true;
+
+            UpdateSubtitle();
+            LoadRows();
+        }
+
+        // Autofill the Find box with the subject's Part No (the design decision —
+        // Part No over file name), falling back to the file name when untracked.
+        private void SeedFindBox()
+        {
+            if (_findBox == null) return;
+            string seed = "";
+            try
+            {
+                var rec = string.IsNullOrEmpty(_filePath)
+                    ? null : DatabaseManager.GetFileRecord(_filePath);
+                if (rec != null) seed = rec.PartNumber ?? "";
+            }
+            catch { }
+            if (string.IsNullOrEmpty(seed) && !string.IsNullOrEmpty(_fileName))
+                seed = Path.GetFileNameWithoutExtension(_fileName);
+
+            _suppressFind = true;        // seeding must not trigger a search
+            _findBox.Text = seed ?? "";
+            try { _findBox.SelectionStart = _findBox.Text.Length; } catch { }
+            _suppressFind = false;
+        }
+
+        // Debounced vault search → fill the overlay (PartNumber + Description + the
+        // file name in parentheses). Silent on a vault outage, like the task-pane
+        // search (this runs on a timer tick).
+        private void RunFind()
+        {
+            string term = (_findBox.Text ?? "").Trim();
+            if (term.Length < 2) { HideFindResults(); return; }
+
+            List<VaultFile> hits;
+            try { hits = DatabaseManager.SearchFiles(term); }
+            catch { HideFindResults(); return; }
+            _findHits = hits ?? new List<VaultFile>();
+
+            _findResults.BeginUpdate();
+            _findResults.Items.Clear();
+            foreach (var f in _findHits)
+            {
+                string pn = string.IsNullOrEmpty(f.PartNumber)
+                    ? Path.GetFileNameWithoutExtension(f.FileName ?? "")
+                    : f.PartNumber;
+                string desc = string.IsNullOrEmpty(f.Description)
+                    ? "" : "  —  " + f.Description;
+                _findResults.Items.Add(pn + desc + "   (" + (f.FileName ?? "") + ")");
+            }
+            if (_findHits.Count == 0)
+                _findResults.Items.Add("(no matches for \"" + term + "\")");
+            _findResults.EndUpdate();
+
+            PositionFindResults();
+            if (_findHits.Count > 0) _findResults.SelectedIndex = 0;
+            _findResults.Visible = true;
+            _findResults.BringToFront();
+        }
+
+        // Anchor the overlay just under the Find box (PointToClient handles the
+        // docked-panel offsets robustly at any DPI / window size).
+        private void PositionFindResults()
+        {
+            if (_findBox == null || _findResults == null) return;
+            Point p = this.PointToClient(_findBox.PointToScreen(Point.Empty));
+            int rows = Math.Min(Math.Max(_findResults.Items.Count, 1), 7);
+            int h = rows * _findResults.ItemHeight + S(4);
+            _findResults.Bounds = new Rectangle(
+                p.X, p.Y + _findBox.Height + S(1), _findBox.Width, h);
+        }
+
+        private void HideFindResults()
+        {
+            if (_findResults != null) _findResults.Visible = false;
+        }
+
+        private void CommitSelectedFind()
+        {
+            int i = _findResults.SelectedIndex;
+            if (i < 0 || i >= _findHits.Count) return;   // "(no matches)" / none
+            CommitFind(_findHits[i]);
+        }
+
+        // Load the chosen file as the new subject. A DRAWING isn't a component and
+        // has no where-used of its own, so resolve it to the model it documents and
+        // show the MODEL's where-used (the design decision).
+        private void CommitFind(VaultFile vf)
+        {
+            HideFindResults();
+            if (vf == null || string.IsNullOrEmpty(vf.FilePath)) return;
+
+            string path = vf.FilePath, name = vf.FileName;
+            string ext = (Path.GetExtension(path) ?? "").ToLowerInvariant();
+            if (ext == ".slddrw")
+            {
+                VaultFile model = null;
+                try { model = DatabaseManager.GetModelForDrawing(path); } catch { }
+                if (model == null)
+                {
+                    MessageBox.Show(
+                        "A drawing has no \"where used\" — it isn't a component.\n\n" +
+                        "No tracked model was found for it; pick the part or " +
+                        "assembly instead.",
+                        "BCore PDM — Where Used",
+                        MessageBoxButtons.OK, MessageBoxIcon.Information);
+                    return;
+                }
+                path = model.FilePath;
+                name = model.FileName;
+            }
+
+            SetSubject(path, name);
+            SeedFindBox();   // reflect the loaded subject's Part No
+        }
+
+        private void FindBox_KeyDown(object sender, KeyEventArgs e)
+        {
+            if (e.KeyCode == Keys.Down && _findResults != null
+                && _findResults.Visible && _findResults.Items.Count > 0)
+            {
+                _findResults.Focus();
+                if (_findResults.SelectedIndex < 0) _findResults.SelectedIndex = 0;
+                e.Handled = true;
+            }
+            else if (e.KeyCode == Keys.Enter)
+            {
+                _findTimer.Stop();
+                if (_findResults != null && _findResults.Visible) CommitSelectedFind();
+                else RunFind();
+                e.Handled = true;
+                e.SuppressKeyPress = true;   // no Windows ding
+            }
+        }
+
+        private void FindResults_KeyDown(object sender, KeyEventArgs e)
+        {
+            if (e.KeyCode == Keys.Enter)
+            {
+                CommitSelectedFind();
+                e.Handled = true;
+            }
+            else if (e.KeyCode == Keys.Escape)
+            {
+                HideFindResults();
+                try { _findBox.Focus(); } catch { }
+                e.Handled = true;
+            }
         }
 
         private void AddCol(string header, float weight, bool centre)
@@ -429,9 +716,12 @@ namespace PDMLite
             string baseText;
             if (total == 0)
             {
-                baseText = _mode == Mode.Top
-                    ? "Not contained in any tracked top-level assembly."
-                    : "Not used by any tracked assembly.";
+                if (string.IsNullOrEmpty(_filePath))
+                    baseText = "Use Find above to choose a part or assembly.";
+                else
+                    baseText = _mode == Mode.Top
+                        ? "Not contained in any tracked top-level assembly."
+                        : "Not used by any tracked assembly.";
                 _countLabel.Text = baseText;
                 return;
             }
@@ -470,6 +760,7 @@ namespace PDMLite
 
         private void Grid_MouseDown(object sender, MouseEventArgs e)
         {
+            HideFindResults();   // any click on the grid dismisses the Find overlay
             if (e.Button != MouseButtons.Right) return;
             var hit = _grid.HitTest(e.X, e.Y);
             if (hit.RowIndex < 0 || hit.RowIndex >= _displayed.Count) return;

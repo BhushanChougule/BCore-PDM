@@ -481,6 +481,73 @@ namespace PDMLite
         // Revisioned first. Orphans (file already deleted on disk) are NOT
         // handled here; they are auto-purged by SearchFiles when encountered,
         // because a deleted file can't be opened to click this button.
+
+        // PATH-BASED Remove from Vault — backs the Vault Dashboard row right-click
+        // ("Remove from Vault…"), where the file need not be open. The exports are
+        // named PER CONFIG ({cfgPartNo}-R{rev}.step, {cfgDrawingNo} REV {rev}.pdf)
+        // and the open document is the only place the per-config DrawingNo lives,
+        // so this OPENS the file (read-write WIP — Released is blocked anyway) and
+        // delegates to the full doc-based flow, which already closes the doc before
+        // moving anything. Cheap guards run BEFORE the open so a Released / orphan /
+        // untracked file never pays the open cost.
+        public static void RemoveFromVault(string filePath)
+        {
+            string user = PDMLiteAddin.CurrentUser;
+            if (!IsMaster(user)) { NotMaster(); return; }
+            if (string.IsNullOrEmpty(filePath)) return;
+
+            string fileName = Path.GetFileName(filePath);
+            string status = DatabaseManager.GetFileStatus(filePath);
+            if (string.IsNullOrEmpty(status))
+            {
+                MessageBox.Show(
+                    fileName + " is not tracked in the vault — nothing to remove.",
+                    "BCore PDM — Remove from Vault",
+                    MessageBoxButtons.OK, MessageBoxIcon.Information);
+                return;
+            }
+            if (string.Equals(status, "Released", StringComparison.OrdinalIgnoreCase))
+            {
+                MessageBox.Show(
+                    "Cannot remove a Released file from the vault.\n\n" +
+                    "File : " + fileName + "\n\n" +
+                    "Unlock or start a New Revision first, then remove it.",
+                    "BCore PDM — Remove Blocked",
+                    MessageBoxButtons.OK, MessageBoxIcon.Stop);
+                return;
+            }
+
+            // Orphan: a record with no file on disk has nothing to scrap. Offer to
+            // purge just the dead record (SearchFiles auto-purges these too, but
+            // the Master asked to remove it from the dashboard).
+            if (!File.Exists(filePath))
+            {
+                if (MessageBox.Show(
+                    fileName + " is not on disk — it may already have been removed.\n\n" +
+                    "Delete its leftover vault record?",
+                    "BCore PDM — Remove from Vault",
+                    MessageBoxButtons.YesNo, MessageBoxIcon.Question)
+                    != DialogResult.Yes) return;
+                DatabaseManager.RemoveFileRecord(filePath);
+                AuditLogger.Log("RemoveFromVault", user, fileName, "", "",
+                    "orphaned record purged (file already gone from disk)");
+                return;
+            }
+
+            ModelDoc2 doc = OpenByPath(filePath);
+            if (doc == null)
+            {
+                MessageBox.Show(
+                    "Could not open " + fileName + " to remove it.\n\n" +
+                    "It may be open on another machine, or the network share may " +
+                    "be unavailable. Nothing was changed.",
+                    "BCore PDM — Remove from Vault",
+                    MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                return;
+            }
+            RemoveFromVault(doc); // full flow: guards + claim + scrap + record delete + close
+        }
+
         public static void RemoveFromVault(ModelDoc2 doc)
         {
             string user = PDMLiteAddin.CurrentUser;

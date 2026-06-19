@@ -93,6 +93,9 @@ namespace PDMLite
         // Master-only lifecycle items — constructed ONLY for a Master (see
         // _isMaster) so engineers never see them or a dangling separator.
         private ToolStripMenuItem _miObsolete, _miReinstate;
+        // Remove from Vault — Masters only (moved here from the task pane). Retires
+        // the file BY PATH (need not be open). Built only for Masters.
+        private ToolStripMenuItem _miRemove;
         private bool _isMaster;
         private VaultFile _menuRow;       // the ROW OBJECT the menu was opened on —
                                           // not an index: the search debounce can
@@ -441,9 +444,13 @@ namespace PDMLite
             {
                 _miObsolete  = new ToolStripMenuItem("Mark Obsolete…", null, (s, e) => MenuMarkObsolete());
                 _miReinstate = new ToolStripMenuItem("Reinstate from Obsolete", null, (s, e) => MenuReinstate());
+                // Retirement (moves the file + snapshot + exports to SCRAP and
+                // deletes the record). Sits with the other lifecycle actions.
+                _miRemove    = new ToolStripMenuItem("Remove from Vault…", null, (s, e) => MenuRemove());
                 menuItems.Add(new ToolStripSeparator());
                 menuItems.Add(_miObsolete);
                 menuItems.Add(_miReinstate);
+                menuItems.Add(_miRemove);
             }
             _rowMenu.Items.AddRange(menuItems.ToArray());
             foreach (ToolStripItem it in _rowMenu.Items)
@@ -1418,6 +1425,15 @@ namespace PDMLite
                     ? "Update Obsolete Details…" : "Mark Obsolete…";
                 _miReinstate.Visible = isObsolete;
             }
+            // Remove from Vault: Masters only; disabled (not hidden) on a Released
+            // row so the menu stays predictable but the action is clearly blocked
+            // (a Released file must be Unlocked / New-Revisioned first).
+            if (_miRemove != null)
+            {
+                _miRemove.Visible = true;
+                _miRemove.Enabled = !(f.Status ?? "")
+                    .Equals("Released", StringComparison.OrdinalIgnoreCase);
+            }
 
             _rowMenu.Show(_grid, e.Location);
         }
@@ -1531,6 +1547,18 @@ namespace PDMLite
             var f = MenuRow();
             if (f == null) return;
             VaultManager.ReinstateFromObsolete(f.FilePath);
+            LoadData();
+        }
+
+        // Retire the right-clicked file (BY PATH — VaultManager opens it to read
+        // the per-config export identity, then scraps + deletes the record + closes
+        // it; its confirm / reason / role dialogs are modal on top of the dashboard,
+        // which stays open like the Obsolete actions). Refresh so the row drops out.
+        private void MenuRemove()
+        {
+            var f = MenuRow();
+            if (f == null) return;
+            VaultManager.RemoveFromVault(f.FilePath);
             LoadData();
         }
 
