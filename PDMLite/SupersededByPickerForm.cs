@@ -166,7 +166,12 @@ namespace PDMLite
 
         private void UpdateSet()
         {
-            _btnSet.Enabled = _list.SelectedIndex >= 0;
+            // Enable only on a REAL result row — the "(no matches)" /
+            // "(vault unavailable)" placeholders are in _list but not _results,
+            // so a selected placeholder index is >= _results.Count and must not
+            // light up the Set button (clicking it would no-op).
+            int i = _list.SelectedIndex;
+            _btnSet.Enabled = i >= 0 && i < _results.Count;
         }
 
         private void Commit()

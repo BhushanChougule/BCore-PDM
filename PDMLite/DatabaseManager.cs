@@ -2482,6 +2482,7 @@ namespace PDMLite
                                 Description       = dsc,
                                 Revision          = rev,
                                 Status            = (string)mel.Element("Status") ?? "",
+                                SupersededBy      = (string)mel.Element("SupersededBy") ?? "",
                                 Configurations    = ReadConfigs(mel, pn, dsc, rev)
                             };
                         }
@@ -2511,6 +2512,7 @@ namespace PDMLite
                             Description    = dsc,
                             Revision       = rev,
                             Status         = (string)el.Element("Status") ?? "",
+                            SupersededBy   = (string)el.Element("SupersededBy") ?? "",
                             Configurations = ReadConfigs(el, pn, dsc, rev)
                         };
                     }

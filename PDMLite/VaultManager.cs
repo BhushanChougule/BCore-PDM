@@ -246,11 +246,32 @@ namespace PDMLite
             // replacement (a file obsoleted before a replacement was known, or
             // whose replacement changed). The flow below re-confirms, re-asks the
             // reason and re-runs the picker, then re-writes status + <SupersededBy>.
-            bool alreadyObsolete = string.Equals(
-                DatabaseManager.GetFileStatus(filePath), "Obsolete",
+            string status = DatabaseManager.GetFileStatus(filePath);
+            bool alreadyObsolete = string.Equals(status, "Obsolete",
                 StringComparison.OrdinalIgnoreCase);
 
             string name = Path.GetFileName(filePath);
+
+            // Marking a file that's hard-LOCKED by ANOTHER Master Obsolete would
+            // override that lock — like UnlockFile, surface it so the Yes/No
+            // confirm below is an explicit decision, never silent. (A Released
+            // file's lock record merely names the releaser — status != "Locked" —
+            // so this is the Locked-by-other edge only; releasing-to-obsolete
+            // stays intentionally unguarded.)
+            string lockWarn = "";
+            if (string.Equals(status, "Locked", StringComparison.OrdinalIgnoreCase))
+            {
+                try
+                {
+                    var li = DatabaseManager.GetLockInfo(filePath);
+                    if (li != null && li.IsLocked &&
+                        !string.Equals(li.LockedBy, user,
+                            StringComparison.OrdinalIgnoreCase))
+                        lockWarn = "\n\nWARNING — this file is LOCKED by " +
+                            li.LockedBy + ". Marking it Obsolete overrides that lock.";
+                }
+                catch { }
+            }
 
             // Warn (do NOT block) about parent assemblies that still reference
             // this file — marking it Obsolete signals it must not be used in new
@@ -269,11 +290,12 @@ namespace PDMLite
 
             string confirmMsg = alreadyObsolete
                 ? "This file is already OBSOLETE.\n\n  • " + name + "\n\n" +
-                  "Update its reason / replacement part?" + parentWarn
+                  "Update its reason / replacement part?" + lockWarn + parentWarn
                 : "Mark this file OBSOLETE (superseded)?\n\n  • " + name + "\n\n" +
                   "It stays in the vault for reference (history preserved) and " +
                   "is frozen read-only, but flagged not-for-new-use: it cannot " +
-                  "be edited or released until a Master Reinstates it." + parentWarn;
+                  "be edited or released until a Master Reinstates it." +
+                  lockWarn + parentWarn;
             if (MessageBox.Show(confirmMsg, "BCore PDM — Mark Obsolete",
                     MessageBoxButtons.YesNo, MessageBoxIcon.Warning) != DialogResult.Yes)
                 return;
