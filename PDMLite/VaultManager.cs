@@ -225,6 +225,234 @@ namespace PDMLite
             }
         }
 
+        // ── MARK OBSOLETE ──────────────────────────────────────────────────
+        // Master-only, PATH-BASED (the file need not be open — invoked from the
+        // Vault Dashboard row right-click). Marks a file OBSOLETE: a superseded-
+        // but-referenceable lifecycle state, DISTINCT from Remove-from-Vault
+        // (which scraps the file to SCRAP). The file stays in place, frozen
+        // read-only, keeps its full history, and is flagged not-for-new-use — it
+        // can't be edited (ValidateSave Rule 2b), can't be bulk-released
+        // (GetReleasableFiles whitelists WIP/blank only), and blocks an assembly
+        // release as a non-Released child (the existing gate, now reporting
+        // "Obsolete"). Runs under an operation claim so the status change can't
+        // interleave with another Master's flow on the same file.
+        public static void MarkObsolete(string filePath)
+        {
+            string user = PDMLiteAddin.CurrentUser;
+            if (!IsMaster(user)) { NotMaster(); return; }
+            if (string.IsNullOrEmpty(filePath)) return;
+
+            // Already Obsolete? Don't hard-stop — allow UPDATING the reason +
+            // replacement (a file obsoleted before a replacement was known, or
+            // whose replacement changed). The flow below re-confirms, re-asks the
+            // reason and re-runs the picker, then re-writes status + <SupersededBy>.
+            string status = DatabaseManager.GetFileStatus(filePath);
+            bool alreadyObsolete = string.Equals(status, "Obsolete",
+                StringComparison.OrdinalIgnoreCase);
+
+            string name = Path.GetFileName(filePath);
+
+            // Marking a file that's hard-LOCKED by ANOTHER Master Obsolete would
+            // override that lock — like UnlockFile, surface it so the Yes/No
+            // confirm below is an explicit decision, never silent. (A Released
+            // file's lock record merely names the releaser — status != "Locked" —
+            // so this is the Locked-by-other edge only; releasing-to-obsolete
+            // stays intentionally unguarded.)
+            string lockWarn = "";
+            if (string.Equals(status, "Locked", StringComparison.OrdinalIgnoreCase))
+            {
+                try
+                {
+                    var li = DatabaseManager.GetLockInfo(filePath);
+                    if (li != null && li.IsLocked &&
+                        !string.Equals(li.LockedBy, user,
+                            StringComparison.OrdinalIgnoreCase))
+                        lockWarn = "\n\nWARNING — this file is LOCKED by " +
+                            li.LockedBy + ". Marking it Obsolete overrides that lock.";
+                }
+                catch { }
+            }
+
+            // Warn (do NOT block) about parent assemblies that still reference
+            // this file — marking it Obsolete signals it must not be used in new
+            // designs, so those assemblies should be revised away from it. Same
+            // best-effort GetParentAssemblies pattern as New Revision / Remove.
+            string parentWarn = "";
+            try
+            {
+                var parents = GetParentAssemblies(filePath);
+                if (parents.Count > 0)
+                    parentWarn = "\n\nNOTE: still referenced by " + parents.Count +
+                        " assembly(ies):\n  • " + string.Join("\n  • ", parents) +
+                        "\nThose assemblies should be revised away from it.";
+            }
+            catch { }
+
+            string confirmMsg = alreadyObsolete
+                ? "This file is already OBSOLETE.\n\n  • " + name + "\n\n" +
+                  "Update its reason / replacement part?" + lockWarn + parentWarn
+                : "Mark this file OBSOLETE (superseded)?\n\n  • " + name + "\n\n" +
+                  "It stays in the vault for reference (history preserved) and " +
+                  "is frozen read-only, but flagged not-for-new-use: it cannot " +
+                  "be edited or released until a Master Reinstates it." +
+                  lockWarn + parentWarn;
+            if (MessageBox.Show(confirmMsg, "BCore PDM — Mark Obsolete",
+                    MessageBoxButtons.YesNo, MessageBoxIcon.Warning) != DialogResult.Yes)
+                return;
+
+            // Required categorised reason — the ECO reason-code dialog shared
+            // with Release / Rollback / Remove (it enforces a choice, so there
+            // is no re-prompt loop; a non-OK close aborts).
+            string reason;
+            using (var rf = new ReasonForChangeForm(
+                "Mark Obsolete — Reason",
+                "Select the reason this file is being made obsolete:",
+                ObsoleteReasonCodes))
+            {
+                if (rf.ShowDialog() != DialogResult.OK) return; // cancelled → abort
+                reason = rf.Reason;
+            }
+
+            // Optional: which file SUPERSEDES this one (the replacement). Recorded
+            // so "→ superseded by X" shows wherever the obsolete file appears (the
+            // save-block message, the dashboard tooltip, the search card) — telling
+            // engineers what to use instead. Skipping is allowed (no replacement).
+            string supersededBy = "";
+            using (var pick = new SupersededByPickerForm(filePath))
+            {
+                pick.ShowDialog();
+                if (pick.Selected != null)
+                {
+                    // Prefer the replacement's Part No, but FALL BACK to its file
+                    // name when the file-level PartNo is empty (common on a multi-
+                    // config part, whose PartNo lives per-config) — otherwise a
+                    // picked replacement would store nothing and "superseded by X"
+                    // would never appear.
+                    var sel = pick.Selected;
+                    supersededBy = !string.IsNullOrWhiteSpace(sel.PartNumber)
+                        ? sel.PartNumber.Trim()
+                        : Path.GetFileNameWithoutExtension(
+                            sel.FileName ?? sel.FilePath ?? "");
+                }
+            }
+
+            // Claim the file for the status change (same guard as UnlockFile)
+            // so a Mark-Obsolete can't interleave with a Release/Unlock racing
+            // on the same file from another Master.
+            if (!BeginVaultOperation(filePath, user, "Mark Obsolete")) return;
+            try
+            {
+                SetReadOnly(filePath, true); // freeze on disk (best-effort)
+                // History note carries the reason AND the replacement, so File
+                // History reads e.g. "Superseded by New Design  (replaced by X)".
+                string obsNote = string.IsNullOrEmpty(supersededBy)
+                    ? reason
+                    : reason + "  (replaced by " + supersededBy + ")";
+                DatabaseManager.SetFileStatus(filePath, "Obsolete", user, obsNote);
+                // Always write the link (empty clears any stale value) so the
+                // record and the disk/UI never disagree about the replacement.
+                DatabaseManager.SetSupersededBy(filePath, supersededBy);
+                AuditLogger.Log("MarkObsolete", user, name, "", "",
+                    string.IsNullOrEmpty(supersededBy)
+                        ? reason
+                        : reason + " — superseded by " + supersededBy);
+
+                MessageBox.Show(
+                    name + (alreadyObsolete
+                        ? " — obsolete details updated."
+                        : " is now Obsolete.") +
+                    (string.IsNullOrEmpty(supersededBy)
+                        ? "" : "\nSuperseded by: " + supersededBy) +
+                    "\n\nIt remains in the vault for reference but cannot be " +
+                    "edited or released until Reinstated.",
+                    "BCore PDM — Obsolete",
+                    MessageBoxButtons.OK, MessageBoxIcon.Information);
+            }
+            finally
+            {
+                EndVaultOperation(filePath, user);
+            }
+        }
+
+        // ── REINSTATE (from Obsolete) ──────────────────────────────────────
+        // Master-only, path-based. Returns an Obsolete file to WIP (editable
+        // again); release it normally afterwards to re-publish. Mirrors
+        // UnlockFile: clears read-only on disk AND refreshes SOLIDWORKS' cached
+        // read-only state on the open doc (and any parent assembly holding it)
+        // via ReloadOrReplace — a plain close+reopen no-ops while an assembly
+        // references the doc, so the reload is the reliable path (close+reopen
+        // is only the fallback when it throws).
+        public static void ReinstateFromObsolete(string filePath)
+        {
+            string user = PDMLiteAddin.CurrentUser;
+            if (!IsMaster(user)) { NotMaster(); return; }
+            if (string.IsNullOrEmpty(filePath)) return;
+
+            string status = DatabaseManager.GetFileStatus(filePath);
+            if (!string.Equals(status, "Obsolete", StringComparison.OrdinalIgnoreCase))
+            {
+                MessageBox.Show(
+                    "This file is not Obsolete (current status: " +
+                    (string.IsNullOrEmpty(status) ? "WIP" : status) + ").",
+                    "BCore PDM — Reinstate",
+                    MessageBoxButtons.OK, MessageBoxIcon.Information);
+                return;
+            }
+
+            string name = Path.GetFileName(filePath);
+            if (MessageBox.Show(
+                    "Reinstate this Obsolete file to WIP (editable)?\n\n  • " + name +
+                    "\n\nIt becomes editable again; release it normally to " +
+                    "re-publish it.",
+                    "BCore PDM — Reinstate",
+                    MessageBoxButtons.YesNo, MessageBoxIcon.Question) != DialogResult.Yes)
+                return;
+
+            if (!BeginVaultOperation(filePath, user, "Reinstate")) return;
+            try
+            {
+                SetReadOnly(filePath, false);
+                DatabaseManager.SetFileStatus(filePath, "WIP", user,
+                    "Reinstated from Obsolete to WIP");
+                DatabaseManager.SetSupersededBy(filePath, ""); // no longer superseded
+                AuditLogger.Log("Reinstate", user, name);
+
+                // Capture the open doc BEFORE the message so we can refresh SW's
+                // cached read-only after the user clicks OK (COM ref stays valid).
+                ModelDoc2 openDoc = PDMLiteAddin.SwApp
+                    ?.GetOpenDocumentByName(filePath) as ModelDoc2;
+                int reopenType = openDoc != null ? openDoc.GetType() : -1;
+
+                MessageBox.Show(
+                    name + " reinstated to WIP. Engineers can edit it again.",
+                    "BCore PDM — Reinstated",
+                    MessageBoxButtons.OK, MessageBoxIcon.Information);
+
+                if (openDoc != null)
+                {
+                    bool reloadThrew = false;
+                    try { openDoc.ReloadOrReplace(false, filePath, true); }
+                    catch { reloadThrew = true; }
+                    if (reloadThrew && reopenType >= 0)
+                    {
+                        try
+                        {
+                            PDMLiteAddin.SwApp.CloseDoc(filePath);
+                            int errs = 0, warnings = 0;
+                            PDMLiteAddin.SwApp.OpenDoc6(filePath, reopenType,
+                                (int)swOpenDocOptions_e.swOpenDocOptions_Silent,
+                                "", ref errs, ref warnings);
+                        }
+                        catch { }
+                    }
+                }
+            }
+            finally
+            {
+                EndVaultOperation(filePath, user);
+            }
+        }
+
         // ── REMOVE FROM VAULT ──────────────────────────────────────────────
         // Master-only. Retires a file: moves its on-disk artifacts (WIP copy,
         // RELEASED snapshot, exports) to the SCRAP folder and deletes the
@@ -679,6 +907,11 @@ namespace PDMLite
         private static readonly string[] RemoveReasonCodes =
         {
             "Obsolete", "Superseded", "Created in Error", "Duplicate", "Other"
+        };
+        private static readonly string[] ObsoleteReasonCodes =
+        {
+            "Superseded by New Design", "Discontinued / End of Life",
+            "Replaced", "Created in Error", "Duplicate", "Other"
         };
 
         // ── RELEASE ───────────────────────────────────────────────────────
@@ -3469,6 +3702,63 @@ namespace PDMLite
             catch { }
             return unreleased;
         }
+
+        // Returns the OBSOLETE components of an assembly (from the disk dependency
+        // walk, like GetUnreleasedComponentsByPath) — each as "name (superseded by
+        // X)" when a replacement is recorded, else just the name. Drives the
+        // design-time warning shown when an assembly with obsolete children is
+        // opened, so an obsolete part can't quietly spread into new work (the
+        // release gate already blocks it, but this catches it far earlier).
+        public static List<string> GetObsoleteComponentsByPath(string asmPath)
+        {
+            var obsolete = new List<string>();
+            var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            try
+            {
+                if (string.IsNullOrEmpty(asmPath) || !File.Exists(asmPath))
+                    return obsolete;
+
+                string asmNorm;
+                try { asmNorm = Path.GetFullPath(asmPath); }
+                catch { asmNorm = asmPath; }
+
+                object depsObj = PDMLiteAddin.SwApp.GetDocumentDependencies2(
+                    asmPath, true, true, false);
+                string[] deps = depsObj as string[];
+                if (deps == null) return obsolete;
+
+                for (int i = 1; i < deps.Length; i += 2)
+                {
+                    string path = deps[i];
+                    if (string.IsNullOrEmpty(path)) continue;
+                    if (path.IndexOf("\\Toolbox\\",
+                            StringComparison.OrdinalIgnoreCase) >= 0)
+                        continue;
+
+                    string norm;
+                    try { norm = Path.GetFullPath(path); }
+                    catch { norm = path; }
+                    if (string.Equals(norm, asmNorm,
+                            StringComparison.OrdinalIgnoreCase)) continue;
+                    if (!seen.Add(norm)) continue;
+
+                    string ext = Path.GetExtension(norm).ToLower();
+                    if (ext != ".sldprt" && ext != ".sldasm") continue;
+
+                    if (string.Equals(DatabaseManager.GetFileStatus(norm),
+                            "Obsolete", StringComparison.OrdinalIgnoreCase))
+                    {
+                        string repl = DatabaseManager.GetSupersededBy(norm);
+                        obsolete.Add(Path.GetFileName(norm) +
+                            (string.IsNullOrEmpty(repl)
+                                ? "" : "   (superseded by " + repl + ")"));
+                    }
+                }
+            }
+            catch { }
+            return obsolete;
+        }
+
         // ── REQUEST REVISION — Engineer requests a new revision ───────
         public static void RequestRevision(ModelDoc2 doc)
         {

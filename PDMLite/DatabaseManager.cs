@@ -40,6 +40,12 @@ namespace PDMLite
         // Populated by GetAllFiles: the ChangeNote of that most-recent "Released"
         // history entry — the reason-for-change of the latest release ("" if none).
         public string ReleaseReason { get; set; }
+        // Obsolete supersession: the Part No of the file that REPLACES this one
+        // (set when a Master marks it Obsolete; "" if none / not obsolete). Read
+        // from the record by GetAllFiles + SearchFiles. ObsoleteReason = the
+        // ChangeNote of the most-recent "Obsolete" history entry (GetAllFiles).
+        public string SupersededBy { get; set; }
+        public string ObsoleteReason { get; set; }
         public bool HasBrokenRefs { get; set; }
         // Per-configuration metadata (parts/assemblies). Empty for drawings and for
         // old records that haven't been re-saved since this feature shipped.
@@ -783,6 +789,49 @@ namespace PDMLite
 
                 Save(doc);
             }
+        }
+
+        // Obsolete supersession link: the Part No of the file that REPLACES this
+        // one. Set when a Master marks a file Obsolete (and picks a replacement),
+        // cleared (empty) on Reinstate. Stored as <SupersededBy> on the File
+        // record. SetOrAdd (legacy-safe). User-initiated mutation → saves even in
+        // degraded-lock mode, like SetFileStatus.
+        public static void SetSupersededBy(string filePath, string supersededByPartNo)
+        {
+            if (string.IsNullOrEmpty(filePath)) return;
+            lock (_lock) using (AcquireProcessLock())
+            {
+                var doc = LoadOrCreate();
+                foreach (var el in doc.Root.Element("Files").Elements("File"))
+                {
+                    if (string.Equals((string)el.Element("FilePath"), filePath,
+                            StringComparison.OrdinalIgnoreCase))
+                    {
+                        SetOrAdd(el, "SupersededBy", supersededByPartNo ?? "");
+                        break;
+                    }
+                }
+                Save(doc);
+            }
+        }
+
+        // Reads the SupersededBy Part No for a file ("" if none / untracked).
+        // Light single-record read — used by ValidateSave's Obsolete block and
+        // the obsolete-in-assembly open warning to name the replacement.
+        public static string GetSupersededBy(string filePath)
+        {
+            if (string.IsNullOrEmpty(filePath)) return "";
+            lock (_lock) using (AcquireProcessLock())
+            {
+                var doc = LoadOrCreate();
+                foreach (var el in doc.Root.Element("Files").Elements("File"))
+                {
+                    if (string.Equals((string)el.Element("FilePath"), filePath,
+                            StringComparison.OrdinalIgnoreCase))
+                        return (string)el.Element("SupersededBy") ?? "";
+                }
+            }
+            return "";
         }
 
         public static void SetBrokenRefFlag(string filePath, bool hasBroken)
@@ -1631,6 +1680,7 @@ namespace PDMLite
                         Revision    = (string)el.Element("Revision") ?? "",
                         ReferencedModel   = (string)el.Element("ReferencedModel")   ?? "",
                         ReferencedConfigs = (string)el.Element("ReferencedConfigs") ?? "",
+                        SupersededBy      = (string)el.Element("SupersededBy")      ?? "",
                         Configurations    = ReadConfigs(el, partNoRaw, descRaw,
                                                (string)el.Element("Revision") ?? "")
                     });
@@ -1675,14 +1725,23 @@ namespace PDMLite
                     StringComparer.OrdinalIgnoreCase);
                 var relReasonByPath = new Dictionary<string, string>(
                     StringComparer.OrdinalIgnoreCase);
+                // Latest "Obsolete" reason per path (parallel to the Released maps)
+                // for the dashboard tooltip on Obsolete rows.
+                var obsDateByPath = new Dictionary<string, DateTime>(
+                    StringComparer.OrdinalIgnoreCase);
+                var obsReasonByPath = new Dictionary<string, string>(
+                    StringComparer.OrdinalIgnoreCase);
                 var hist = doc.Root.Element("RevisionHistory");
                 if (hist != null)
                 {
                     foreach (var en in hist.Elements("Entry"))
                     {
-                        if (!string.Equals((string)en.Element("Status"),
-                                "Released", StringComparison.OrdinalIgnoreCase))
-                            continue;
+                        string est = (string)en.Element("Status") ?? "";
+                        bool isRel = string.Equals(est, "Released",
+                            StringComparison.OrdinalIgnoreCase);
+                        bool isObs = string.Equals(est, "Obsolete",
+                            StringComparison.OrdinalIgnoreCase);
+                        if (!isRel && !isObs) continue;
                         string fp = (string)en.Element("FilePath") ?? "";
                         if (string.IsNullOrEmpty(fp)) continue;
                         DateTime d;
@@ -1691,11 +1750,16 @@ namespace PDMLite
                                 out d))
                             continue;
                         DateTime cur;
-                        if (!relDateByPath.TryGetValue(fp, out cur) || d > cur)
+                        if (isRel && (!relDateByPath.TryGetValue(fp, out cur) || d > cur))
                         {
                             relDateByPath[fp] = d;
                             relUserByPath[fp] = (string)en.Element("ChangedBy") ?? "";
                             relReasonByPath[fp] = (string)en.Element("ChangeNote") ?? "";
+                        }
+                        else if (isObs && (!obsDateByPath.TryGetValue(fp, out cur) || d > cur))
+                        {
+                            obsDateByPath[fp] = d;
+                            obsReasonByPath[fp] = (string)en.Element("ChangeNote") ?? "";
                         }
                     }
                 }
@@ -1724,6 +1788,9 @@ namespace PDMLite
                     string relReason;
                     if (!relReasonByPath.TryGetValue(filePath, out relReason))
                         relReason = "";
+                    string obsReason;
+                    if (!obsReasonByPath.TryGetValue(filePath, out obsReason))
+                        obsReason = "";
 
                     results.Add(new VaultFile
                     {
@@ -1738,6 +1805,8 @@ namespace PDMLite
                         ReleasedDate = relDate,
                         ReleasedBy  = relBy,
                         ReleaseReason = relReason,
+                        SupersededBy = (string)el.Element("SupersededBy") ?? "",
+                        ObsoleteReason = obsReason,
                         LockedBy    = (string)el.Element("LockedBy")    ?? "",
                         ReferencedModel = (string)el.Element("ReferencedModel") ?? "",
                         ReferencedConfigs = (string)el.Element("ReferencedConfigs") ?? "",
@@ -2413,6 +2482,7 @@ namespace PDMLite
                                 Description       = dsc,
                                 Revision          = rev,
                                 Status            = (string)mel.Element("Status") ?? "",
+                                SupersededBy      = (string)mel.Element("SupersededBy") ?? "",
                                 Configurations    = ReadConfigs(mel, pn, dsc, rev)
                             };
                         }
@@ -2442,6 +2512,7 @@ namespace PDMLite
                             Description    = dsc,
                             Revision       = rev,
                             Status         = (string)el.Element("Status") ?? "",
+                            SupersededBy   = (string)el.Element("SupersededBy") ?? "",
                             Configurations = ReadConfigs(el, pn, dsc, rev)
                         };
                     }

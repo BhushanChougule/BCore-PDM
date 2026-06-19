@@ -15,6 +15,10 @@ namespace PDMLite
     {
         public static ISldWorks SwApp { get; private set; }
         public static string CurrentUser => System.Environment.UserName;
+        // The live add-in instance, so the task pane can drive add-in helpers
+        // (e.g. WarnObsoleteOnOpen after it opens a file from a search card,
+        // where SOLIDWORKS' own open/activate notifications don't reliably fire).
+        internal static PDMLiteAddin Instance { get; private set; }
 
         // Set by VaultManager around its own internal Save3 calls (release,
         // new revision) so those programmatic saves are not blocked by the
@@ -36,6 +40,7 @@ namespace PDMLite
             try
             {
                 SwApp = (ISldWorks)thisSW;
+                Instance = this;   // so the task pane can reach add-in helpers
                 _addinId = cookie;
                 DatabaseManager.Initialize();
                 // Clear any open-session entries this PC left behind after a
@@ -56,6 +61,7 @@ namespace PDMLite
                 ((SldWorks)SwApp).FileOpenPostNotify += OnFileOpenPost;
                 HookAllOpenDocs();
                 UpdateActivePresence();
+                WarnObsoleteOnOpen();
                 return true;
             }
             catch (Exception ex)
@@ -77,13 +83,14 @@ namespace PDMLite
                 try { h.Detach(); } catch { }
             _docHandlers.Clear();
             SwApp = null;
+            Instance = null;
             return true;
         }
 
         // On every active-doc change, re-scan ALL open documents.
         // This catches new files and any document that lost its handler
         // (e.g. due to a spurious DestroyNotify from the Custom Properties tab).
-        private int OnActiveDocChange() { HookAllOpenDocs(); UpdateActivePresence(); return 0; }
+        private int OnActiveDocChange() { HookAllOpenDocs(); UpdateActivePresence(); WarnObsoleteOnOpen(); return 0; }
 
         // File→New / File→Open into an EMPTY session never fires
         // ActiveDocChangeNotify — these cover that gap (see ConnectToSW).
@@ -94,7 +101,7 @@ namespace PDMLite
         { TryHookDoc(newDoc as ModelDoc2); HookAllOpenDocs(); return 0; }
 
         private int OnFileOpenPost(string fileName)
-        { HookAllOpenDocs(); UpdateActivePresence(); return 0; }
+        { HookAllOpenDocs(); UpdateActivePresence(); WarnObsoleteOnOpen(); return 0; }
 
         internal void HookAllOpenDocs()
         {
@@ -205,6 +212,69 @@ namespace PDMLite
         private readonly HashSet<string> _presenceChecked =
             new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
+        // Tracks assemblies already WARNED about obsolete components this open.
+        // Distinct from _presenceChecked: a path is added here ONLY once we
+        // actually warn — so if the FIRST activation's dependency read came back
+        // empty (deps not resolved yet, or the child was obsoleted after this
+        // assembly was already open), a later activation re-checks and still
+        // warns, instead of being permanently guarded out. Cleared on close.
+        private readonly HashSet<string> _obsoleteWarned =
+            new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+        // Design-time guard: opening/activating an assembly that still contains
+        // OBSOLETE (superseded) components warns ONCE per open (the release gate
+        // blocks it later, but flag it early so an obsolete part doesn't quietly
+        // spread into new work). Non-blocking. Re-evaluates every activation
+        // until it finds obsolete children (then guards to avoid nagging) — see
+        // _obsoleteWarned. Independent of UpdateActivePresence so the presence
+        // flow's Released-skip can't suppress it.
+        internal void WarnObsoleteOnOpen()
+        {
+            try
+            {
+                var doc = SwApp?.ActiveDoc as ModelDoc2;
+                if (doc == null) return;
+                if (doc.GetType() != (int)swDocumentTypes_e.swDocASSEMBLY) return;
+                WarnObsoleteForPath(doc.GetPathName(), false);
+            }
+            catch { }
+        }
+
+        // Path-based core (no dependence on ActiveDoc). force=true is used by the
+        // task pane / dashboard after an IN-APP open: SOLIDWORKS fires its open
+        // notification DURING the nested OpenDoc6, which runs the hook above and
+        // sets the once-per-open guard — but the message is suppressed while SW is
+        // mid-open, so the path is left "warned" with nothing shown. force re-shows
+        // it (clears the guard first) so the in-app open warns exactly once. The
+        // obsolete set is read from disk via GetDocumentDependencies2, so it does
+        // NOT depend on the doc being fully resolved in memory.
+        internal void WarnObsoleteForPath(string path, bool force)
+        {
+            try
+            {
+                if (string.IsNullOrEmpty(path)) return;
+                if (!path.EndsWith(".sldasm", StringComparison.OrdinalIgnoreCase))
+                    return; // only assemblies have components to check
+
+                var obs = VaultManager.GetObsoleteComponentsByPath(path);
+                if (obs.Count == 0) return;
+
+                if (force) _obsoleteWarned.Remove(path); // re-show despite a
+                                                         // suppressed hook warning
+                if (!_obsoleteWarned.Add(path)) return;  // already warned this open
+
+                SwApp.SendMsgToUser2(
+                    "⚠  OBSOLETE COMPONENTS — BCore PDM\n\n" +
+                    "This assembly contains components that are OBSOLETE " +
+                    "(superseded):\n\n  • " + string.Join("\n  • ", obs) + "\n\n" +
+                    "Replace them with their current versions — an obsolete " +
+                    "component will block this assembly's release.",
+                    (int)swMessageBoxIcon_e.swMbWarning,
+                    (int)swMessageBoxBtn_e.swMbOk);
+            }
+            catch { }
+        }
+
         private void UpdateActivePresence()
         {
             try
@@ -263,6 +333,7 @@ namespace PDMLite
             // which were never registered — a harmless no-op). Also forget the
             // in-memory check so reopening the file warns/registers afresh.
             _presenceChecked.Remove(id);
+            _obsoleteWarned.Remove(id);   // re-warn about obsolete children on reopen
             try { DatabaseManager.ClearOpenSession(id, CurrentUser,
                 System.Environment.MachineName); } catch { }
 
@@ -392,6 +463,24 @@ namespace PDMLite
                     Block("This file is RELEASED and locked.\n\n" +
                           "Released files cannot be edited directly.\n\n" +
                           howTo + "\n\nSave blocked.");
+                    return 1;
+                }
+
+                // Rule 2b: Obsolete file — superseded, kept for reference but not
+                // editable. It is already read-only on disk; this is the belt-and-
+                // suspenders DB-status gate (same as Released) so a save is blocked
+                // even if the read-only attribute was cleared out of band.
+                if (status == "Obsolete")
+                {
+                    string repl = "";
+                    try { repl = DatabaseManager.GetSupersededBy(filePath); } catch { }
+                    Block("This file is OBSOLETE (superseded).\n\n" +
+                          (string.IsNullOrEmpty(repl)
+                              ? "" : "Superseded by: " + repl + "\n\n") +
+                          "Obsolete files are kept for reference but cannot be " +
+                          "edited.\n\nA Master can Reinstate it (Vault Dashboard " +
+                          "→ right-click the row → Reinstate) to return it to " +
+                          "WIP for editing.\n\nSave blocked.");
                     return 1;
                 }
 
