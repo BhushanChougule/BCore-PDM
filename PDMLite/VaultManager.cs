@@ -2814,6 +2814,34 @@ namespace PDMLite
         }
 
         // ── WHERE USED ─────────────────────────────────────────────────────
+        // Config-aware filtering (the user's "use the stored assembly data" idea).
+        // A multi-config part is ONE file used as a specific CONFIG (= Part No) in
+        // each assembly; the dependency walk returns paths with no per-instance
+        // config, but the as-released BASELINES record each component's PartNo +
+        // Config. BuildConfigUsage reads <Baselines> ONCE (no file opening) and
+        // classifies every parent; null target ⇒ no filtering (file-level, as
+        // before). ParentPassesConfigFilter then drops a direct parent ONLY when
+        // its baseline PROVES a different config — verified matches AND unverified
+        // (no-baseline WIP) parents are kept, so a real usage is never hidden.
+        private static DatabaseManager.BaselineChildUsage BuildConfigUsage(
+            string filePath, string targetPartNo)
+        {
+            if (string.IsNullOrEmpty(targetPartNo)) return null;
+            try { return DatabaseManager.GetBaselineChildUsage(filePath, targetPartNo); }
+            catch { return null; } // any failure ⇒ degrade to file-level (never crash)
+        }
+
+        private static bool ParentPassesConfigFilter(string parentPath,
+            DatabaseManager.BaselineChildUsage usage)
+        {
+            if (usage == null) return true;            // file-level — keep everything
+            string pf;
+            try { pf = Path.GetFullPath(parentPath); } catch { pf = parentPath; }
+            if (usage.ParentsUsingTarget.Contains(pf)) return true;          // verified: uses target config
+            if (usage.ParentsWithDifferentConfig.Contains(pf)) return false; // verified: uses a DIFFERENT config
+            return true;                                                     // unverified ⇒ keep
+        }
+
         // Public, on-demand: returns the tracked assemblies that DIRECTLY
         // reference the given file (the immediate parents), each enriched with
         // PartNo/Revision/Status from its vault record. Reads dependencies from
@@ -2823,10 +2851,14 @@ namespace PDMLite
         // primitive GetParentAssemblies uses. Best-effort: depends on the stored
         // reference paths matching the vault path format (same caveat as
         // GetParentAssemblies). Used by WhereUsedForm.
-        public static List<WhereUsedEntry> GetWhereUsed(string filePath)
+        public static List<WhereUsedEntry> GetWhereUsed(string filePath,
+            string targetPartNo = null)
         {
             var result = new List<WhereUsedEntry>();
             if (string.IsNullOrEmpty(filePath)) return result;
+            // Config-aware filter (the user's "use the stored baseline data" idea):
+            // null when no target PN ⇒ file-level (every config), as before.
+            var usage = BuildConfigUsage(filePath, targetPartNo);
             var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             var qtyCache = new Dictionary<string, Dictionary<string, int>>(
                 StringComparer.OrdinalIgnoreCase);
@@ -2869,6 +2901,10 @@ namespace PDMLite
                     }
                     if (!referencesTarget) continue;
                     if (!seen.Add(asmFull)) continue;
+                    // Drop a parent only when its baseline PROVES it uses a
+                    // different config; keep verified-matches and unverified
+                    // (no-baseline) parents — never hide a possible real usage.
+                    if (!ParentPassesConfigFilter(asmPath, usage)) continue;
 
                     var entry = new WhereUsedEntry
                     {
@@ -2911,7 +2947,7 @@ namespace PDMLite
         // assemblies and any bad-data cycle can't loop or explode; it is still
         // LISTED everywhere it is referenced. Depth capped at maxDepth.
         public static List<WhereUsedEntry> GetWhereUsedTree(string filePath,
-            int maxDepth = 12)
+            string targetPartNo = null, int maxDepth = 12)
         {
             var result = new List<WhereUsedEntry>();
             if (string.IsNullOrEmpty(filePath)) return result;
@@ -2923,13 +2959,19 @@ namespace PDMLite
             string root;
             try { root = Path.GetFullPath(filePath); } catch { root = filePath; }
 
+            // Config filter applies to the FIRST hop only (the DIRECT parents of
+            // the queried file — config matters at the leaf). Their ancestry is
+            // walked unfiltered (an assembly that transitively contains a matching
+            // direct parent does contain the target config).
+            var usage = BuildConfigUsage(filePath, targetPartNo);
+
             var expanded = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
                 { root };
             var qtyCache = new Dictionary<string, Dictionary<string, int>>(
                 StringComparer.OrdinalIgnoreCase);
             // childName is the immediate child of each parent being listed — at the
             // top it's the queried file; deeper, it's the assembly we walked up FROM.
-            WalkUp(filePath, root, 0, maxDepth, map, expanded, qtyCache, result);
+            WalkUp(filePath, root, 0, maxDepth, map, expanded, qtyCache, result, usage);
             return result;
         }
 
@@ -2943,7 +2985,8 @@ namespace PDMLite
             int maxDepth, Dictionary<string, List<WhereUsedEntry>> map,
             HashSet<string> expanded,
             Dictionary<string, Dictionary<string, int>> qtyCache,
-            List<WhereUsedEntry> result)
+            List<WhereUsedEntry> result,
+            DatabaseManager.BaselineChildUsage usage = null)
         {
             if (level >= maxDepth) return;
             List<WhereUsedEntry> parents;
@@ -2951,6 +2994,9 @@ namespace PDMLite
             string childName = Path.GetFileName(childPath ?? childFull);
             foreach (var parent in parents) // already name-sorted in the map
             {
+                // Config filter on the DIRECT parents (level 0) only.
+                if (level == 0 && !ParentPassesConfigFilter(parent.Path, usage))
+                    continue;
                 result.Add(new WhereUsedEntry
                 {
                     Path     = parent.Path,
@@ -2976,7 +3022,8 @@ namespace PDMLite
         // child key in the map). Flat list (all Level 0); Qty left null (a top-
         // level product rarely contains the file directly). WhereUsedForm's "Top
         // Level Only" mode.
-        public static List<WhereUsedEntry> GetWhereUsedTopLevel(string filePath)
+        public static List<WhereUsedEntry> GetWhereUsedTopLevel(string filePath,
+            string targetPartNo = null)
         {
             var result = new List<WhereUsedEntry>();
             if (string.IsNullOrEmpty(filePath)) return result;
@@ -2988,6 +3035,11 @@ namespace PDMLite
             string root;
             try { root = Path.GetFullPath(filePath); } catch { root = filePath; }
 
+            // Config filter on the FIRST hop (the direct parents of the queried
+            // file); ancestors of the qualifying parents are then collected
+            // unfiltered (they transitively contain the target config).
+            var usage = BuildConfigUsage(filePath, targetPartNo);
+
             var collected = new Dictionary<string, WhereUsedEntry>(
                 StringComparer.OrdinalIgnoreCase);
             var visited = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { root };
@@ -2998,8 +3050,12 @@ namespace PDMLite
                 string cur = queue.Dequeue();
                 List<WhereUsedEntry> parents;
                 if (!map.TryGetValue(cur, out parents)) continue;
+                bool firstHop = string.Equals(cur, root,
+                    StringComparison.OrdinalIgnoreCase);
                 foreach (var parent in parents)
                 {
+                    if (firstHop && !ParentPassesConfigFilter(parent.Path, usage))
+                        continue;
                     string pf;
                     try { pf = Path.GetFullPath(parent.Path); } catch { pf = parent.Path; }
                     if (!collected.ContainsKey(pf)) collected[pf] = parent;

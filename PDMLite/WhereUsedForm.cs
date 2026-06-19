@@ -48,6 +48,8 @@ namespace PDMLite
         private string _fileName;
         private string _subjectConfig;   // configuration this where-used is about (null = file-level)
         private string _subjectPartNo;   // Part No shown in the header + Find box
+        private bool _subjectMultiConfig; // subject file has >1 config (gate for PN filtering)
+        private bool _subjectResolved;    // EnsureSubjectPartNo ran for the current subject
 
         // EM_SETCUEBANNER — grey placeholder in a single-line TextBox (no
         // PlaceholderText on .NET Framework 4.8). Mirrors the other BCore forms.
@@ -147,7 +149,7 @@ namespace PDMLite
 
             // Default mode (Single Level) is cheap — one walk; the All/Top walks
             // are deferred until the user asks for them.
-            try { _single = VaultManager.GetWhereUsed(_filePath); }
+            try { _single = VaultManager.GetWhereUsed(_filePath, ConfigTarget()); }
             catch { _single = new List<WhereUsedEntry>(); }
             _parents = _single;
 
@@ -481,13 +483,17 @@ namespace PDMLite
                 ? nm : nm + "   ·   " + _subjectPartNo;
         }
 
-        // Resolve the subject's Part No (config-specific) when the caller didn't
-        // supply one: the matching config's Pn from the DB record, else the
-        // record's primary PN, else the config name itself (config == PN), else
-        // left blank. Cached in _subjectPartNo so the header + seed agree.
+        // Resolve the subject's Part No (config-specific) AND whether the file is
+        // multi-config — read ONCE per subject from the DB record. PN = the caller-
+        // supplied value, else the matching config's PN, else the record's primary
+        // PN, else the config name (config == PN). _subjectMultiConfig gates the
+        // baseline PN-filter: single-config files stay file-level (their config is
+        // often "Default", so filtering by a Part No could false-exclude a parent
+        // whose older baseline recorded a different PN).
         private void EnsureSubjectPartNo()
         {
-            if (!string.IsNullOrEmpty(_subjectPartNo)) return;
+            if (_subjectResolved) return;
+            _subjectResolved = true;
             try
             {
                 if (!string.IsNullOrEmpty(_filePath))
@@ -495,15 +501,21 @@ namespace PDMLite
                     var rec = DatabaseManager.GetFileRecord(_filePath);
                     if (rec != null)
                     {
-                        if (!string.IsNullOrEmpty(_subjectConfig) &&
-                            rec.Configurations != null)
-                            foreach (var c in rec.Configurations)
-                                if (string.Equals(c.Name, _subjectConfig,
-                                        StringComparison.OrdinalIgnoreCase) &&
-                                    !string.IsNullOrEmpty(c.PartNo))
-                                { _subjectPartNo = c.PartNo; return; }
-                        if (!string.IsNullOrEmpty(rec.PartNumber))
-                        { _subjectPartNo = rec.PartNumber; return; }
+                        _subjectMultiConfig = rec.Configurations != null &&
+                            rec.Configurations.Count > 1;
+                        if (string.IsNullOrEmpty(_subjectPartNo))
+                        {
+                            if (!string.IsNullOrEmpty(_subjectConfig) &&
+                                rec.Configurations != null)
+                                foreach (var c in rec.Configurations)
+                                    if (string.Equals(c.Name, _subjectConfig,
+                                            StringComparison.OrdinalIgnoreCase) &&
+                                        !string.IsNullOrEmpty(c.PartNo))
+                                    { _subjectPartNo = c.PartNo; break; }
+                            if (string.IsNullOrEmpty(_subjectPartNo) &&
+                                !string.IsNullOrEmpty(rec.PartNumber))
+                                _subjectPartNo = rec.PartNumber;
+                        }
                     }
                 }
             }
@@ -511,6 +523,17 @@ namespace PDMLite
             if (string.IsNullOrEmpty(_subjectPartNo) &&
                 !string.IsNullOrEmpty(_subjectConfig))
                 _subjectPartNo = _subjectConfig;   // config name == Part No
+        }
+
+        // The config-specific target Part No used to FILTER where-used to a single
+        // configuration (via the as-released baselines). Null for a file-level
+        // subject (e.g. the dashboard right-click, where no config was chosen) →
+        // results stay file-level (every config). config == Part No by convention.
+        private string ConfigTarget()
+        {
+            if (string.IsNullOrEmpty(_subjectConfig)) return null; // file-level subject
+            if (!_subjectMultiConfig) return null;                 // single-config → file-level
+            return _subjectConfig;   // the CONFIG NAME — baselines key on Config (== Part No)
         }
 
         // Switch the SUBJECT of the where-used query in place (Find committed a new
@@ -522,10 +545,12 @@ namespace PDMLite
             _fileName = name;
             _subjectConfig = config;
             _subjectPartNo = partNo;
+            _subjectMultiConfig = false;
+            _subjectResolved = false;   // re-resolve PN + multi-config for the new subject
             _allLevels = null;
             _topLevel = null;
             EnsureSubjectPartNo();
-            try { _single = VaultManager.GetWhereUsed(_filePath); }
+            try { _single = VaultManager.GetWhereUsed(_filePath, ConfigTarget()); }
             catch { _single = new List<WhereUsedEntry>(); }
             _mode = Mode.Single;
             _parents = _single;
@@ -781,9 +806,9 @@ namespace PDMLite
             if (mode == _mode && _parents != null) return;
             _mode = mode;
             if (mode == Mode.All && _allLevels == null)
-                _allLevels = ComputeWithWait(() => VaultManager.GetWhereUsedTree(_filePath));
+                _allLevels = ComputeWithWait(() => VaultManager.GetWhereUsedTree(_filePath, ConfigTarget()));
             else if (mode == Mode.Top && _topLevel == null)
-                _topLevel = ComputeWithWait(() => VaultManager.GetWhereUsedTopLevel(_filePath));
+                _topLevel = ComputeWithWait(() => VaultManager.GetWhereUsedTopLevel(_filePath, ConfigTarget()));
             _parents = mode == Mode.All ? _allLevels
                      : mode == Mode.Top ? _topLevel
                      : _single;
@@ -803,16 +828,27 @@ namespace PDMLite
         private void UpdateSubtitle()
         {
             if (_subtitle == null) return;
+            // When a specific config/Part No is the subject, results are filtered
+            // to that Part No via the baselines — say so. Otherwise they're file-
+            // level (every config of the file).
+            bool byPn = !string.IsNullOrEmpty(ConfigTarget());
+            string pn = _subjectPartNo;
             switch (_mode)
             {
                 case Mode.All:
-                    _subtitle.Text = "Full usage chain — direct parents and the assemblies that contain them:";
+                    _subtitle.Text = byPn
+                        ? "Full usage chain for Part No " + pn + ":"
+                        : "Full usage chain — direct parents and the assemblies that contain them:";
                     break;
                 case Mode.Top:
-                    _subtitle.Text = "Top-level assemblies that ultimately contain this file:";
+                    _subtitle.Text = byPn
+                        ? "Top-level assemblies that use Part No " + pn + ":"
+                        : "Top-level assemblies that ultimately contain this file:";
                     break;
                 default:
-                    _subtitle.Text = "Assemblies that directly reference this file:";
+                    _subtitle.Text = byPn
+                        ? "Assemblies that use Part No " + pn + ":"
+                        : "Assemblies that directly reference this file:";
                     break;
             }
         }
@@ -1044,9 +1080,9 @@ namespace PDMLite
         private void ExportAllLevels()
         {
             var all = _allLevels ?? (_allLevels =
-                ComputeWithWait(() => VaultManager.GetWhereUsedTree(_filePath)));
+                ComputeWithWait(() => VaultManager.GetWhereUsedTree(_filePath, ConfigTarget())));
             var top = _topLevel ?? (_topLevel =
-                ComputeWithWait(() => VaultManager.GetWhereUsedTopLevel(_filePath)));
+                ComputeWithWait(() => VaultManager.GetWhereUsedTopLevel(_filePath, ConfigTarget())));
 
             using (var sfd = new SaveFileDialog
             {

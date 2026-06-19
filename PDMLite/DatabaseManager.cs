@@ -2927,5 +2927,98 @@ namespace PDMLite
                     StringComparison.Ordinal));
             return result;
         }
+
+        // WHERE-USED CONFIG FILTER source. A multi-config part is ONE file used as
+        // a specific CONFIG (= Part No) in each assembly; the dependency walk
+        // returns paths with no per-instance config, but the as-released BASELINES
+        // record each component's referenced CONFIG. This reads <Baselines> in ONE
+        // load (no file opening) and classifies every parent assembly's LATEST
+        // baseline against a target configuration:
+        //   ParentsUsingTarget        = its baseline has the child under targetConfig.
+        //   ParentsWithDifferentConfig = its baseline has the child under a KNOWN
+        //     (non-empty) config that is NOT the target — provably a different one.
+        // A parent in NEITHER set has no baseline (WIP/never released) OR an older
+        // baseline that captured no config — the where-used filter then KEEPS it
+        // (unverified) rather than hiding a possible real usage.
+        //
+        // Matches on the component CONFIG only (NOT PartNo): the baseline's PartNo
+        // is enriched from the child's PRIMARY record, so it is the SAME for every
+        // configuration of that child and can't tell configs apart. Config == Part
+        // No by convention, so the target IS the config name. Keys are normalised
+        // FULL paths so they compare cleanly with the disk-walk parents.
+        public class BaselineChildUsage
+        {
+            public HashSet<string> ParentsUsingTarget =
+                new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            public HashSet<string> ParentsWithDifferentConfig =
+                new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        }
+
+        public static BaselineChildUsage GetBaselineChildUsage(string childFilePath,
+            string targetConfig)
+        {
+            var usage = new BaselineChildUsage();
+            if (string.IsNullOrEmpty(childFilePath) ||
+                string.IsNullOrEmpty(targetConfig)) return usage;
+            string childFull;
+            try { childFull = Path.GetFullPath(childFilePath); }
+            catch { childFull = childFilePath; }
+            string childName = Path.GetFileName(childFilePath);
+            string target = targetConfig.Trim();
+
+            lock (_lock) using (AcquireProcessLock())
+            {
+                var doc = LoadOrCreate();
+                var baselines = doc.Root.Element("Baselines");
+                if (baselines == null) return usage;
+
+                // LATEST baseline per assembly (max ReleasedDate; the ISO stamp
+                // ordinal-sorts chronologically — same rule as GetBaselines/Qty).
+                var latest = new Dictionary<string, XElement>(
+                    StringComparer.OrdinalIgnoreCase);
+                var latestDate = new Dictionary<string, string>(
+                    StringComparer.OrdinalIgnoreCase);
+                foreach (var b in baselines.Elements("Baseline"))
+                {
+                    string ap = (string)b.Attribute("AssemblyPath") ?? "";
+                    if (ap.Length == 0) continue;
+                    string date = (string)b.Attribute("ReleasedDate") ?? "";
+                    string prev;
+                    if (!latestDate.TryGetValue(ap, out prev) ||
+                        string.Compare(date, prev, StringComparison.Ordinal) > 0)
+                    { latest[ap] = b; latestDate[ap] = date; }
+                }
+
+                foreach (var kv in latest)
+                {
+                    string apFull;
+                    try { apFull = Path.GetFullPath(kv.Key); } catch { apFull = kv.Key; }
+                    bool usesTarget = false, knownOther = false;
+                    foreach (var c in kv.Value.Elements("Component"))
+                    {
+                        string cp = (string)c.Attribute("Path") ?? "";
+                        if (cp.Length == 0) continue;
+                        string cpFull;
+                        try { cpFull = Path.GetFullPath(cp); } catch { cpFull = cp; }
+                        bool match = string.Equals(cpFull, childFull,
+                                         StringComparison.OrdinalIgnoreCase)
+                                  || string.Equals(Path.GetFileName(cp), childName,
+                                         StringComparison.OrdinalIgnoreCase);
+                        if (!match) continue;
+                        string cfg = ((string)c.Attribute("Config") ?? "").Trim();
+                        if (cfg.Length == 0) continue;   // no config captured → can't classify
+                        if (string.Equals(cfg, target, StringComparison.OrdinalIgnoreCase))
+                            usesTarget = true;
+                        else
+                            knownOther = true;
+                    }
+                    // A parent that uses the target in ANY instance is a keeper,
+                    // even if it ALSO uses other configs of the child.
+                    if (usesTarget) usage.ParentsUsingTarget.Add(apFull);
+                    else if (knownOther) usage.ParentsWithDifferentConfig.Add(apFull);
+                }
+            }
+            return usage;
+        }
     }
 }
