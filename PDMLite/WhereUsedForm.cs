@@ -253,12 +253,21 @@ namespace PDMLite
             _findPanel.Resize += (s, e) => LayoutFind();
 
             // The autocomplete overlay — parented to the FORM (so it floats above
-            // the grid), hidden until a search returns hits.
+            // the grid), hidden until a search returns hits. OWNER-DRAWN with a
+            // FIXED item height set explicitly: a normal ListBox's ItemHeight is
+            // computed from the font only after its handle exists, so reading it
+            // before the first show returned a stale value and the dropdown opened
+            // at the wrong height (1 row / partial rows / scrollbar). A set
+            // ItemHeight is reliable regardless of handle state, so the height is
+            // consistent every time.
             _findResults = new ListBox
             {
                 Font = _fMeta, Visible = false, IntegralHeight = false,
-                BorderStyle = BorderStyle.FixedSingle
+                BorderStyle = BorderStyle.FixedSingle,
+                DrawMode = DrawMode.OwnerDrawFixed
             };
+            _findResults.ItemHeight = TextRenderer.MeasureText("Ag", _fMeta).Height + S(6);
+            _findResults.DrawItem += FindResults_DrawItem;
             // Commit only on a click that lands on a real item (IndexFromPoint
             // guards against a stray click on the scrollbar committing the
             // currently-selected row).
@@ -550,8 +559,14 @@ namespace PDMLite
             _allLevels = null;
             _topLevel = null;
             EnsureSubjectPartNo();
+            // The single-level walk reads dependencies from disk (network) for
+            // every tracked assembly, so a subject switch can take a beat — show a
+            // wait cursor so the click feels responsive instead of "laggy".
+            var oldCursor = this.Cursor;
+            this.Cursor = Cursors.WaitCursor;
             try { _single = VaultManager.GetWhereUsed(_filePath, ConfigTarget()); }
             catch { _single = new List<WhereUsedEntry>(); }
+            finally { this.Cursor = oldCursor; }
             _mode = Mode.Single;
             _parents = _single;
 
@@ -702,15 +717,35 @@ namespace PDMLite
         }
 
         // Anchor the overlay just under the Find box (PointToClient handles the
-        // docked-panel offsets robustly at any DPI / window size).
+        // docked-panel offsets robustly at any DPI / window size). Height is an
+        // EXACT multiple of the (set) ItemHeight + the 1px FixedSingle border each
+        // side, so whole rows always show — no partial row / stale-height glitch.
         private void PositionFindResults()
         {
             if (_findBox == null || _findResults == null) return;
             Point p = this.PointToClient(_findBox.PointToScreen(Point.Empty));
-            int rows = Math.Min(Math.Max(_findResults.Items.Count, 1), 7);
-            int h = rows * _findResults.ItemHeight + S(4);
+            int rowH = _findResults.ItemHeight;   // explicitly set ⇒ reliable
+            int rows = Math.Min(Math.Max(_findResults.Items.Count, 1), 8);
+            int h = rows * rowH + 2;
             _findResults.Bounds = new Rectangle(
                 p.X, p.Y + _findBox.Height + S(1), _findBox.Width, h);
+        }
+
+        // Owner-draw a Find row: brand-blue highlight on selection (matching the
+        // app palette), GDI text via TextRenderer (no per-draw brush for text).
+        private void FindResults_DrawItem(object sender, DrawItemEventArgs e)
+        {
+            if (e.Index < 0 || e.Index >= _findResults.Items.Count) return;
+            bool sel = (e.State & DrawItemState.Selected) != 0;
+            using (var bg = new SolidBrush(sel ? cBrand : Color.White))
+                e.Graphics.FillRectangle(bg, e.Bounds);
+            TextRenderer.DrawText(e.Graphics, _findResults.Items[e.Index].ToString(),
+                _fMeta,
+                new Rectangle(e.Bounds.Left + S(3), e.Bounds.Top,
+                    e.Bounds.Width - S(6), e.Bounds.Height),
+                sel ? Color.White : cTextDark,
+                TextFormatFlags.Left | TextFormatFlags.VerticalCenter |
+                TextFormatFlags.EndEllipsis | TextFormatFlags.NoPrefix);
         }
 
         private void HideFindResults()
