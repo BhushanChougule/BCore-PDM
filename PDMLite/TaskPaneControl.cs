@@ -572,9 +572,9 @@ namespace PDMLite
                                     doc.ShowConfiguration2(form.FileToOpenConfig);
                             }
                             // API open from the dashboard — same as the search
-                            // card, drive the obsolete-components warning (deferred
-                            // so the assembly's refs are resolved by the time it runs).
-                            DeferObsoleteWarning();
+                            // card, drive the obsolete-components warning for the
+                            // opened file (deferred + forced past the guard).
+                            DeferObsoleteWarning(form.FileToOpen);
                         }
                         catch { }
                     }
@@ -948,32 +948,33 @@ namespace PDMLite
                 }
                 catch { }
             }
-            // Opening from a search card is an API open (OpenDoc6/ActivateDoc3)
-            // inside this click handler — drive the obsolete-components warning
-            // explicitly, but DEFERRED (see DeferObsoleteWarning).
-            DeferObsoleteWarning();
+            // Opening from a search card is a synchronous API open inside this
+            // click handler — drive the obsolete-components warning for the file
+            // we just opened, DEFERRED + forced (see DeferObsoleteWarning).
+            DeferObsoleteWarning(filePath);
         }
 
-        // Run the obsolete-components warning AFTER the current open settles.
-        // A search-card / dashboard open is a synchronous API OpenDoc6 from a
-        // click handler; calling WarnObsoleteOnOpen immediately reads the
-        // assembly's dependencies before SOLIDWORKS has resolved them
-        // (GetDocumentDependencies2 returns empty → no warning, and the once-per-
-        // open guard isn't set since it never warned). BeginInvoke posts it to
-        // run once the open completes and the message loop comes back — by then
-        // the references are available. (File > Open already warns because its
-        // own FileOpenPostNotify fires at that later, settled point.)
-        private void DeferObsoleteWarning()
+        // Show the obsolete-components warning for a file opened in-app, AFTER the
+        // current open settles. Deferred via BeginInvoke so it runs once the click
+        // handler returns and SOLIDWORKS can display a dialog. PATH-BASED + forced:
+        // SW fires its own open notification DURING the nested OpenDoc6, which runs
+        // the hook and consumes the once-per-open guard — but that message is
+        // suppressed while SW is mid-open — so a plain re-call would be guarded out
+        // and ActiveDoc may not be the assembly. WarnObsoleteForPath(path, force:true)
+        // checks the exact path and re-shows past the guard, so the in-app open
+        // warns exactly once (File > Open already warns via its own notification).
+        private void DeferObsoleteWarning(string path)
         {
             try
             {
                 if (IsHandleCreated)
                     BeginInvoke((Action)(() =>
                     {
-                        try { PDMLiteAddin.Instance?.WarnObsoleteOnOpen(); } catch { }
+                        try { PDMLiteAddin.Instance?.WarnObsoleteForPath(path, true); }
+                        catch { }
                     }));
                 else
-                    PDMLiteAddin.Instance?.WarnObsoleteOnOpen();
+                    PDMLiteAddin.Instance?.WarnObsoleteForPath(path, true);
             }
             catch { }
         }

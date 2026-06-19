@@ -235,13 +235,33 @@ namespace PDMLite
                 var doc = SwApp?.ActiveDoc as ModelDoc2;
                 if (doc == null) return;
                 if (doc.GetType() != (int)swDocumentTypes_e.swDocASSEMBLY) return;
+                WarnObsoleteForPath(doc.GetPathName(), false);
+            }
+            catch { }
+        }
 
-                string path = doc.GetPathName();
+        // Path-based core (no dependence on ActiveDoc). force=true is used by the
+        // task pane / dashboard after an IN-APP open: SOLIDWORKS fires its open
+        // notification DURING the nested OpenDoc6, which runs the hook above and
+        // sets the once-per-open guard — but the message is suppressed while SW is
+        // mid-open, so the path is left "warned" with nothing shown. force re-shows
+        // it (clears the guard first) so the in-app open warns exactly once. The
+        // obsolete set is read from disk via GetDocumentDependencies2, so it does
+        // NOT depend on the doc being fully resolved in memory.
+        internal void WarnObsoleteForPath(string path, bool force)
+        {
+            try
+            {
                 if (string.IsNullOrEmpty(path)) return;
+                if (!path.EndsWith(".sldasm", StringComparison.OrdinalIgnoreCase))
+                    return; // only assemblies have components to check
 
                 var obs = VaultManager.GetObsoleteComponentsByPath(path);
-                if (obs.Count == 0) return;          // nothing (or not resolvable yet)
-                if (!_obsoleteWarned.Add(path)) return; // already warned this open
+                if (obs.Count == 0) return;
+
+                if (force) _obsoleteWarned.Remove(path); // re-show despite a
+                                                         // suppressed hook warning
+                if (!_obsoleteWarned.Add(path)) return;  // already warned this open
 
                 SwApp.SendMsgToUser2(
                     "⚠  OBSOLETE COMPONENTS — BCore PDM\n\n" +
