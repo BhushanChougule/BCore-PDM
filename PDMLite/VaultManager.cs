@@ -534,6 +534,14 @@ namespace PDMLite
                 return;
             }
 
+            // Was the file already open BEFORE we touch it? If we open it only to
+            // read its export identity and the remove is then CANCELLED/aborted
+            // (the doc-based flow closes the doc only on success), we must close
+            // the doc WE opened — otherwise a cancelled remove leaves the part
+            // open in the background. A doc the user already had open is left alone.
+            bool wasOpen = (PDMLiteAddin.SwApp
+                ?.GetOpenDocumentByName(filePath) as ModelDoc2) != null;
+
             ModelDoc2 doc = OpenByPath(filePath);
             if (doc == null)
             {
@@ -546,6 +554,19 @@ namespace PDMLite
                 return;
             }
             RemoveFromVault(doc); // full flow: guards + claim + scrap + record delete + close
+
+            // Remove cancelled/aborted (record still present ⇒ the flow returned
+            // without scrapping) and we opened the doc transiently → close it.
+            if (!wasOpen)
+            {
+                try
+                {
+                    var still = PDMLiteAddin.SwApp
+                        ?.GetOpenDocumentByName(filePath) as ModelDoc2;
+                    if (still != null) PDMLiteAddin.SwApp.CloseDoc(filePath);
+                }
+                catch { }
+            }
         }
 
         public static void RemoveFromVault(ModelDoc2 doc)

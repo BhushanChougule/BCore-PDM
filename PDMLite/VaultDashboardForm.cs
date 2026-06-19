@@ -1574,7 +1574,7 @@ namespace PDMLite
             try
             {
                 string toOpen = null;
-                using (var v = new WhereUsedForm(f.FilePath, f.FileName))
+                using (var v = new WhereUsedForm(f.FilePath, f.FileName, f.PartNumber))
                 {
                     v.ShowDialog(this);
                     toOpen = v.FileToOpen;

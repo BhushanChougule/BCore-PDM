@@ -595,7 +595,7 @@ namespace PDMLite
         // user picks a parent assembly to open, do so after the modal closes.
         private void OpenWhereUsed()
         {
-            string seedPath = null, seedName = null;
+            string seedPath = null, seedName = null, seedPartNo = null, seedConfig = null;
             try
             {
                 ModelDoc2 doc = PDMLiteAddin.SwApp?.ActiveDoc as ModelDoc2;
@@ -605,13 +605,31 @@ namespace PDMLite
                     {
                         string model = VaultManager.GetDrawingReferencedModel(doc);
                         if (!string.IsNullOrEmpty(model))
-                        { seedPath = model; seedName = Path.GetFileName(model); }
+                        {
+                            seedPath = model; seedName = Path.GetFileName(model);
+                            // The config the drawing documents drives its Part No
+                            // (a multi-config model has a different PN per config).
+                            seedPartNo = VaultManager.GetDrawingPartNo(doc);
+                            seedConfig = VaultManager.GetDrawingPrimaryConfig(doc);
+                        }
                     }
                     else
                     {
                         string p = doc.GetPathName();
                         if (!string.IsNullOrEmpty(p))
-                        { seedPath = p; seedName = Path.GetFileName(p); }
+                        {
+                            seedPath = p; seedName = Path.GetFileName(p);
+                            // Seed from the ACTIVE configuration (its own Part No),
+                            // not the file's primary/last-saved config.
+                            seedPartNo = PropertyValidator.GetProperty(doc, "PartNo");
+                            try
+                            {
+                                var cfg = doc.GetActiveConfiguration()
+                                    as SolidWorks.Interop.sldworks.Configuration;
+                                if (cfg != null) seedConfig = cfg.Name;
+                            }
+                            catch { }
+                        }
                     }
                 }
             }
@@ -620,7 +638,7 @@ namespace PDMLite
             try
             {
                 string toOpen = null;
-                using (var v = new WhereUsedForm(seedPath, seedName))
+                using (var v = new WhereUsedForm(seedPath, seedName, seedPartNo, seedConfig))
                 {
                     v.ShowDialog(this);
                     toOpen = v.FileToOpen;

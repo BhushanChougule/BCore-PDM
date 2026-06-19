@@ -39,9 +39,15 @@ namespace PDMLite
         // The SUBJECT of the where-used query. NOT readonly: the "Find" box lets
         // the user search the vault and switch the subject in-place (the task-pane
         // entry point opens the form seeded with the active file, but any tracked
-        // part/assembly can be loaded without reopening the form).
+        // part/assembly can be loaded without reopening the form). A multi-config
+        // part is ONE file; _subjectConfig / _subjectPartNo identify WHICH config
+        // the query is about (config name == Part No by convention) so the header,
+        // the Find autofill and a picked drawing all reflect that config — not the
+        // file's primary/active-at-save config.
         private string _filePath;
         private string _fileName;
+        private string _subjectConfig;   // configuration this where-used is about (null = file-level)
+        private string _subjectPartNo;   // Part No shown in the header + Find box
 
         // EM_SETCUEBANNER — grey placeholder in a single-line TextBox (no
         // PlaceholderText on .NET Framework 4.8). Mirrors the other BCore forms.
@@ -82,11 +88,24 @@ namespace PDMLite
         // FIND box (search the vault to switch the subject). The results drop down
         // is a ListBox parented to the FORM (an autocomplete overlay above the
         // grid), shown on a debounced search and dismissed on commit / Esc / click
-        // away. _findHits is the parallel VaultFile list behind the rendered items.
+        // away. _findHits is the parallel FindHit list behind the rendered items.
         private ListBox _findResults;
-        private List<VaultFile> _findHits = new List<VaultFile>();
+        private List<FindHit> _findHits = new List<FindHit>();
         private Timer _findTimer;
         private bool _suppressFind;              // set while seeding the box text
+
+        // One Find dropdown row. A multi-config part expands to one hit PER
+        // matching configuration (config name == Part No), so the user picks the
+        // exact config — not the file's primary PN. Path/Name/Config identify the
+        // subject; Display is the rendered text.
+        private class FindHit
+        {
+            public string Path;     // model (or orphan-drawing) path
+            public string Name;     // file name
+            public string Config;   // configuration (null = file-level / single config)
+            public string PartNo;   // the config's Part No
+            public string Display;  // dropdown text
+        }
 
         private float _scale = 1f;
         private int S(float v) => (int)(v * _scale);
@@ -103,10 +122,13 @@ namespace PDMLite
 
         private Font _fHeader, _fSub, _fMeta, _fHint, _fBtn, _fGrid, _fGridHead;
 
-        public WhereUsedForm(string filePath, string fileName)
+        public WhereUsedForm(string filePath, string fileName,
+            string subjectPartNo = null, string subjectConfig = null)
         {
             _filePath = filePath;
             _fileName = fileName;
+            _subjectPartNo = subjectPartNo;
+            _subjectConfig = subjectConfig;
             using (var g = this.CreateGraphics())
                 _scale = g.DpiX / 96f;
 
@@ -117,6 +139,11 @@ namespace PDMLite
             _fBtn      = new Font("Segoe UI", 3.7f * _scale, FontStyle.Bold);
             _fGrid     = new Font("Segoe UI", 3.5f * _scale);
             _fGridHead = new Font("Segoe UI", 3.5f * _scale, FontStyle.Bold);
+
+            // Resolve the subject Part No (config-specific) from the DB if the
+            // caller didn't supply one, so the header + Find autofill are right
+            // before the UI is built.
+            EnsureSubjectPartNo();
 
             // Default mode (Single Level) is cheap — one walk; the All/Top walks
             // are deferred until the user asks for them.
@@ -442,24 +469,62 @@ namespace PDMLite
                     _btnExportAll.Left - _countLabel.Left - S(10));
         }
 
-        // The subject filename shown in the header (or a prompt when no subject is
-        // loaded yet — the task-pane entry point can open with nothing active).
+        // The subject shown in the header: filename · Part No (or a prompt when no
+        // subject is loaded yet — the task-pane entry point can open empty).
         private string SubjectLabelText()
         {
-            if (!string.IsNullOrEmpty(_fileName)) return _fileName;
-            if (!string.IsNullOrEmpty(_filePath)) return Path.GetFileName(_filePath);
-            return "(no file — use Find to choose a part or assembly)";
+            if (string.IsNullOrEmpty(_fileName) && string.IsNullOrEmpty(_filePath))
+                return "(no file — use Find to choose a part or assembly)";
+            string nm = !string.IsNullOrEmpty(_fileName)
+                ? _fileName : Path.GetFileName(_filePath);
+            return string.IsNullOrEmpty(_subjectPartNo)
+                ? nm : nm + "   ·   " + _subjectPartNo;
+        }
+
+        // Resolve the subject's Part No (config-specific) when the caller didn't
+        // supply one: the matching config's Pn from the DB record, else the
+        // record's primary PN, else the config name itself (config == PN), else
+        // left blank. Cached in _subjectPartNo so the header + seed agree.
+        private void EnsureSubjectPartNo()
+        {
+            if (!string.IsNullOrEmpty(_subjectPartNo)) return;
+            try
+            {
+                if (!string.IsNullOrEmpty(_filePath))
+                {
+                    var rec = DatabaseManager.GetFileRecord(_filePath);
+                    if (rec != null)
+                    {
+                        if (!string.IsNullOrEmpty(_subjectConfig) &&
+                            rec.Configurations != null)
+                            foreach (var c in rec.Configurations)
+                                if (string.Equals(c.Name, _subjectConfig,
+                                        StringComparison.OrdinalIgnoreCase) &&
+                                    !string.IsNullOrEmpty(c.PartNo))
+                                { _subjectPartNo = c.PartNo; return; }
+                        if (!string.IsNullOrEmpty(rec.PartNumber))
+                        { _subjectPartNo = rec.PartNumber; return; }
+                    }
+                }
+            }
+            catch { }
+            if (string.IsNullOrEmpty(_subjectPartNo) &&
+                !string.IsNullOrEmpty(_subjectConfig))
+                _subjectPartNo = _subjectConfig;   // config name == Part No
         }
 
         // Switch the SUBJECT of the where-used query in place (Find committed a new
-        // file). Recompute the cheap single-level walk now and invalidate the
-        // cached All/Top walks; reset the view to Single Level.
-        private void SetSubject(string path, string name)
+        // file/config). Recompute the cheap single-level walk now and invalidate
+        // the cached All/Top walks; reset the view to Single Level.
+        private void SetSubject(string path, string name, string config, string partNo)
         {
             _filePath = path;
             _fileName = name;
+            _subjectConfig = config;
+            _subjectPartNo = partNo;
             _allLevels = null;
             _topLevel = null;
+            EnsureSubjectPartNo();
             try { _single = VaultManager.GetWhereUsed(_filePath); }
             catch { _single = new List<WhereUsedEntry>(); }
             _mode = Mode.Single;
@@ -476,19 +541,13 @@ namespace PDMLite
             LoadRows();
         }
 
-        // Autofill the Find box with the subject's Part No (the design decision —
-        // Part No over file name), falling back to the file name when untracked.
+        // Autofill the Find box with the subject's (config-specific) Part No — the
+        // design decision: Part No over file name; file name only as a last resort.
         private void SeedFindBox()
         {
             if (_findBox == null) return;
-            string seed = "";
-            try
-            {
-                var rec = string.IsNullOrEmpty(_filePath)
-                    ? null : DatabaseManager.GetFileRecord(_filePath);
-                if (rec != null) seed = rec.PartNumber ?? "";
-            }
-            catch { }
+            EnsureSubjectPartNo();
+            string seed = _subjectPartNo ?? "";
             if (string.IsNullOrEmpty(seed) && !string.IsNullOrEmpty(_fileName))
                 seed = Path.GetFileNameWithoutExtension(_fileName);
 
@@ -498,30 +557,24 @@ namespace PDMLite
             _suppressFind = false;
         }
 
-        // Debounced vault search → fill the overlay (PartNumber + Description + the
-        // file name in parentheses). Silent on a vault outage, like the task-pane
-        // search (this runs on a timer tick).
+        // Debounced vault search → fill the overlay. A multi-config part expands to
+        // one row PER matching configuration (config name == Part No), so the user
+        // picks the exact config rather than the file's primary PN. Silent on a
+        // vault outage, like the task-pane search (this runs on a timer tick).
         private void RunFind()
         {
             string term = (_findBox.Text ?? "").Trim();
             if (term.Length < 2) { HideFindResults(); return; }
 
-            List<VaultFile> hits;
-            try { hits = DatabaseManager.SearchFiles(term); }
+            List<VaultFile> results;
+            try { results = DatabaseManager.SearchFiles(term); }
             catch { HideFindResults(); return; }
-            _findHits = hits ?? new List<VaultFile>();
+            _findHits = BuildFindHits(results ?? new List<VaultFile>(),
+                term.ToLowerInvariant());
 
             _findResults.BeginUpdate();
             _findResults.Items.Clear();
-            foreach (var f in _findHits)
-            {
-                string pn = string.IsNullOrEmpty(f.PartNumber)
-                    ? Path.GetFileNameWithoutExtension(f.FileName ?? "")
-                    : f.PartNumber;
-                string desc = string.IsNullOrEmpty(f.Description)
-                    ? "" : "  —  " + f.Description;
-                _findResults.Items.Add(pn + desc + "   (" + (f.FileName ?? "") + ")");
-            }
+            foreach (var h in _findHits) _findResults.Items.Add(h.Display);
             if (_findHits.Count == 0)
                 _findResults.Items.Add("(no matches for \"" + term + "\")");
             _findResults.EndUpdate();
@@ -530,6 +583,97 @@ namespace PDMLite
             if (_findHits.Count > 0) _findResults.SelectedIndex = 0;
             _findResults.Visible = true;
             _findResults.BringToFront();
+        }
+
+        // Expand the flat search results into per-config Find rows (mirrors the
+        // task-pane search cards). A drawing maps back to its model and is folded
+        // into that model's config rows (skipped if the model also matched); a true
+        // orphan drawing (no model) gets its own row.
+        private readonly HashSet<string> _findExpanded =
+            new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+        private List<FindHit> BuildFindHits(List<VaultFile> results, string termL)
+        {
+            var hits = new List<FindHit>();
+            _findExpanded.Clear();   // dedupe model expansion within one search
+            var modelPaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (var f in results)
+            {
+                string ext = (Path.GetExtension(f.FilePath) ?? "").ToLowerInvariant();
+                if (ext == ".sldprt" || ext == ".sldasm") modelPaths.Add(f.FilePath);
+            }
+            foreach (var f in results)
+            {
+                string ext = (Path.GetExtension(f.FilePath) ?? "").ToLowerInvariant();
+                if (ext == ".slddrw")
+                {
+                    VaultFile model = null;
+                    try { model = DatabaseManager.GetModelForDrawing(f.FilePath); }
+                    catch { }
+                    if (model != null && modelPaths.Contains(model.FilePath))
+                        continue;                       // folded under the model below
+                    if (model != null)
+                        AddModelHits(hits, model, termL);
+                    else
+                        hits.Add(new FindHit
+                        {
+                            Path = f.FilePath, Name = f.FileName, Config = null,
+                            PartNo = "",
+                            Display = Path.GetFileNameWithoutExtension(f.FileName ?? "")
+                                + "   (" + (f.FileName ?? "") + ")"
+                        });
+                }
+                else
+                {
+                    AddModelHits(hits, f, termL);
+                }
+            }
+            return hits;
+        }
+
+        private void AddModelHits(List<FindHit> hits, VaultFile model, string termL)
+        {
+            // Expand each model at most once per search (two matching drawings can
+            // both resolve to the same model).
+            if (!string.IsNullOrEmpty(model.FilePath) &&
+                !_findExpanded.Add(model.FilePath)) return;
+
+            string fileName = string.IsNullOrEmpty(model.FileName)
+                ? Path.GetFileName(model.FilePath) : model.FileName;
+            string baseName = Path.GetFileNameWithoutExtension(fileName);
+            bool nameMatched = baseName.ToLowerInvariant().Contains(termL);
+
+            var configs = model.Configurations;
+            if (configs == null || configs.Count == 0)
+                configs = new List<ConfigEntry> { new ConfigEntry {
+                    Name = model.PartNumber, PartNo = model.PartNumber,
+                    Description = model.Description } };
+
+            int total = configs.Count;
+            var shown = new List<ConfigEntry>();
+            foreach (var c in configs)
+            {
+                bool match = total <= 1 || nameMatched
+                          || (c.PartNo ?? "").ToLowerInvariant().Contains(termL)
+                          || (c.Description ?? "").ToLowerInvariant().Contains(termL);
+                if (match) shown.Add(c);
+            }
+            if (shown.Count == 0) shown = configs;   // never drop a matched file
+
+            foreach (var c in shown)
+            {
+                string pn = string.IsNullOrEmpty(c.PartNo) ? model.PartNumber : c.PartNo;
+                string desc = string.IsNullOrEmpty(c.Description)
+                    ? model.Description : c.Description;
+                hits.Add(new FindHit
+                {
+                    Path = model.FilePath, Name = fileName, Config = c.Name,
+                    PartNo = pn,
+                    Display = (string.IsNullOrEmpty(pn) ? baseName : pn)
+                        + (string.IsNullOrEmpty(desc) ? "" : "  —  " + desc)
+                        + "   (" + fileName + ")"
+                });
+            }
         }
 
         // Anchor the overlay just under the Find box (PointToClient handles the
@@ -556,36 +700,29 @@ namespace PDMLite
             CommitFind(_findHits[i]);
         }
 
-        // Load the chosen file as the new subject. A DRAWING isn't a component and
-        // has no where-used of its own, so resolve it to the model it documents and
-        // show the MODEL's where-used (the design decision).
-        private void CommitFind(VaultFile vf)
+        // Load the chosen Find row as the new subject. Model/config hits set the
+        // subject directly (BuildFindHits already resolved drawings to their model
+        // + config). A bare drawing row is a TRUE orphan (no tracked model) — a
+        // drawing isn't a component, so there's no where-used to show.
+        private void CommitFind(FindHit h)
         {
             HideFindResults();
-            if (vf == null || string.IsNullOrEmpty(vf.FilePath)) return;
+            if (h == null || string.IsNullOrEmpty(h.Path)) return;
 
-            string path = vf.FilePath, name = vf.FileName;
-            string ext = (Path.GetExtension(path) ?? "").ToLowerInvariant();
+            string ext = (Path.GetExtension(h.Path) ?? "").ToLowerInvariant();
             if (ext == ".slddrw")
             {
-                VaultFile model = null;
-                try { model = DatabaseManager.GetModelForDrawing(path); } catch { }
-                if (model == null)
-                {
-                    MessageBox.Show(
-                        "A drawing has no \"where used\" — it isn't a component.\n\n" +
-                        "No tracked model was found for it; pick the part or " +
-                        "assembly instead.",
-                        "BCore PDM — Where Used",
-                        MessageBoxButtons.OK, MessageBoxIcon.Information);
-                    return;
-                }
-                path = model.FilePath;
-                name = model.FileName;
+                MessageBox.Show(
+                    "A drawing has no \"where used\" — it isn't a component.\n\n" +
+                    "No tracked model was found for it; pick the part or " +
+                    "assembly instead.",
+                    "BCore PDM — Where Used",
+                    MessageBoxButtons.OK, MessageBoxIcon.Information);
+                return;
             }
 
-            SetSubject(path, name);
-            SeedFindBox();   // reflect the loaded subject's Part No
+            SetSubject(h.Path, h.Name, h.Config, h.PartNo);
+            SeedFindBox();   // reflect the loaded subject's (config) Part No
         }
 
         private void FindBox_KeyDown(object sender, KeyEventArgs e)
@@ -779,7 +916,7 @@ namespace PDMLite
             try
             {
                 string toOpen = null;
-                using (var v = new WhereUsedForm(entry.Path, entry.Name))
+                using (var v = new WhereUsedForm(entry.Path, entry.Name, entry.PartNo))
                 {
                     v.ShowDialog(this);
                     toOpen = v.FileToOpen;
