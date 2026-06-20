@@ -555,8 +555,12 @@ namespace PDMLite
             }
             RemoveFromVault(doc); // full flow: guards + claim + scrap + record delete + close
 
-            // Remove cancelled/aborted (record still present ⇒ the flow returned
-            // without scrapping) and we opened the doc transiently → close it.
+            // We opened the doc transiently and it is STILL OPEN afterward ⇒ the
+            // remove was cancelled/aborted before the doc-flow's own CloseDoc
+            // (confirm=No, reason=Cancel, or a busy/lock abort) → close it so a
+            // cancelled remove never leaves the part open. On success / WIP-move
+            // abort the doc-flow already closed it, so GetOpenDocumentByName returns
+            // null here and we do nothing.
             if (!wasOpen)
             {
                 try
@@ -2941,10 +2945,16 @@ namespace PDMLite
                             StringComparison.OrdinalIgnoreCase)) continue; // self
                     if (!File.Exists(asmPath)) continue;
 
-                    // traverse=false → DIRECT children only.
-                    object depsObj = PDMLiteAddin.SwApp.GetDocumentDependencies2(
-                        asmPath, false, true, false);
-                    string[] deps = depsObj as string[];
+                    // traverse=false → DIRECT children only. Guard per-assembly: one
+                    // unreadable/corrupt file must not abort the whole walk (matches
+                    // GetParentAssemblies).
+                    string[] deps;
+                    try
+                    {
+                        deps = PDMLiteAddin.SwApp.GetDocumentDependencies2(
+                            asmPath, false, true, false) as string[];
+                    }
+                    catch { continue; }
                     if (deps == null) continue;
 
                     bool referencesTarget = false;
@@ -3216,9 +3226,15 @@ namespace PDMLite
                 try { asmFull = Path.GetFullPath(asmPath); }
                 catch { asmFull = asmPath; }
 
-                object depsObj = PDMLiteAddin.SwApp.GetDocumentDependencies2(
-                    asmPath, false, true, false);
-                string[] deps = depsObj as string[];
+                // Guard per-assembly: one unreadable/corrupt file must not abort
+                // the whole reverse-map build (matches GetParentAssemblies).
+                string[] deps;
+                try
+                {
+                    deps = PDMLiteAddin.SwApp.GetDocumentDependencies2(
+                        asmPath, false, true, false) as string[];
+                }
+                catch { continue; }
                 if (deps == null) continue;
 
                 // Build the parent entry lazily (record lookup once) and only if

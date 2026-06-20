@@ -3131,7 +3131,9 @@ namespace PDMLite
                         int cur; map.TryGetValue(cn, out cur);
                         map[cn] = cur + (q > 0 ? q : 0);
                     }
-                    return map;
+                    // Empty/all-unusable block (hand-edited) → null so the caller
+                    // falls back to the baseline, matching GetChildConfigUsage PASS 1.
+                    return map.Count > 0 ? map : null;
                 }
             }
             return null;
