@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Drawing;
 using System.IO;
+using System.Text;
 using System.Windows.Forms;
 
 namespace PDMLite
@@ -40,7 +41,10 @@ namespace PDMLite
         private ComboBox _materialBox, _finishBox, _partTypeBox;
         private Panel    _resultsPanel;
         private Label    _countLabel;
+        private Button   _btnExport;
         private Timer    _timer;
+        // The cards currently rendered (post-cap) — the rows Export CSV writes.
+        private readonly List<Card> _lastCards = new List<Card>();
 
         // EM_SETCUEBANNER — grey placeholder for a single-line TextBox (no
         // PlaceholderText on .NET Framework 4.8). Mirrors the other BCore forms.
@@ -57,6 +61,19 @@ namespace PDMLite
             else
                 box.HandleCreated += (s, e) =>
                     SendMessage(box.Handle, EM_SETCUEBANNER, (IntPtr)1, text);
+        }
+
+        // Grey placeholder for an EDITABLE ComboBox (CB_SETCUEBANNER — the combo
+        // equivalent of EM_SETCUEBANNER; shows when the edit portion is empty and
+        // unfocused). Only works on a DropDown (editable) combo, not DropDownList.
+        private static void SetComboCue(ComboBox cb, string text)
+        {
+            const int CB_SETCUEBANNER = 0x1703;
+            if (cb.IsHandleCreated)
+                SendMessage(cb.Handle, CB_SETCUEBANNER, IntPtr.Zero, text);
+            else
+                cb.HandleCreated += (s, e) =>
+                    SendMessage(cb.Handle, CB_SETCUEBANNER, IntPtr.Zero, text);
         }
 
         private float _scale = 1f;
@@ -175,6 +192,21 @@ namespace PDMLite
             btnClose.FlatAppearance.BorderSize = 0;
             btnClose.Click += (s, e) => Close();
             bottom.Controls.Add(btnClose);
+
+            // Export CSV (left) — the shown result rows. Disabled until a search
+            // returns rows.
+            _btnExport = new Button
+            {
+                Text = "Export CSV", Font = _fCardBtn,
+                Width = S(110), Height = S(26),
+                BackColor = cBrand, ForeColor = Color.White,
+                FlatStyle = FlatStyle.Flat, Cursor = Cursors.Hand,
+                Location = new Point(margin, S(8)), Enabled = false
+            };
+            _btnExport.FlatAppearance.BorderSize = 0;
+            _btnExport.Click += (s, e) => ExportCsv();
+            bottom.Controls.Add(_btnExport);
+
             this.Controls.Add(bottom);
 
             // ── Filters panel (Top) — centred search + a 2×2 refine grid ─────
@@ -228,17 +260,23 @@ namespace PDMLite
             // Material + Finish are TYPE-TO-NARROW combos (editable + autocomplete
             // over the list) — the material list will grow long, so typing filters
             // the dropdown suggestions; the user still picks a real list value.
+            // They start BLANK with a cue-banner placeholder (like the search box),
+            // no "— Any —" item — empty = no filter.
             _materialBox = MakeCombo(c2InputX, ry1, cInputW,
-                BuildOptions(PropertyForm.MaterialOptions()), typeable: true);
+                BuildOptions(PropertyForm.MaterialOptions(), includeAny: false),
+                typeable: true, cue: "Type or pick a material");
             AddRow(filters, "Material", c2LabelX, labelW, ry1, _materialBox);
 
             _finishBox = MakeCombo(c1InputX, ry2, cInputW,
-                BuildOptions(PropertyForm.FinishTypeOptions()), typeable: true);
+                BuildOptions(PropertyForm.FinishTypeOptions(), includeAny: false),
+                typeable: true, cue: "Type or pick a finish");
             AddRow(filters, "Finish", c1LabelX, labelW, ry2, _finishBox);
 
-            // Part Type is just two values — a plain dropdown list (no typing).
+            // Part Type is just two values — a plain dropdown list with "— Any —"
+            // (a DropDownList has no edit box, so no cue banner / typing).
             _partTypeBox = MakeCombo(c2InputX, ry2, cInputW,
-                BuildOptions(PropertyForm.PartTypeOptions()), typeable: false);
+                BuildOptions(PropertyForm.PartTypeOptions(), includeAny: true),
+                typeable: false);
             AddRow(filters, "Part Type", c2LabelX, labelW, ry2, _partTypeBox);
 
             y = ry2 + S(30);
@@ -314,11 +352,13 @@ namespace PDMLite
         }
 
         // typeable = an editable combo with autocomplete over its own list items
-        // (type to narrow the dropdown, still pick a real value). Non-typeable is
-        // a plain dropdown list. FlatStyle is left at the default (Standard) — the
-        // old FlatStyle.Flat rendered a tiny dot-sized arrow.
+        // (type to narrow the dropdown, still pick a real value); it starts BLANK
+        // (SelectedIndex -1) with the given cue-banner placeholder. Non-typeable
+        // is a plain dropdown list defaulting to its first item ("— Any —").
+        // FlatStyle is left at the default (Standard) — the old FlatStyle.Flat
+        // rendered a tiny dot-sized arrow.
         private ComboBox MakeCombo(int x, int y, int w, string[] items,
-            bool typeable)
+            bool typeable, string cue = null)
         {
             var cb = new ComboBox
             {
@@ -328,21 +368,26 @@ namespace PDMLite
                     ? ComboBoxStyle.DropDown : ComboBoxStyle.DropDownList
             };
             cb.Items.AddRange(items);
-            cb.SelectedIndex = 0; // "— Any —"
             cb.MaxDropDownItems = 16;
             if (typeable)
             {
                 cb.AutoCompleteMode = AutoCompleteMode.Suggest;
                 cb.AutoCompleteSource = AutoCompleteSource.ListItems;
+                if (cue != null) SetComboCue(cb, cue); // blank, cue placeholder
+            }
+            else
+            {
+                cb.SelectedIndex = 0; // "— Any —"
             }
             return cb;
         }
 
-        // Build a dropdown's items: "— Any —" first (no filter), then the source
-        // list with PropertyForm's "-- Select --" sentinel removed.
-        private static string[] BuildOptions(string[] source)
+        // Build a dropdown's items: optionally "— Any —" first (no filter), then
+        // the source list with PropertyForm's "-- Select --" sentinel removed.
+        private static string[] BuildOptions(string[] source, bool includeAny)
         {
-            var list = new List<string> { AnyOption };
+            var list = new List<string>();
+            if (includeAny) list.Add(AnyOption);
             foreach (var s in source)
                 if (!string.Equals(s, Sentinel, StringComparison.Ordinal))
                     list.Add(s);
@@ -382,6 +427,8 @@ namespace PDMLite
         private void RunSearch()
         {
             ClearAndDispose(_resultsPanel);
+            _lastCards.Clear();
+            if (_btnExport != null) _btnExport.Enabled = false;
 
             string main     = _mainBox.Text.Trim();
             string drawnBy  = _drawnByBox.Text.Trim();
@@ -436,6 +483,8 @@ namespace PDMLite
                     cards.Add(new Card
                     {
                         DisplayName  = baseName,
+                        FileName     = string.IsNullOrEmpty(f.FileName)
+                                          ? Path.GetFileName(f.FilePath) : f.FileName,
                         ModelPath    = f.FilePath,
                         ModelExt     = ext,
                         ConfigName   = c.Name,
@@ -446,7 +495,8 @@ namespace PDMLite
                         Revision     = c.Revision,
                         Status       = f.Status,
                         SupersededBy = f.SupersededBy,
-                        DrawingPath  = drawingPath
+                        DrawingPath  = drawingPath,
+                        Config       = c
                     });
                 }
             }
@@ -465,6 +515,8 @@ namespace PDMLite
             }
 
             RenderCards(cards);
+            _lastCards.AddRange(cards);
+            if (_btnExport != null) _btnExport.Enabled = true;
 
             _countLabel.ForeColor = cTextGray;
             _countLabel.Text = truncated
@@ -648,6 +700,71 @@ namespace PDMLite
             }
         }
 
+        // Export the SHOWN result rows (one per config card) to CSV with the
+        // columns the user asked for. Per-config fields come from the matched
+        // ConfigEntry; PartNo/Description/Revision use the card's resolved values
+        // (config value, file-level fallback).
+        private void ExportCsv()
+        {
+            if (_lastCards.Count == 0) return;
+            using (var sfd = new SaveFileDialog
+            {
+                Filter = "CSV files (*.csv)|*.csv|All files (*.*)|*.*",
+                FileName = "AdvancedSearch_" +
+                    DateTime.Now.ToString("yyyyMMdd_HHmmss") + ".csv"
+            })
+            {
+                if (sfd.ShowDialog(this) != DialogResult.OK) return;
+                try
+                {
+                    var sb = new StringBuilder();
+                    sb.AppendLine(string.Join(",", new[]
+                    {
+                        "File Name", "Part No", "Drawing No", "Description",
+                        "Rev", "Material", "Finish", "Drawn By", "Part Type"
+                    }));
+                    foreach (var g in _lastCards)
+                    {
+                        var c = g.Config;
+                        sb.AppendLine(string.Join(",", new[]
+                        {
+                            Csv(g.FileName),
+                            Csv(g.PartNumber),
+                            Csv(c != null ? c.DrawingNo  : ""),
+                            Csv(g.Description),
+                            Csv(g.Revision),
+                            Csv(c != null ? c.Material   : ""),
+                            Csv(c != null ? c.FinishType : ""),
+                            Csv(c != null ? c.DrawnBy    : ""),
+                            Csv(c != null ? c.PartType   : "")
+                        }));
+                    }
+                    File.WriteAllText(sfd.FileName, sb.ToString());
+                    MessageBox.Show("Exported " + _lastCards.Count +
+                        " row" + (_lastCards.Count == 1 ? "" : "s") + " to:\n" +
+                        sfd.FileName, "BCore PDM — Exported",
+                        MessageBoxButtons.OK, MessageBoxIcon.Information);
+                }
+                catch (Exception ex)
+                {
+                    MessageBox.Show("Could not export:\n" + ex.Message,
+                        "BCore PDM — Export Failed",
+                        MessageBoxButtons.OK, MessageBoxIcon.Error);
+                }
+            }
+        }
+
+        // RFC-4180 escaping + Excel formula-injection guard (house convention).
+        private static string Csv(string field)
+        {
+            field = field ?? "";
+            if (field.Length > 0 && "=+-@".IndexOf(field[0]) >= 0)
+                field = "'" + field;
+            if (field.IndexOfAny(new[] { ',', '"', '\n', '\r' }) >= 0)
+                field = "\"" + field.Replace("\"", "\"\"") + "\"";
+            return field;
+        }
+
         private static Color StatusColor(string status)
         {
             switch (status)
@@ -675,7 +792,8 @@ namespace PDMLite
         // One result card (a single matching configuration of a model file).
         private class Card
         {
-            public string DisplayName;
+            public string DisplayName;   // base file name, no extension
+            public string FileName;      // full file name (CSV "File Name")
             public string ModelPath;
             public string ModelExt;
             public string DrawingPath;
@@ -685,6 +803,7 @@ namespace PDMLite
             public string Revision;
             public string Status;
             public string SupersededBy;
+            public ConfigEntry Config;   // the matched config (CSV: DrawingNo/Material/Finish/DrawnBy/PartType)
         }
     }
 }
