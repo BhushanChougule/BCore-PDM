@@ -1783,13 +1783,15 @@ namespace PDMLite
         // drawing via the DrawingIndex). Each returned file's Configurations list
         // is TRIMMED to only the configs that passed every active filter, so the
         // popup renders exactly the matching config cards, never "all configs of a
-        // file that matched". Capped at MaxSearchResults files (truncated=true when
-        // more matched). READ-ONLY: orphans (file gone on disk) are skipped when
+        // file that matched". Capped at maxResults files (default MaxSearchResults;
+        // truncated=true when more matched) — the CSV export passes a large cap to
+        // dump the FULL matching set while the on-screen card list stays capped for
+        // UI performance. READ-ONLY: orphans (file gone on disk) are skipped when
         // the share is reachable but NEVER purged (no write — safe in degraded-
         // lock mode; the quick SearchFiles owns orphan cleanup).
         public static List<VaultFile> SearchFilesAdvanced(
             string mainTerm, string drawnBy, string material, string finish,
-            string partType, out bool truncated)
+            string partType, out bool truncated, int maxResults = MaxSearchResults)
         {
             truncated = false;
             var results = new List<VaultFile>();
@@ -1890,7 +1892,7 @@ namespace PDMLite
                     // Dedupe by filename (legacy double-records / RELEASED copies).
                     if (!seenFileNames.Add(fileName)) continue;
 
-                    if (results.Count >= MaxSearchResults)
+                    if (results.Count >= maxResults)
                     {
                         truncated = true;
                         break;

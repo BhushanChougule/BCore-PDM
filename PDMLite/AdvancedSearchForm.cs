@@ -43,8 +43,6 @@ namespace PDMLite
         private Label    _countLabel;
         private Button   _btnExport;
         private Timer    _timer;
-        // The cards currently rendered (post-cap) — the rows Export CSV writes.
-        private readonly List<Card> _lastCards = new List<Card>();
 
         // EM_SETCUEBANNER — grey placeholder for a single-line TextBox (no
         // PlaceholderText on .NET Framework 4.8). Mirrors the other BCore forms.
@@ -427,7 +425,6 @@ namespace PDMLite
         private void RunSearch()
         {
             ClearAndDispose(_resultsPanel);
-            _lastCards.Clear();
             if (_btnExport != null) _btnExport.Enabled = false;
 
             string main     = _mainBox.Text.Trim();
@@ -483,8 +480,6 @@ namespace PDMLite
                     cards.Add(new Card
                     {
                         DisplayName  = baseName,
-                        FileName     = string.IsNullOrEmpty(f.FileName)
-                                          ? Path.GetFileName(f.FilePath) : f.FileName,
                         ModelPath    = f.FilePath,
                         ModelExt     = ext,
                         ConfigName   = c.Name,
@@ -495,8 +490,7 @@ namespace PDMLite
                         Revision     = c.Revision,
                         Status       = f.Status,
                         SupersededBy = f.SupersededBy,
-                        DrawingPath  = drawingPath,
-                        Config       = c
+                        DrawingPath  = drawingPath
                     });
                 }
             }
@@ -515,7 +509,6 @@ namespace PDMLite
             }
 
             RenderCards(cards);
-            _lastCards.AddRange(cards);
             if (_btnExport != null) _btnExport.Enabled = true;
 
             _countLabel.ForeColor = cTextGray;
@@ -700,13 +693,39 @@ namespace PDMLite
             }
         }
 
-        // Export the SHOWN result rows (one per config card) to CSV with the
-        // columns the user asked for. Per-config fields come from the matched
-        // ConfigEntry; PartNo/Description/Revision use the card's resolved values
-        // (config value, file-level fallback).
+        // Export to CSV with the columns the user asked for. RE-QUERIES uncapped
+        // (int.MaxValue) so the export is the FULL matching set, not just the ≤50
+        // cards shown on screen (the card list stays capped for UI performance).
+        // One row per matching configuration; per-config fields come from the
+        // config, with PartNo/Description falling back to the file level.
         private void ExportCsv()
         {
-            if (_lastCards.Count == 0) return;
+            string main     = _mainBox.Text.Trim();
+            string drawnBy  = _drawnByBox.Text.Trim();
+            string material = ComboValue(_materialBox);
+            string finish   = ComboValue(_finishBox);
+            string partType = ComboValue(_partTypeBox);
+            if (main.Length == 0 && drawnBy.Length == 0 && material.Length == 0 &&
+                finish.Length == 0 && partType.Length == 0)
+                return;
+
+            List<VaultFile> all;
+            try
+            {
+                bool exTrunc;
+                all = DatabaseManager.SearchFilesAdvanced(
+                    main, drawnBy, material, finish, partType, out exTrunc,
+                    int.MaxValue);
+            }
+            catch
+            {
+                MessageBox.Show("Vault unavailable — could not export.",
+                    "BCore PDM — Export Failed",
+                    MessageBoxButtons.OK, MessageBoxIcon.Error);
+                return;
+            }
+            if (all.Count == 0) return;
+
             using (var sfd = new SaveFileDialog
             {
                 Filter = "CSV files (*.csv)|*.csv|All files (*.*)|*.*",
@@ -717,32 +736,40 @@ namespace PDMLite
                 if (sfd.ShowDialog(this) != DialogResult.OK) return;
                 try
                 {
+                    int rows = 0;
                     var sb = new StringBuilder();
                     sb.AppendLine(string.Join(",", new[]
                     {
                         "File Name", "Part No", "Drawing No", "Description",
                         "Rev", "Material", "Finish", "Drawn By", "Part Type"
                     }));
-                    foreach (var g in _lastCards)
+                    foreach (var f in all)
                     {
-                        var c = g.Config;
-                        sb.AppendLine(string.Join(",", new[]
+                        string fileName = string.IsNullOrEmpty(f.FileName)
+                            ? Path.GetFileName(f.FilePath) : f.FileName;
+                        foreach (var c in f.Configurations)
                         {
-                            Csv(g.FileName),
-                            Csv(g.PartNumber),
-                            Csv(c != null ? c.DrawingNo  : ""),
-                            Csv(g.Description),
-                            Csv(g.Revision),
-                            Csv(c != null ? c.Material   : ""),
-                            Csv(c != null ? c.FinishType : ""),
-                            Csv(c != null ? c.DrawnBy    : ""),
-                            Csv(c != null ? c.PartType   : "")
-                        }));
+                            sb.AppendLine(string.Join(",", new[]
+                            {
+                                Csv(fileName),
+                                Csv(string.IsNullOrEmpty(c.PartNo)
+                                        ? f.PartNumber : c.PartNo),
+                                Csv(c.DrawingNo),
+                                Csv(string.IsNullOrEmpty(c.Description)
+                                        ? f.Description : c.Description),
+                                Csv(c.Revision),
+                                Csv(c.Material),
+                                Csv(c.FinishType),
+                                Csv(c.DrawnBy),
+                                Csv(c.PartType)
+                            }));
+                            rows++;
+                        }
                     }
                     File.WriteAllText(sfd.FileName, sb.ToString());
-                    MessageBox.Show("Exported " + _lastCards.Count +
-                        " row" + (_lastCards.Count == 1 ? "" : "s") + " to:\n" +
-                        sfd.FileName, "BCore PDM — Exported",
+                    MessageBox.Show("Exported " + rows +
+                        " row" + (rows == 1 ? "" : "s") + " to:\n" + sfd.FileName,
+                        "BCore PDM — Exported",
                         MessageBoxButtons.OK, MessageBoxIcon.Information);
                 }
                 catch (Exception ex)
@@ -793,7 +820,6 @@ namespace PDMLite
         private class Card
         {
             public string DisplayName;   // base file name, no extension
-            public string FileName;      // full file name (CSV "File Name")
             public string ModelPath;
             public string ModelExt;
             public string DrawingPath;
@@ -803,7 +829,6 @@ namespace PDMLite
             public string Revision;
             public string Status;
             public string SupersededBy;
-            public ConfigEntry Config;   // the matched config (CSV: DrawingNo/Material/Finish/DrawnBy/PartType)
         }
     }
 }
