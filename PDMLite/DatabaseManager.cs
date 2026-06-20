@@ -2871,14 +2871,42 @@ namespace PDMLite
                                          StringComparison.OrdinalIgnoreCase));
                         if (fr != null)
                         {
+                            // Prefer the component's CONFIG-SPECIFIC identity: a
+                            // multi-config child has a DIFFERENT PartNo/Revision/
+                            // Description per config, and the file-level
+                            // PartNumber/Revision/Description is only the PRIMARY
+                            // config (so without this every config row showed the
+                            // same Part No). Match the child's <Configurations> by
+                            // the referenced config; fall back to the file-level
+                            // value when there's no config block / no match / the
+                            // config value is blank.
+                            XElement cfgEl = null;
+                            string compCfg = (comp.Config ?? "").Trim();
+                            if (compCfg.Length > 0)
+                            {
+                                var cfgsEl = fr.Element("Configurations");
+                                if (cfgsEl != null)
+                                    cfgEl = cfgsEl.Elements("Config").FirstOrDefault(ce =>
+                                        string.Equals(((string)ce.Element("Name") ?? "").Trim(),
+                                            compCfg, StringComparison.OrdinalIgnoreCase));
+                            }
                             if (string.IsNullOrEmpty(cPartNo))
-                                cPartNo = (string)fr.Element("PartNumber") ?? "";
+                            {
+                                string v = cfgEl != null ? ((string)cfgEl.Element("PartNo") ?? "") : "";
+                                cPartNo = string.IsNullOrEmpty(v) ? ((string)fr.Element("PartNumber") ?? "") : v;
+                            }
                             if (string.IsNullOrEmpty(cRev))
-                                cRev = (string)fr.Element("Revision") ?? "";
+                            {
+                                string v = cfgEl != null ? ((string)cfgEl.Element("Revision") ?? "") : "";
+                                cRev = string.IsNullOrEmpty(v) ? ((string)fr.Element("Revision") ?? "") : v;
+                            }
                             if (string.IsNullOrEmpty(cStatus))
-                                cStatus = (string)fr.Element("Status") ?? "";
+                                cStatus = (string)fr.Element("Status") ?? ""; // status is file-level
                             if (string.IsNullOrEmpty(cDesc))
-                                cDesc = (string)fr.Element("Description") ?? "";
+                            {
+                                string v = cfgEl != null ? ((string)cfgEl.Element("Description") ?? "") : "";
+                                cDesc = string.IsNullOrEmpty(v) ? ((string)fr.Element("Description") ?? "") : v;
+                            }
                         }
                     }
 
