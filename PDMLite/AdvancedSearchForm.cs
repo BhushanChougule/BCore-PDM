@@ -38,7 +38,7 @@ namespace PDMLite
         private const int    MaxCards  = 50;
 
         private TextBox  _mainBox, _drawnByBox;
-        private ComboBox _materialBox, _finishBox, _partTypeBox, _statusBox;
+        private ComboBox _materialBox, _finishBox, _partTypeBox, _statusBox, _fileTypeBox;
         private Panel    _resultsPanel;
         private Label    _countLabel;
         private Button   _btnExport;
@@ -224,7 +224,7 @@ namespace PDMLite
             // search bar, not an edge-to-edge field on the wide popup).
             int mainW = S(396);
             _mainBox = MakeTextBox((clientW - mainW) / 2, y, mainW);
-            SetCueBanner(_mainBox, "Part number, description or file name");
+            SetCueBanner(_mainBox, "Part no, drawing no, description or file name");
             filters.Controls.Add(_mainBox);
             y += S(28);
 
@@ -282,13 +282,17 @@ namespace PDMLite
                 typeable: true, cue: "Type or pick a finish");
             AddRow(filters, "Finish", c2LabelX, labelW, ry2, _finishBox);
 
-            // Status (lifecycle) filter on its own row — file-level, a plain
-            // dropdown list with "— Any —" (every PDM lets you scope by state).
+            // Row 3: Status (lifecycle, left) + File Type (Part/Assembly, right)
+            // — both plain dropdown lists with "— Any —".
             int ry3 = ry2 + S(30);
             _statusBox = MakeCombo(c1InputX, ry3, cInputW, new[]
                 { AnyOption, "WIP", "Released", "Locked", "Obsolete" },
                 typeable: false);
             AddRow(filters, "Status", c1LabelX, labelW, ry3, _statusBox);
+
+            _fileTypeBox = MakeCombo(c2InputX, ry3, cInputW, new[]
+                { AnyOption, "Part", "Assembly" }, typeable: false);
+            AddRow(filters, "File Type", c2LabelX, labelW, ry3, _fileTypeBox);
 
             y = ry3 + S(30);
 
@@ -335,6 +339,7 @@ namespace PDMLite
             _finishBox.SelectedIndexChanged   += (s, e) => Schedule();
             _finishBox.TextChanged            += (s, e) => Schedule();
             _statusBox.SelectedIndexChanged   += (s, e) => Schedule();
+            _fileTypeBox.SelectedIndexChanged += (s, e) => Schedule();
             _partTypeBox.SelectedIndexChanged += (s, e) => Schedule();
 
             this.AcceptButton = null; // Enter in a box should not close the form
@@ -454,9 +459,11 @@ namespace PDMLite
             string finish   = ComboValue(_finishBox);
             string partType = ComboValue(_partTypeBox);
             string status   = ComboValue(_statusBox);
+            string fileType = ComboValue(_fileTypeBox);
 
             if (main.Length == 0 && drawnBy.Length == 0 && material.Length == 0 &&
-                finish.Length == 0 && partType.Length == 0 && status.Length == 0)
+                finish.Length == 0 && partType.Length == 0 && status.Length == 0 &&
+                fileType.Length == 0)
             {
                 _countLabel.ForeColor = cTextGray;
                 _countLabel.Text = "Type a term or pick a filter to search.";
@@ -468,7 +475,7 @@ namespace PDMLite
             try
             {
                 results = DatabaseManager.SearchFilesAdvanced(
-                    main, drawnBy, material, finish, partType, status,
+                    main, drawnBy, material, finish, partType, status, fileType,
                     out truncated);
             }
             catch
@@ -823,8 +830,10 @@ namespace PDMLite
             string finish   = ComboValue(_finishBox);
             string partType = ComboValue(_partTypeBox);
             string status   = ComboValue(_statusBox);
+            string fileType = ComboValue(_fileTypeBox);
             if (main.Length == 0 && drawnBy.Length == 0 && material.Length == 0 &&
-                finish.Length == 0 && partType.Length == 0 && status.Length == 0)
+                finish.Length == 0 && partType.Length == 0 && status.Length == 0 &&
+                fileType.Length == 0)
                 return;
 
             List<VaultFile> all;
@@ -832,7 +841,7 @@ namespace PDMLite
             {
                 bool exTrunc;
                 all = DatabaseManager.SearchFilesAdvanced(
-                    main, drawnBy, material, finish, partType, status,
+                    main, drawnBy, material, finish, partType, status, fileType,
                     out exTrunc, int.MaxValue);
             }
             catch

@@ -1772,13 +1772,15 @@ namespace PDMLite
         // at least one must be non-empty (else an empty result).
         //
         //   mainTerm — substring over the file name + file-level PN/Description
-        //              AND the config's PN/Description (the SearchFiles surface)
+        //              AND the config's PN/Description/DrawingNo (so a part is
+        //              findable by its drawing number too)
         //   drawnBy  — substring over the config's DrawnBy (drafter initials)
         //   material — EXACT (case-insensitive) match on the config's Material1
         //   finish   — EXACT match on the config's FinishType
         //   partType — EXACT match on the config's PartType (Manufactured|Purchased)
         //   statusFilter — EXACT match on the FILE status (WIP/Released/Locked/
         //              Obsolete), file-level (all configs share one status)
+        //   fileType — "Part" (.sldprt) | "Assembly" (.sldasm) | "" (either)
         //
         // Returns PARTS/ASSEMBLIES only — the four indexed properties live on the
         // model, not on drawings (the result card's Open DRW still reaches the
@@ -1793,8 +1795,8 @@ namespace PDMLite
         // lock mode; the quick SearchFiles owns orphan cleanup).
         public static List<VaultFile> SearchFilesAdvanced(
             string mainTerm, string drawnBy, string material, string finish,
-            string partType, string statusFilter, out bool truncated,
-            int maxResults = MaxSearchResults)
+            string partType, string statusFilter, string fileType,
+            out bool truncated, int maxResults = MaxSearchResults)
         {
             truncated = false;
             var results = new List<VaultFile>();
@@ -1805,10 +1807,12 @@ namespace PDMLite
             string fin  = (finish   ?? "").Trim();
             string pt   = (partType ?? "").Trim();
             string st   = (statusFilter ?? "").Trim(); // file-level status (WIP/Released/Locked/Obsolete)
+            string ft   = (fileType ?? "").Trim();      // "Part" | "Assembly" | ""
 
             // Nothing to search — every field blank.
             if (main.Length == 0 && drw.Length == 0 && mat.Length == 0 &&
-                fin.Length == 0 && pt.Length == 0 && st.Length == 0)
+                fin.Length == 0 && pt.Length == 0 && st.Length == 0 &&
+                ft.Length == 0)
                 return results;
 
             var seenFileNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
@@ -1841,6 +1845,15 @@ namespace PDMLite
                     catch { }
                     if (ext != ".sldprt" && ext != ".sldasm") continue;
 
+                    // File-type filter (Part / Assembly) from the extension.
+                    if (ft.Length > 0)
+                    {
+                        if (string.Equals(ft, "Part", StringComparison.OrdinalIgnoreCase)
+                                && ext != ".sldprt") continue;
+                        if (string.Equals(ft, "Assembly", StringComparison.OrdinalIgnoreCase)
+                                && ext != ".sldasm") continue;
+                    }
+
                     string filePnL   = ((string)el.Element("PartNumber")  ?? "")
                                           .ToLowerInvariant();
                     string fileDescL = ((string)el.Element("Description") ?? "")
@@ -1861,9 +1874,12 @@ namespace PDMLite
                     var passed = new List<ConfigEntry>();
                     foreach (var c in configs)
                     {
+                        // Main term also matches the config's Drawing No, so a part
+                        // is findable by its drawing number from the main box.
                         bool mainOK = fileMain
                             || (c.PartNo ?? "").ToLowerInvariant().Contains(main)
-                            || (c.Description ?? "").ToLowerInvariant().Contains(main);
+                            || (c.Description ?? "").ToLowerInvariant().Contains(main)
+                            || (c.DrawingNo ?? "").ToLowerInvariant().Contains(main);
                         if (!mainOK) continue;
                         if (drw.Length > 0 &&
                             !(c.DrawnBy ?? "").ToLowerInvariant().Contains(drw))
