@@ -89,3 +89,13 @@ the window, estimate active hours (drop idle gaps), and write the headline + 6�
 - Built supersession: "superseded by" replacement link (picker + display), design-time obsolete-component open warning, reason tooltip.
 - Hardened it: PartNo→filename fallback, "(replaced by X)" history note, re-checking warning, update-already-obsolete, in-app-open warning.
 - Investigating two reported supersession bugs (search-card display + search-open warning) — awaiting a vault.xml check.
+
+### 6/19/2026 · 08:17–19:12 · 17 commits · 6.5 hrs
+**Finished + merged the Obsolete feature (PR #65); built Where Used end-to-end and hardened it through two pre-merge reviews**
+- Finished the Obsolete feature (deferred/forced in-app open warnings, path-based) and merged PR #65.
+- Built the Where Used viewer: Single / All-Levels / Top-Level modes, Qty column, filter box, right-click menu.
+- Added "Export All Levels" to one multi-sheet .xlsx; centered the header, fixed clipping and plural counts.
+- Added a task-pane Where Used button + Find search box; moved Remove from Vault to the dashboard right-click.
+- Made results config/part-number-based (not file-level) using the as-released baselines.
+- Captured each assembly's components at save, so WIP assemblies also filter by the correct config.
+- Fixed the Find dropdown height + selection lag; ran two pre-merge reviews (7 + 4 low findings) and pushed fixes.
