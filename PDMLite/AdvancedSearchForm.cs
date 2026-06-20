@@ -329,7 +329,9 @@ namespace PDMLite
 
             // ── Live search wiring (debounced) ──────────────────────────────
             _timer = new Timer { Interval = 450 };
-            _timer.Tick += (s, e) => { _timer.Stop(); RunSearch(); };
+            // Stop FIRST so a queued WM_TIMER can't re-enter; try/catch so an
+            // unexpected throw on the tick can't escape onto SOLIDWORKS' loop.
+            _timer.Tick += (s, e) => { _timer.Stop(); try { RunSearch(); } catch { } };
             _mainBox.TextChanged    += (s, e) => Schedule();
             _drawnByBox.TextChanged += (s, e) => Schedule();
             // Material/Finish are editable: TextChanged catches typing AND the
@@ -686,6 +688,7 @@ namespace PDMLite
                 if (hasModel)
                     btnModel.Click += (s, e) =>
                     {
+                        _timer.Stop(); // committing to an action — no late tick
                         FileToOpen = modelPath;
                         FileToOpenConfig = configName;
                         OpenDrawing = false;
@@ -705,6 +708,7 @@ namespace PDMLite
                 btnDrawing.FlatAppearance.BorderSize = 0;
                 btnDrawing.Click += (s, e) =>
                 {
+                    _timer.Stop(); // committing to an action — no late tick
                     if (!string.IsNullOrEmpty(drawingPath))
                     {
                         // Drawing exists — open it directly (no config switch).
@@ -792,6 +796,10 @@ namespace PDMLite
                 return;
             var c = _menuCard;
             string fileName = Path.GetFileName(c.ModelPath);
+            // Stop the debounce timer: the nested modal pumps the message loop, so
+            // a queued tick would otherwise re-enter RunSearch and ClearAndDispose
+            // the result cards (one of which owns this modal) mid-show.
+            _timer.Stop();
             try
             {
                 using (var wu = new WhereUsedForm(
@@ -824,6 +832,10 @@ namespace PDMLite
         // config, with PartNo/Description falling back to the file level.
         private void ExportCsv()
         {
+            // Stop the debounce timer: the SaveFileDialog below pumps the message
+            // loop, so a queued tick would otherwise rebuild the result cards
+            // (ClearAndDispose) underneath the open dialog.
+            _timer.Stop();
             string main     = _mainBox.Text.Trim();
             string drawnBy  = _drawnByBox.Text.Trim();
             string material = ComboValue(_materialBox);
@@ -915,11 +927,21 @@ namespace PDMLite
         }
 
         // RFC-4180 escaping + Excel formula-injection guard (house convention).
+        // Excel/LibreOffice execute a cell starting with = + - @ — and ALSO when
+        // it leads with a TAB or CR before such a char — so neutralise all six,
+        // matching AuditLogger/ExportManager/VaultDashboardForm (not the weaker
+        // 4-char guard the older viewers shipped). Vault.xml is engineer-editable,
+        // so these fields are not fully trusted.
         private static string Csv(string field)
         {
             field = field ?? "";
-            if (field.Length > 0 && "=+-@".IndexOf(field[0]) >= 0)
-                field = "'" + field;
+            if (field.Length > 0)
+            {
+                char c0 = field[0];
+                if (c0 == '=' || c0 == '+' || c0 == '-' || c0 == '@' ||
+                    c0 == '\t' || c0 == '\r')
+                    field = "'" + field;
+            }
             if (field.IndexOfAny(new[] { ',', '"', '\n', '\r' }) >= 0)
                 field = "\"" + field.Replace("\"", "\"\"") + "\"";
             return field;

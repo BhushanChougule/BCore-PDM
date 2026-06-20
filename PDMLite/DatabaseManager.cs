@@ -1854,17 +1854,17 @@ namespace PDMLite
                                 && ext != ".sldasm") continue;
                     }
 
-                    string filePnL   = ((string)el.Element("PartNumber")  ?? "")
-                                          .ToLowerInvariant();
-                    string fileDescL = ((string)el.Element("Description") ?? "")
-                                          .ToLowerInvariant();
-                    // A file-level main-term hit (name / file PN / file desc)
-                    // applies to EVERY config (same as the quick search showing
-                    // all configs of a name-matched file).
+                    // A FILENAME hit widens the main term to EVERY config — you
+                    // matched the whole file, mirroring the quick search's card
+                    // expansion (AddModelConfigCards widens on a filename match
+                    // only). File-level PartNumber/Description are deliberately
+                    // NOT folded in: they are just the primary config's values,
+                    // already covered by the per-config loop below, and folding
+                    // them in surfaced SIBLING configs when searching one config's
+                    // own Part No (e.g. "BRK-100" also returned BRK-200) — found
+                    // in the adversarial pre-merge review.
                     bool fileMain = main.Length == 0
-                                 || fileName.ToLowerInvariant().Contains(main)
-                                 || filePnL.Contains(main)
-                                 || fileDescL.Contains(main);
+                                 || fileName.ToLowerInvariant().Contains(main);
 
                     var configs = ReadConfigs(el,
                         (string)el.Element("PartNumber") ?? "",
