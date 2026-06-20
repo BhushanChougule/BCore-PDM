@@ -79,6 +79,7 @@ namespace PDMLite
         private Font _fHeader, _fSection, _fLabel, _fInput, _fHint;
         private Font _fCardBold, _fCardPn, _fCardDesc, _fCardBtn, _fBar;
         private StringFormat _sfBarCenter;
+        private Pen _penBorder; // 1px card outline (shared — no per-paint alloc)
 
         public AdvancedSearchForm()
         {
@@ -100,6 +101,7 @@ namespace PDMLite
                 Alignment     = StringAlignment.Center,
                 LineAlignment = StringAlignment.Center
             };
+            _penBorder = new Pen(cBorder);
 
             BuildUI();
         }
@@ -118,6 +120,7 @@ namespace PDMLite
                 _fCardBold?.Dispose(); _fCardPn?.Dispose(); _fCardDesc?.Dispose();
                 _fCardBtn?.Dispose(); _fBar?.Dispose();
                 _sfBarCenter?.Dispose();
+                _penBorder?.Dispose();
             }
             base.Dispose(disposing);
         }
@@ -424,22 +427,35 @@ namespace PDMLite
 
         private void RenderCards(List<Card> cards)
         {
+            // TWO-COLUMN grid: full-width cards looked stretched and wasted space,
+            // so cards are ~task-pane width and tiled left-to-right, top-to-bottom
+            // — each a white tile with a 1px border, separated by gaps, so two sit
+            // side by side with clear distinction and more fit on screen.
+            //
             // Absolutely-positioned children ignore a panel's Padding, so indent
-            // with an explicit margin. Reserve the vertical scrollbar width up
-            // front: AutoScroll adds the bar AFTER tall content lands, shrinking
-            // ClientSize — sizing cards to the pre-bar width would then trigger a
-            // horizontal scrollbar too.
+            // with explicit margins. Reserve the vertical scrollbar width up front:
+            // AutoScroll adds the bar AFTER tall content lands, shrinking ClientSize
+            // — sizing to the pre-bar width would then trigger a horizontal bar too.
+            const int cols = 2;
             int pad = S(6);
-            int rw = _resultsPanel.ClientSize.Width
-                     - pad * 2 - SystemInformation.VerticalScrollBarWidth;
+            int colGap = S(6);
+            int rowGap = S(6);
+            int totalW = _resultsPanel.ClientSize.Width
+                         - pad * 2 - SystemInformation.VerticalScrollBarWidth;
+            int cardW = (totalW - colGap * (cols - 1)) / cols;
             int barW = S(16);
             int cardH = S(74);
             int contentLeft = barW + S(8);
-            int contentW = rw - contentLeft - S(6);
-            int ry = pad;
+            int contentW = cardW - contentLeft - S(8);
 
-            foreach (Card g in cards)
+            for (int i = 0; i < cards.Count; i++)
             {
+                Card g = cards[i];
+                int col = i % cols;
+                int row = i / cols;
+                int cx = pad + col * (cardW + colGap);
+                int cy = pad + row * (cardH + rowGap);
+
                 Color statusColor = StatusColor(g.Status);
                 string statusText = (string.IsNullOrEmpty(g.Status)
                                         ? "WIP" : g.Status).ToUpper();
@@ -451,8 +467,15 @@ namespace PDMLite
 
                 Panel card = new Panel
                 {
-                    Location = new Point(pad, ry), Width = rw, Height = cardH,
+                    Location = new Point(cx, cy), Width = cardW, Height = cardH,
                     BackColor = cCard, BorderStyle = BorderStyle.None
+                };
+                // 1px outline for clear card-to-card distinction (shared pen).
+                card.Paint += (s, e) =>
+                {
+                    var p = (Panel)s;
+                    e.Graphics.DrawRectangle(_penBorder, 0, 0,
+                        p.Width - 1, p.Height - 1);
                 };
 
                 // ── Rotated status bar ──
@@ -573,16 +596,7 @@ namespace PDMLite
                 };
                 card.Controls.Add(btnDrawing);
 
-                // ── Divider ──
-                card.Controls.Add(new Panel
-                {
-                    BackColor = cBorder,
-                    Location = new Point(0, cardH - S(1)),
-                    Width = rw, Height = S(1)
-                });
-
                 _resultsPanel.Controls.Add(card);
-                ry += cardH + S(2);
             }
         }
 
