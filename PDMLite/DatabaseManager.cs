@@ -3008,7 +3008,9 @@ namespace PDMLite
             string childFull;
             try { childFull = Path.GetFullPath(childFilePath); }
             catch { childFull = childFilePath; }
-            string childName = Path.GetFileName(childFilePath);
+            string childName;
+            try { childName = Path.GetFileName(childFilePath); }
+            catch { childName = childFilePath ?? ""; }   // bad path char → degrade, don't abort
             string target = targetConfig.Trim();
 
             // Classify one parent from a set of component elements (each carrying a
@@ -3052,12 +3054,14 @@ namespace PDMLite
                     {
                         var compsEl = fileEl.Element("Components");
                         if (compsEl == null) continue;
+                        var comps = compsEl.Elements("Comp").ToList();
+                        if (comps.Count == 0) continue;  // empty block (hand-edited) → let baseline handle
                         string ap = (string)fileEl.Element("FilePath") ?? "";
                         if (ap.Length == 0) continue;
                         string apFull;
                         try { apFull = Path.GetFullPath(ap); } catch { apFull = ap; }
                         covered.Add(apFull); // has current data — baseline must not override
-                        classify(apFull, compsEl.Elements("Comp"));
+                        classify(apFull, comps);
                     }
 
                 // PASS 2 — BASELINE fallback, only for assemblies with no
@@ -3084,7 +3088,14 @@ namespace PDMLite
                         string apFull;
                         try { apFull = Path.GetFullPath(kv.Key); } catch { apFull = kv.Key; }
                         if (covered.Contains(apFull)) continue; // current data wins
-                        classify(apFull, kv.Value.Elements("Component"));
+                        // DIRECT (Level 0) baseline components only — mirror the
+                        // top-level <Components> snapshot, so a child used by a
+                        // DEEPER sub-assembly can't false-classify this direct parent.
+                        classify(apFull, kv.Value.Elements("Component").Where(c =>
+                        {
+                            int lv; int.TryParse((string)c.Attribute("Level"), out lv);
+                            return lv == 0;
+                        }));
                     }
                 }
             }

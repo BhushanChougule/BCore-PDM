@@ -2849,11 +2849,14 @@ namespace PDMLite
         // stored in the assembly itself, so loading the child models is unnecessary
         // (that resolve is the expensive call, and we deliberately avoid it to keep
         // saves fast). Instances grouped by path+config with a Qty. Suppressed
-        // components are skipped (GetSuppression2, NOT IsSuppressed — same rule as
-        // the BOM/baseline), so the snapshot agrees with the baseline. Best-effort
-        // + non-fatal: any failure → empty list, and the post-save upsert then
-        // PRESERVES the previous snapshot. Powers config-accurate Where Used for WIP
-        // assemblies (which have no baseline yet). Assemblies only.
+        // components are skipped (GetSuppression2, NOT IsSuppressed). NOTE: unlike
+        // the BOM/baseline this does NOT skip Toolbox / ExcludeFromBOM — for
+        // WHERE-USED that is intentional (you should still find where a hardware/
+        // jig part is used), so a Toolbox child can classify here but is absent
+        // from a released baseline; harmless since such parts are single-config
+        // (no config filtering). Best-effort + non-fatal: any failure → empty list,
+        // and the post-save upsert then PRESERVES the previous snapshot. Powers
+        // config-accurate Where Used for WIP assemblies (no baseline yet). Asm only.
         public static List<ComponentRef> GetTopLevelComponentConfigs(ModelDoc2 doc)
         {
             var list = new List<ComponentRef>();
@@ -2959,7 +2962,11 @@ namespace PDMLite
                         }
                     }
                     if (!referencesTarget) continue;
-                    if (!seen.Add(asmFull)) continue;
+                    // Dedupe by FILENAME (the vault enforces vault-wide unique
+                    // names), so a legacy RELEASED-copy / double record can't list
+                    // the same assembly twice. (Full-path dedupe would let both the
+                    // WIP record and a legacy RELEASED-copy record through.)
+                    if (!seen.Add(Path.GetFileName(asmPath))) continue;
                     // Drop a parent only when its baseline PROVES it uses a
                     // different config; keep verified-matches and unverified
                     // (no-baseline) parents — never hide a possible real usage.
@@ -3196,11 +3203,15 @@ namespace PDMLite
         {
             var map = new Dictionary<string, List<WhereUsedEntry>>(
                 StringComparer.OrdinalIgnoreCase);
+            // Dedupe assemblies by FILENAME (vault-wide unique) so a legacy
+            // RELEASED-copy / double record can't add the same parent twice.
+            var seenAsmNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
             foreach (string asmPath in
                      DatabaseManager.GetTrackedFilePathsByExtension(".sldasm"))
             {
                 if (!File.Exists(asmPath)) continue;
+                if (!seenAsmNames.Add(Path.GetFileName(asmPath))) continue;
                 string asmFull;
                 try { asmFull = Path.GetFullPath(asmPath); }
                 catch { asmFull = asmPath; }

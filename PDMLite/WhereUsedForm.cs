@@ -159,6 +159,24 @@ namespace PDMLite
             SeedFindBox();   // autofill the Find box with the subject's Part No
         }
 
+        // House convention (cf. PendingRequestsForm/BulkReleaseForm): release the
+        // timer, menu and fonts in Dispose(bool), NOT FormClosed — FormClosed never
+        // fires for a form constructed but disposed without being shown, so the
+        // fonts/timer/menu would leak on any such path. All current callers
+        // ShowDialog inside a using, so this runs reliably.
+        protected override void Dispose(bool disposing)
+        {
+            if (disposing)
+            {
+                _findTimer?.Stop(); _findTimer?.Dispose();
+                _rowMenu?.Dispose();
+                _fHeader?.Dispose(); _fSub?.Dispose(); _fMeta?.Dispose();
+                _fHint?.Dispose(); _fBtn?.Dispose(); _fGrid?.Dispose();
+                _fGridHead?.Dispose();
+            }
+            base.Dispose(disposing);
+        }
+
         private void BuildUI()
         {
             this.Text = "BCore PDM — Where Used";
@@ -388,14 +406,6 @@ namespace PDMLite
             LayoutFilter();
             LayoutBottom();
 
-            this.FormClosed += (s, e) =>
-            {
-                _findTimer?.Stop(); _findTimer?.Dispose();
-                _rowMenu?.Dispose();
-                _fHeader?.Dispose(); _fSub?.Dispose(); _fMeta?.Dispose();
-                _fHint?.Dispose(); _fBtn?.Dispose(); _fGrid?.Dispose();
-                _fGridHead?.Dispose();
-            };
             // Esc dismisses the Find dropdown first (if up), only then closes.
             this.KeyDown += (s, e) =>
             {
@@ -750,6 +760,9 @@ namespace PDMLite
 
         private void HideFindResults()
         {
+            // Cancel any pending debounced search so a queued tick can't re-show
+            // the overlay after the user dismissed it (grid click / Esc / deactivate).
+            _findTimer?.Stop();
             if (_findResults != null) _findResults.Visible = false;
         }
 
@@ -987,6 +1000,9 @@ namespace PDMLite
             try
             {
                 string toOpen = null;
+                // Drilling up shows the PARENT assembly's own where-used, which is
+                // file-level (config=null): the parent isn't a configuration of
+                // anything, so no leaf-config context carries up — intentional.
                 using (var v = new WhereUsedForm(entry.Path, entry.Name, entry.PartNo))
                 {
                     v.ShowDialog(this);
