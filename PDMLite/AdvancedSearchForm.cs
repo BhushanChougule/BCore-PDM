@@ -269,17 +269,18 @@ namespace PDMLite
                 typeable: true, cue: "Type or pick a material");
             AddRow(filters, "Material", c2LabelX, labelW, ry1, _materialBox);
 
-            _finishBox = MakeCombo(c1InputX, ry2, cInputW,
-                BuildOptions(PropertyForm.FinishTypeOptions(), includeAny: false),
-                typeable: true, cue: "Type or pick a finish");
-            AddRow(filters, "Finish", c1LabelX, labelW, ry2, _finishBox);
-
+            // Row 2: Part Type under Drawn By (left), Finish under Material (right).
             // Part Type is just two values — a plain dropdown list with "— Any —"
             // (a DropDownList has no edit box, so no cue banner / typing).
-            _partTypeBox = MakeCombo(c2InputX, ry2, cInputW,
+            _partTypeBox = MakeCombo(c1InputX, ry2, cInputW,
                 BuildOptions(PropertyForm.PartTypeOptions(), includeAny: true),
                 typeable: false);
-            AddRow(filters, "Part Type", c2LabelX, labelW, ry2, _partTypeBox);
+            AddRow(filters, "Part Type", c1LabelX, labelW, ry2, _partTypeBox);
+
+            _finishBox = MakeCombo(c2InputX, ry2, cInputW,
+                BuildOptions(PropertyForm.FinishTypeOptions(), includeAny: false),
+                typeable: true, cue: "Type or pick a finish");
+            AddRow(filters, "Finish", c2LabelX, labelW, ry2, _finishBox);
 
             // Status (lifecycle) filter on its own row — file-level, a plain
             // dropdown list with "— Any —" (every PDM lets you scope by state).
