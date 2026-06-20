@@ -140,7 +140,10 @@ namespace PDMLite
             this.MinimizeBox = false;
             this.BackColor = cBg;
             this.KeyPreview = true;
-            this.ClientSize = new Size(S(648), S(664));
+            // Height = header(30) + filters(176) + bottom(42) + a results area
+            // sized to EXACTLY 5 card rows (no 6th row peeking): 5*cardH(74) +
+            // 4*rowGap(6) + top pad(6) = 400, viewport ~404 hides row 6 cleanly.
+            this.ClientSize = new Size(S(648), S(652));
 
             int clientW = ClientSize.Width;
             int margin  = S(14);
@@ -185,7 +188,7 @@ namespace PDMLite
 
             // Centred main search box (narrower than the form so it reads as a
             // search bar, not an edge-to-edge field on the wide popup).
-            int mainW = S(440);
+            int mainW = S(396);
             _mainBox = MakeTextBox((clientW - mainW) / 2, y, mainW);
             SetCueBanner(_mainBox, "Part number, description or file name");
             filters.Controls.Add(_mainBox);
@@ -222,16 +225,20 @@ namespace PDMLite
             SetCueBanner(_drawnByBox, "e.g. BC");
             AddRow(filters, "Drawn By", c1LabelX, labelW, ry1, _drawnByBox);
 
+            // Material + Finish are TYPE-TO-NARROW combos (editable + autocomplete
+            // over the list) — the material list will grow long, so typing filters
+            // the dropdown suggestions; the user still picks a real list value.
             _materialBox = MakeCombo(c2InputX, ry1, cInputW,
-                BuildOptions(PropertyForm.MaterialOptions()));
+                BuildOptions(PropertyForm.MaterialOptions()), typeable: true);
             AddRow(filters, "Material", c2LabelX, labelW, ry1, _materialBox);
 
             _finishBox = MakeCombo(c1InputX, ry2, cInputW,
-                BuildOptions(PropertyForm.FinishTypeOptions()));
+                BuildOptions(PropertyForm.FinishTypeOptions()), typeable: true);
             AddRow(filters, "Finish", c1LabelX, labelW, ry2, _finishBox);
 
+            // Part Type is just two values — a plain dropdown list (no typing).
             _partTypeBox = MakeCombo(c2InputX, ry2, cInputW,
-                BuildOptions(PropertyForm.PartTypeOptions()));
+                BuildOptions(PropertyForm.PartTypeOptions()), typeable: false);
             AddRow(filters, "Part Type", c2LabelX, labelW, ry2, _partTypeBox);
 
             y = ry2 + S(30);
@@ -265,8 +272,12 @@ namespace PDMLite
             _timer.Tick += (s, e) => { _timer.Stop(); RunSearch(); };
             _mainBox.TextChanged    += (s, e) => Schedule();
             _drawnByBox.TextChanged += (s, e) => Schedule();
+            // Material/Finish are editable: TextChanged catches typing AND the
+            // autocomplete pick; SelectedIndexChanged catches the dropdown arrow.
             _materialBox.SelectedIndexChanged += (s, e) => Schedule();
+            _materialBox.TextChanged          += (s, e) => Schedule();
             _finishBox.SelectedIndexChanged   += (s, e) => Schedule();
+            _finishBox.TextChanged            += (s, e) => Schedule();
             _partTypeBox.SelectedIndexChanged += (s, e) => Schedule();
 
             this.AcceptButton = null; // Enter in a box should not close the form
@@ -302,18 +313,28 @@ namespace PDMLite
             };
         }
 
-        private ComboBox MakeCombo(int x, int y, int w, string[] items)
+        // typeable = an editable combo with autocomplete over its own list items
+        // (type to narrow the dropdown, still pick a real value). Non-typeable is
+        // a plain dropdown list. FlatStyle is left at the default (Standard) — the
+        // old FlatStyle.Flat rendered a tiny dot-sized arrow.
+        private ComboBox MakeCombo(int x, int y, int w, string[] items,
+            bool typeable)
         {
             var cb = new ComboBox
             {
                 Font = _fInput, Width = w,
                 Location = new Point(x, y),
-                DropDownStyle = ComboBoxStyle.DropDownList,
-                FlatStyle = FlatStyle.Flat
+                DropDownStyle = typeable
+                    ? ComboBoxStyle.DropDown : ComboBoxStyle.DropDownList
             };
             cb.Items.AddRange(items);
             cb.SelectedIndex = 0; // "— Any —"
             cb.MaxDropDownItems = 16;
+            if (typeable)
+            {
+                cb.AutoCompleteMode = AutoCompleteMode.Suggest;
+                cb.AutoCompleteSource = AutoCompleteSource.ListItems;
+            }
             return cb;
         }
 
@@ -340,11 +361,22 @@ namespace PDMLite
             host.Controls.Add(input);
         }
 
-        // A combo's filter value: "— Any —" (index 0) means no filter.
+        // A combo's filter value. "— Any —" or empty means no filter. Reads the
+        // TEXT (not SelectedItem) so an editable combo's typed/autocomplete-picked
+        // value is honoured. For an editable combo a mid-type PARTIAL ("STEE")
+        // that doesn't yet match a real list value is treated as "no filter" — so
+        // typing just narrows the dropdown without flashing "no results" until a
+        // full value is chosen; the match itself stays exact.
         private static string ComboValue(ComboBox cb)
         {
-            if (cb.SelectedIndex <= 0) return "";
-            return cb.SelectedItem?.ToString() ?? "";
+            string t = (cb.Text ?? "").Trim();
+            if (t.Length == 0 ||
+                string.Equals(t, AnyOption, StringComparison.Ordinal))
+                return "";
+            if (cb.DropDownStyle == ComboBoxStyle.DropDown &&
+                cb.FindStringExact(t) < 0)
+                return ""; // partial mid-type — not a committed filter yet
+            return t;
         }
 
         private void RunSearch()
