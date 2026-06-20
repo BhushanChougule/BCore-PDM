@@ -140,7 +140,7 @@ namespace PDMLite
             this.MinimizeBox = false;
             this.BackColor = cBg;
             this.KeyPreview = true;
-            this.ClientSize = new Size(S(440), S(640));
+            this.ClientSize = new Size(S(648), S(664));
 
             int clientW = ClientSize.Width;
             int margin  = S(14);
@@ -174,16 +174,19 @@ namespace PDMLite
             bottom.Controls.Add(btnClose);
             this.Controls.Add(bottom);
 
-            // ── Filters panel (Top) ────────────────────────────────────────
+            // ── Filters panel (Top) — centred search + a 2×2 refine grid ─────
             var filters = new Panel
             {
-                Dock = DockStyle.Top, Height = S(232), BackColor = cBg
+                Dock = DockStyle.Top, Height = S(176), BackColor = cBg
             };
 
             int y = S(8);
             filters.Controls.Add(MakeSection("SEARCH", margin, ref y, innerW));
 
-            _mainBox = MakeTextBox(margin, y, innerW);
+            // Centred main search box (narrower than the form so it reads as a
+            // search bar, not an edge-to-edge field on the wide popup).
+            int mainW = S(440);
+            _mainBox = MakeTextBox((clientW - mainW) / 2, y, mainW);
             SetCueBanner(_mainBox, "Part number, description or file name");
             filters.Controls.Add(_mainBox);
             y += S(28);
@@ -193,42 +196,53 @@ namespace PDMLite
                 Text = "Type a term, then refine with the filters below.",
                 Font = _fHint, ForeColor = cTextLight,
                 Location = new Point(margin, y),
-                AutoSize = false, Width = innerW, Height = S(14)
+                AutoSize = false, Width = innerW, Height = S(14),
+                TextAlign = ContentAlignment.MiddleCenter
             });
             y += S(18);
 
             filters.Controls.Add(MakeSection("REFINE", margin, ref y, innerW));
 
-            int labelW  = S(76);
-            int inputX  = margin + labelW + S(6);
-            int inputW  = clientW - margin - inputX;
+            // 2×2 grid: Drawn By + Material on row 1, Finish + Part Type on row 2
+            // — half the vertical space of four stacked rows, leaving more room
+            // for result cards.
+            int colGap2 = S(20);
+            int colW    = (innerW - colGap2) / 2;
+            int labelW  = S(70);
+            int c1LabelX = margin;
+            int c1InputX = margin + labelW + S(6);
+            int c2LabelX = margin + colW + colGap2;
+            int c2InputX = c2LabelX + labelW + S(6);
+            int cInputW  = colW - labelW - S(6);
 
-            _drawnByBox = MakeTextBox(inputX, y, inputW);
+            int ry1 = y;
+            int ry2 = y + S(30);
+
+            _drawnByBox = MakeTextBox(c1InputX, ry1, cInputW);
             SetCueBanner(_drawnByBox, "e.g. BC");
-            AddRow(filters, "Drawn By", margin, labelW, y, _drawnByBox);
-            y += S(30);
+            AddRow(filters, "Drawn By", c1LabelX, labelW, ry1, _drawnByBox);
 
-            _materialBox = MakeCombo(inputX, y, inputW,
+            _materialBox = MakeCombo(c2InputX, ry1, cInputW,
                 BuildOptions(PropertyForm.MaterialOptions()));
-            AddRow(filters, "Material", margin, labelW, y, _materialBox);
-            y += S(30);
+            AddRow(filters, "Material", c2LabelX, labelW, ry1, _materialBox);
 
-            _finishBox = MakeCombo(inputX, y, inputW,
+            _finishBox = MakeCombo(c1InputX, ry2, cInputW,
                 BuildOptions(PropertyForm.FinishTypeOptions()));
-            AddRow(filters, "Finish", margin, labelW, y, _finishBox);
-            y += S(30);
+            AddRow(filters, "Finish", c1LabelX, labelW, ry2, _finishBox);
 
-            _partTypeBox = MakeCombo(inputX, y, inputW,
+            _partTypeBox = MakeCombo(c2InputX, ry2, cInputW,
                 BuildOptions(PropertyForm.PartTypeOptions()));
-            AddRow(filters, "Part Type", margin, labelW, y, _partTypeBox);
-            y += S(32);
+            AddRow(filters, "Part Type", c2LabelX, labelW, ry2, _partTypeBox);
+
+            y = ry2 + S(30);
 
             _countLabel = new Label
             {
                 Text = "Type a term or pick a filter to search.",
                 Font = _fHint, ForeColor = cTextGray,
                 Location = new Point(margin, y),
-                AutoSize = false, Width = innerW, Height = S(16)
+                AutoSize = false, Width = innerW, Height = S(16),
+                TextAlign = ContentAlignment.MiddleCenter
             };
             filters.Controls.Add(_countLabel);
 
@@ -270,7 +284,8 @@ namespace PDMLite
             {
                 Text = text, Font = _fSection, ForeColor = cTextGray,
                 Location = new Point(x, y),
-                AutoSize = false, Width = w, Height = S(16)
+                AutoSize = false, Width = w, Height = S(16),
+                TextAlign = ContentAlignment.MiddleCenter
             };
             y += S(18);
             return lbl;
@@ -427,16 +442,17 @@ namespace PDMLite
 
         private void RenderCards(List<Card> cards)
         {
-            // TWO-COLUMN grid: full-width cards looked stretched and wasted space,
-            // so cards are ~task-pane width and tiled left-to-right, top-to-bottom
-            // — each a white tile with a 1px border, separated by gaps, so two sit
-            // side by side with clear distinction and more fit on screen.
+            // THREE-COLUMN grid: full-width cards looked stretched and wasted
+            // space, so cards are ~task-pane width and tiled left-to-right,
+            // top-to-bottom — each a white tile with a 1px border, separated by
+            // gaps, so three sit per row with clear distinction and many fit
+            // on screen (the form is sized for 5 rows × 3 = 15 cards).
             //
             // Absolutely-positioned children ignore a panel's Padding, so indent
             // with explicit margins. Reserve the vertical scrollbar width up front:
             // AutoScroll adds the bar AFTER tall content lands, shrinking ClientSize
             // — sizing to the pre-bar width would then trigger a horizontal bar too.
-            const int cols = 2;
+            const int cols = 3;
             int pad = S(6);
             int colGap = S(6);
             int rowGap = S(6);
