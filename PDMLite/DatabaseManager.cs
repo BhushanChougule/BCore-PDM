@@ -15,6 +15,16 @@ namespace PDMLite
         public string Description { get; set; }
         public string DrawingNo   { get; set; }
         public string Revision    { get; set; }
+        // Extra properties indexed PER CONFIG for the Advanced (property-wide)
+        // search popup — Material / Finish / DrawnBy (drafter) / PartType
+        // (Manufactured|Purchased). Captured at save time (SwAddin.OnSavePost)
+        // and round-tripped through the <Config> block; empty on legacy records
+        // until re-saved (graceful — no migration). NOT part of the file's
+        // identity, so they never gate a save or feed the quick-find box.
+        public string Material    { get; set; }
+        public string FinishType  { get; set; }
+        public string DrawnBy     { get; set; }
+        public string PartType    { get; set; }
     }
 
     // One DIRECT child of an assembly, captured at SAVE time (the assembly is open
@@ -581,7 +591,12 @@ namespace PDMLite
                     new XElement("PartNo",       c.PartNo      ?? ""),
                     new XElement("Description",  c.Description ?? ""),
                     new XElement("DrawingNo",    c.DrawingNo   ?? ""),
-                    new XElement("Revision",     c.Revision    ?? "")
+                    new XElement("Revision",     c.Revision    ?? ""),
+                    // Indexed for the Advanced (property-wide) search.
+                    new XElement("Material",     c.Material    ?? ""),
+                    new XElement("FinishType",   c.FinishType  ?? ""),
+                    new XElement("DrawnBy",      c.DrawnBy     ?? ""),
+                    new XElement("PartType",     c.PartType    ?? "")
                 ));
             return el;
         }
@@ -617,7 +632,12 @@ namespace PDMLite
                         PartNo      = (string)c.Element("PartNo")      ?? "",
                         Description = (string)c.Element("Description") ?? "",
                         DrawingNo   = (string)c.Element("DrawingNo")   ?? "",
-                        Revision    = (string)c.Element("Revision")    ?? ""
+                        Revision    = (string)c.Element("Revision")    ?? "",
+                        // Advanced-search index (empty on legacy records).
+                        Material    = (string)c.Element("Material")    ?? "",
+                        FinishType  = (string)c.Element("FinishType")  ?? "",
+                        DrawnBy     = (string)c.Element("DrawnBy")     ?? "",
+                        PartType    = (string)c.Element("PartType")    ?? ""
                     });
                 return list;
             }
@@ -1738,6 +1758,157 @@ namespace PDMLite
             foreach (var p in purged)
                 AuditLogger.Log("AutoPurgeOrphan", "system", p.FileName,
                     p.PartNumber, p.Revision, "file missing on disk");
+
+            return results;
+        }
+
+        // Advanced (property-wide) search backing the AdvancedSearchForm popup.
+        // Unlike the quick SearchFiles (one box, OR over PN/Description/FileName)
+        // this AND-combines whatever fields the user filled and matches them PER
+        // CONFIGURATION — so the quick-find box is never flooded with low-
+        // cardinality category hits (typing "ste" no longer drags in every STEEL
+        // part; that noise is exactly why property search lives behind its own
+        // popup). Each filled field NARROWS the result; an empty field is ignored;
+        // at least one must be non-empty (else an empty result).
+        //
+        //   mainTerm — substring over the file name + file-level PN/Description
+        //              AND the config's PN/Description (the SearchFiles surface)
+        //   drawnBy  — substring over the config's DrawnBy (drafter initials)
+        //   material — EXACT (case-insensitive) match on the config's Material1
+        //   finish   — EXACT match on the config's FinishType
+        //   partType — EXACT match on the config's PartType (Manufactured|Purchased)
+        //
+        // Returns PARTS/ASSEMBLIES only — the four indexed properties live on the
+        // model, not on drawings (the result card's Open DRW still reaches the
+        // drawing via the DrawingIndex). Each returned file's Configurations list
+        // is TRIMMED to only the configs that passed every active filter, so the
+        // popup renders exactly the matching config cards, never "all configs of a
+        // file that matched". Capped at MaxSearchResults files (truncated=true when
+        // more matched). READ-ONLY: orphans (file gone on disk) are skipped when
+        // the share is reachable but NEVER purged (no write — safe in degraded-
+        // lock mode; the quick SearchFiles owns orphan cleanup).
+        public static List<VaultFile> SearchFilesAdvanced(
+            string mainTerm, string drawnBy, string material, string finish,
+            string partType, out bool truncated)
+        {
+            truncated = false;
+            var results = new List<VaultFile>();
+
+            string main = (mainTerm ?? "").ToLowerInvariant().Trim();
+            string drw  = (drawnBy  ?? "").ToLowerInvariant().Trim();
+            string mat  = (material ?? "").Trim();
+            string fin  = (finish   ?? "").Trim();
+            string pt   = (partType ?? "").Trim();
+
+            // Nothing to search — every field blank.
+            if (main.Length == 0 && drw.Length == 0 && mat.Length == 0 &&
+                fin.Length == 0 && pt.Length == 0)
+                return results;
+
+            var seenFileNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+            lock (_lock) using (AcquireProcessLock())
+            {
+                var doc = LoadOrCreate();
+
+                // Only treat a file as orphaned (skip it) when the share is
+                // provably reachable; with the network down File.Exists returns
+                // false for everything and would hide the whole vault.
+                bool shareUp = false;
+                try { shareUp = Directory.Exists(WipRoot); } catch { }
+
+                foreach (var el in doc.Root.Element("Files").Elements("File"))
+                {
+                    string status = (string)el.Element("Status") ?? "";
+                    if (string.IsNullOrEmpty(status)) continue;
+
+                    string fileName = (string)el.Element("FileName") ?? "";
+
+                    // Parts / assemblies only — the indexed props live on models.
+                    string ext = "";
+                    try { ext = Path.GetExtension(fileName).ToLowerInvariant(); }
+                    catch { }
+                    if (ext != ".sldprt" && ext != ".sldasm") continue;
+
+                    string filePnL   = ((string)el.Element("PartNumber")  ?? "")
+                                          .ToLowerInvariant();
+                    string fileDescL = ((string)el.Element("Description") ?? "")
+                                          .ToLowerInvariant();
+                    // A file-level main-term hit (name / file PN / file desc)
+                    // applies to EVERY config (same as the quick search showing
+                    // all configs of a name-matched file).
+                    bool fileMain = main.Length == 0
+                                 || fileName.ToLowerInvariant().Contains(main)
+                                 || filePnL.Contains(main)
+                                 || fileDescL.Contains(main);
+
+                    var configs = ReadConfigs(el,
+                        (string)el.Element("PartNumber") ?? "",
+                        (string)el.Element("Description") ?? "",
+                        (string)el.Element("Revision") ?? "");
+
+                    var passed = new List<ConfigEntry>();
+                    foreach (var c in configs)
+                    {
+                        bool mainOK = fileMain
+                            || (c.PartNo ?? "").ToLowerInvariant().Contains(main)
+                            || (c.Description ?? "").ToLowerInvariant().Contains(main);
+                        if (!mainOK) continue;
+                        if (drw.Length > 0 &&
+                            !(c.DrawnBy ?? "").ToLowerInvariant().Contains(drw))
+                            continue;
+                        if (mat.Length > 0 &&
+                            !string.Equals((c.Material ?? "").Trim(), mat,
+                                StringComparison.OrdinalIgnoreCase))
+                            continue;
+                        if (fin.Length > 0 &&
+                            !string.Equals((c.FinishType ?? "").Trim(), fin,
+                                StringComparison.OrdinalIgnoreCase))
+                            continue;
+                        if (pt.Length > 0 &&
+                            !string.Equals((c.PartType ?? "").Trim(), pt,
+                                StringComparison.OrdinalIgnoreCase))
+                            continue;
+                        passed.Add(c);
+                    }
+                    if (passed.Count == 0) continue;
+
+                    // Orphan skip (no purge — this is a read-only search).
+                    string filePath = (string)el.Element("FilePath") ?? "";
+                    bool missing = string.IsNullOrEmpty(filePath);
+                    if (!missing && shareUp && !File.Exists(filePath))
+                    {
+                        try
+                        {
+                            missing = Directory.Exists(
+                                Path.GetDirectoryName(filePath));
+                        }
+                        catch { }
+                    }
+                    if (missing) continue;
+
+                    // Dedupe by filename (legacy double-records / RELEASED copies).
+                    if (!seenFileNames.Add(fileName)) continue;
+
+                    if (results.Count >= MaxSearchResults)
+                    {
+                        truncated = true;
+                        break;
+                    }
+
+                    results.Add(new VaultFile
+                    {
+                        FilePath     = filePath,
+                        FileName     = fileName,
+                        PartNumber   = (string)el.Element("PartNumber")  ?? "",
+                        Description  = (string)el.Element("Description") ?? "",
+                        Status       = status,
+                        Revision     = (string)el.Element("Revision")    ?? "",
+                        SupersededBy = (string)el.Element("SupersededBy") ?? "",
+                        Configurations = passed   // TRIMMED to the matching configs
+                    });
+                }
+            }
 
             return results;
         }

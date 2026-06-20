@@ -32,6 +32,7 @@ namespace PDMLite
         private Button _btnRequests;
         private int _pendingCount;
         private Timer _searchTimer;
+        private ToolTip _searchHeaderTip;
 
         private float _scale = 1f;
 
@@ -98,6 +99,7 @@ namespace PDMLite
             {
                 _searchTimer?.Stop();
                 _searchTimer?.Dispose();
+                _searchHeaderTip?.Dispose();
                 _fBold38?.Dispose();
                 _fBold35?.Dispose();
                 _fBold34?.Dispose();
@@ -204,7 +206,18 @@ namespace PDMLite
 
             // ── Search Section ────────────────────────────────────────
             y += S(8);
-            this.Controls.Add(MakeSectionHeader("SEARCH FILES", fSection, x, y, w));
+            // The quick search box below is a clean PartNo/Description/FileName
+            // quick-find. Property-wide search (Material/Finish/DrawnBy/PartType)
+            // lives behind a popup so it never floods this box with category hits
+            // — DOUBLE-CLICK this header to open it (tooltip advertises it).
+            Label searchHeader =
+                MakeSectionHeader("SEARCH FILES", fSection, x, y, w);
+            searchHeader.Cursor = Cursors.Hand;
+            searchHeader.DoubleClick += (s, e) => OpenAdvancedSearch();
+            _searchHeaderTip = new ToolTip();
+            _searchHeaderTip.SetToolTip(searchHeader,
+                "Double-click for Advanced Search (Material, Finish, Drawn By, Part Type)");
+            this.Controls.Add(searchHeader);
             y += S(20);
 
             Panel searchCard = new Panel
@@ -999,6 +1012,32 @@ namespace PDMLite
             ModelDoc2 model = PDMLiteAddin.SwApp
                 ?.GetOpenDocumentByName(modelPath) as ModelDoc2;
             if (model != null) VaultManager.OpenOrCreateDrawing(model);
+        }
+
+        // Advanced (property-wide) search popup — opened by double-clicking the
+        // "SEARCH FILES" header. The popup is modal and self-contained; it sets a
+        // file to open and closes, and we open it AFTER the modal closes (deferred
+        // open, mirroring the Vault Dashboard / Where Used pattern) so the open
+        // doesn't race the modal teardown.
+        private void OpenAdvancedSearch()
+        {
+            try
+            {
+                using (var f = new AdvancedSearchForm())
+                {
+                    if (f.ShowDialog() != DialogResult.OK) return;
+                    if (f.OpenDrawing)
+                        // Open the model on its config, then open/create its drawing.
+                        OpenDrawingResult(f.FileToOpen, null, f.FileToOpenConfig);
+                    else if (!string.IsNullOrEmpty(f.FileToOpen))
+                        OpenFileConfig(f.FileToOpen, f.FileToOpenConfig);
+                }
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show("Advanced Search could not complete:\n" + ex.Message,
+                    "BCore PDM", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            }
         }
 
         // Open (or activate, if already open) a model and switch it to the

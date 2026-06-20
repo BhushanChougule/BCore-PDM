@@ -1211,7 +1211,15 @@ namespace PDMLite
                             PartNo      = PropertyValidator.GetProperty(doc, "PartNo",      cfgName),
                             Description = PropertyValidator.GetProperty(doc, "Description", cfgName),
                             DrawingNo   = PropertyValidator.GetProperty(doc, "DrawingNo",   cfgName),
-                            Revision    = PropertyValidator.GetProperty(doc, "Revision",    cfgName)
+                            Revision    = PropertyValidator.GetProperty(doc, "Revision",    cfgName),
+                            // Indexed per config for the Advanced (property-wide)
+                            // search popup. Material's property name is Material1;
+                            // the others match their property names. Stored, not
+                            // part of the file's identity.
+                            Material    = PropertyValidator.GetProperty(doc, "Material1",   cfgName),
+                            FinishType  = PropertyValidator.GetProperty(doc, "FinishType",  cfgName),
+                            DrawnBy     = PropertyValidator.GetProperty(doc, "DrawnBy",     cfgName),
+                            PartType    = PropertyValidator.GetProperty(doc, "PartType",    cfgName)
                         });
                     }
                     vf.Configurations = configs;
