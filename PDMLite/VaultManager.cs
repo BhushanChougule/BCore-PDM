@@ -2926,7 +2926,7 @@ namespace PDMLite
             // null when no target PN ⇒ file-level (every config), as before.
             var usage = BuildConfigUsage(filePath, targetPartNo);
             var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-            var qtyCache = new Dictionary<string, Dictionary<string, int>>(
+            var qtyCache = new Dictionary<string, DatabaseManager.ComponentQtyMap>(
                 StringComparer.OrdinalIgnoreCase);
             string childName = Path.GetFileName(filePath);
             try
@@ -2998,7 +2998,9 @@ namespace PDMLite
                         }
                     }
                     catch { }
-                    entry.Qty = DirectChildQty(asmPath, childName, qtyCache);
+                    // Per-config qty: targetPartNo is the queried configuration
+                    // (null ⇒ file-level total).
+                    entry.Qty = DirectChildQty(asmPath, childName, targetPartNo, qtyCache);
                     result.Add(entry);
                 }
             }
@@ -3043,11 +3045,12 @@ namespace PDMLite
 
             var expanded = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
                 { root };
-            var qtyCache = new Dictionary<string, Dictionary<string, int>>(
+            var qtyCache = new Dictionary<string, DatabaseManager.ComponentQtyMap>(
                 StringComparer.OrdinalIgnoreCase);
             // childName is the immediate child of each parent being listed — at the
             // top it's the queried file; deeper, it's the assembly we walked up FROM.
-            WalkUp(filePath, root, 0, maxDepth, map, expanded, qtyCache, result, usage);
+            WalkUp(filePath, root, 0, maxDepth, map, expanded, qtyCache, result,
+                usage, targetPartNo);
             return result;
         }
 
@@ -3060,9 +3063,10 @@ namespace PDMLite
         private static void WalkUp(string childPath, string childFull, int level,
             int maxDepth, Dictionary<string, List<WhereUsedEntry>> map,
             HashSet<string> expanded,
-            Dictionary<string, Dictionary<string, int>> qtyCache,
+            Dictionary<string, DatabaseManager.ComponentQtyMap> qtyCache,
             List<WhereUsedEntry> result,
-            DatabaseManager.ChildConfigUsage usage = null)
+            DatabaseManager.ChildConfigUsage usage = null,
+            string targetConfig = null)
         {
             if (level >= maxDepth) return;
             List<WhereUsedEntry> parents;
@@ -3081,7 +3085,11 @@ namespace PDMLite
                     Revision = parent.Revision,
                     Status   = parent.Status,
                     Level    = level,
-                    Qty      = DirectChildQty(parent.Path, childName, qtyCache)
+                    // Per-config qty only at the direct (Level 0) hop, where the
+                    // child IS the queried part; deeper, childName is a sub-assembly
+                    // and the file-level total is correct.
+                    Qty      = DirectChildQty(parent.Path, childName,
+                                   level == 0 ? targetConfig : null, qtyCache)
                 });
                 string pf;
                 try { pf = Path.GetFullPath(parent.Path); } catch { pf = parent.Path; }
@@ -3155,52 +3163,68 @@ namespace PDMLite
         }
 
         // How many instances of childFileName the parent (asmPath) DIRECTLY
-        // contains, read from the parent's LATEST as-released baseline (its
-        // level-0 components, summed across configs). null = the parent has no
-        // baseline (never released) → unknown. Cached per parent path for the
-        // duration of one where-used computation (a parent's baseline is read at
-        // most once). Best-effort; any failure → null. Released-parents-only by
-        // design — WIP assemblies have no baseline yet.
+        // contains. PREFERS the parent's CURRENT <Components> snapshot (captured at
+        // every save, so a WIP assembly has a real Qty too), else its LATEST as-
+        // released baseline (level-0 components). When childConfig is given, returns
+        // the qty of that SPECIFIC configuration (so Where Used shows a PER-CONFIG
+        // count — MAX.03 ×2 vs MAX.02 ×1 — not the file total); when null, the
+        // file-level total across configs. null = no snapshot AND no baseline →
+        // unknown ("—"). Cached per parent path for one where-used computation.
+        // Best-effort; any failure → null.
         private static int? DirectChildQty(string parentPath, string childFileName,
-            Dictionary<string, Dictionary<string, int>> cache)
+            string childConfig, Dictionary<string, DatabaseManager.ComponentQtyMap> cache)
         {
             if (string.IsNullOrEmpty(parentPath) ||
                 string.IsNullOrEmpty(childFileName)) return null;
 
-            Dictionary<string, int> level0;
-            if (!cache.TryGetValue(parentPath, out level0))
+            DatabaseManager.ComponentQtyMap m;
+            if (!cache.TryGetValue(parentPath, out m))
             {
-                level0 = null; // null = no data (no <Components> snapshot AND no baseline)
+                m = null; // null = no data (no <Components> snapshot AND no baseline)
                 try
                 {
-                    // CURRENT direct-children snapshot first (captured at save, so a
-                    // WIP assembly has a real Qty too); fall back to the latest
-                    // baseline only when the assembly has no snapshot yet.
-                    level0 = DatabaseManager.GetComponentQtys(parentPath);
-                    if (level0 == null)
+                    // CURRENT snapshot first; fall back to the latest baseline only
+                    // when the assembly has no snapshot yet. Both carry per-config qty.
+                    m = DatabaseManager.GetComponentQtys(parentPath);
+                    if (m == null)
                     {
                         var bls = DatabaseManager.GetBaselines(parentPath);
                         if (bls != null && bls.Count > 0 && bls[0].Components != null)
                         {
-                            level0 = new Dictionary<string, int>(
-                                StringComparer.OrdinalIgnoreCase);
+                            m = new DatabaseManager.ComponentQtyMap();
                             foreach (var c in bls[0].Components) // most-recent first
                             {
                                 if (c == null || c.Level != 0) continue;
                                 string cn = Path.GetFileName(c.Path ?? "");
                                 if (string.IsNullOrEmpty(cn)) continue;
-                                int q; level0.TryGetValue(cn, out q);
-                                level0[cn] = q + (c.Qty > 0 ? c.Qty : 0);
+                                int q = c.Qty > 0 ? c.Qty : 0;
+                                int cur; m.ByName.TryGetValue(cn, out cur);
+                                m.ByName[cn] = cur + q;
+                                string cfg = (c.Config ?? "").Trim();
+                                if (cfg.Length > 0)
+                                {
+                                    string key = cn + "|" + cfg;
+                                    int curc; m.ByNameConfig.TryGetValue(key, out curc);
+                                    m.ByNameConfig[key] = curc + q;
+                                }
                             }
+                            if (m.ByName.Count == 0) m = null;
                         }
                     }
                 }
-                catch { level0 = null; }
-                cache[parentPath] = level0;
+                catch { m = null; }
+                cache[parentPath] = m;
             }
-            if (level0 == null) return null;       // no snapshot / baseline → unknown
-            int qty;
-            return level0.TryGetValue(childFileName, out qty) ? qty : 0;
+            if (m == null) return null;       // no snapshot / baseline → unknown
+
+            if (!string.IsNullOrEmpty(childConfig))
+            {
+                int qc;
+                return m.ByNameConfig.TryGetValue(
+                    childFileName + "|" + childConfig.Trim(), out qc) ? qc : 0;
+            }
+            int qt;
+            return m.ByName.TryGetValue(childFileName, out qt) ? qt : 0;
         }
 
         // child full-path → the DIRECT parent assemblies that reference it, each

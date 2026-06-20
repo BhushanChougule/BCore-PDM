@@ -3105,7 +3105,22 @@ namespace PDMLite
         // Direct-child instance counts (filename → summed Qty) for an assembly's
         // CURRENT <Components> snapshot, or null when it has none (caller falls back
         // to the baseline). Powers Where Used Qty for WIP assemblies too.
-        public static Dictionary<string, int> GetComponentQtys(string asmPath)
+        // Per-direct-child quantities for an assembly's CURRENT <Components>
+        // snapshot. ByName = filename → total qty across configs (file-level);
+        // ByNameConfig = "filename|config" → qty for that SPECIFIC config, so Where
+        // Used can show a per-config quantity (MAX.03 ×2 vs MAX.02 ×1) instead of
+        // the file total. null when the assembly has no snapshot (caller falls back
+        // to the baseline). Keys are case-insensitive; "|" is a safe separator
+        // (illegal in Windows filenames/configs).
+        public class ComponentQtyMap
+        {
+            public Dictionary<string, int> ByName =
+                new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+            public Dictionary<string, int> ByNameConfig =
+                new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+        }
+
+        public static ComponentQtyMap GetComponentQtys(string asmPath)
         {
             if (string.IsNullOrEmpty(asmPath)) return null;
             string target = asmPath.Trim();
@@ -3121,19 +3136,26 @@ namespace PDMLite
                         continue;
                     var compsEl = fileEl.Element("Components");
                     if (compsEl == null) return null;   // no snapshot → caller uses baseline
-                    var map = new Dictionary<string, int>(
-                        StringComparer.OrdinalIgnoreCase);
+                    var m = new ComponentQtyMap();
                     foreach (var c in compsEl.Elements("Comp"))
                     {
                         string cn = Path.GetFileName((string)c.Attribute("Path") ?? "");
                         if (string.IsNullOrEmpty(cn)) continue;
                         int q; int.TryParse((string)c.Attribute("Qty"), out q);
-                        int cur; map.TryGetValue(cn, out cur);
-                        map[cn] = cur + (q > 0 ? q : 0);
+                        if (q < 0) q = 0;
+                        int cur; m.ByName.TryGetValue(cn, out cur);
+                        m.ByName[cn] = cur + q;
+                        string cfg = ((string)c.Attribute("Config") ?? "").Trim();
+                        if (cfg.Length > 0)
+                        {
+                            string key = cn + "|" + cfg;
+                            int curc; m.ByNameConfig.TryGetValue(key, out curc);
+                            m.ByNameConfig[key] = curc + q;
+                        }
                     }
                     // Empty/all-unusable block (hand-edited) → null so the caller
                     // falls back to the baseline, matching GetChildConfigUsage PASS 1.
-                    return map.Count > 0 ? map : null;
+                    return m.ByName.Count > 0 ? m : null;
                 }
             }
             return null;
