@@ -456,6 +456,29 @@ namespace PDMLite
             // Dashboard — see OpenDashboard's view-switch loop — so it needs no
             // separate task-pane button, keeping the pane uncluttered.)
 
+            // ── Where Used (all users) ────────────────────────────────
+            // Read-only impact analysis: which assemblies reference a part/sub-
+            // assembly. Seeds with the ACTIVE file (a drawing resolves to the model
+            // it documents — a drawing isn't a component), and the form's Find box
+            // can switch to any tracked file without reopening. Engineers get it too
+            // (read-only; it only opens files via the vault rules).
+            Button btnWhereUsed = new Button
+            {
+                Text = "Where Used",
+                Font = fBtn,
+                Width = w,
+                Height = S(24),
+                Location = new Point(x, y),
+                BackColor = cBrand,
+                ForeColor = Color.White,
+                FlatStyle = FlatStyle.Flat,
+                Cursor = Cursors.Hand
+            };
+            btnWhereUsed.FlatAppearance.BorderSize = 0;
+            btnWhereUsed.Click += (s, e) => OpenWhereUsed();
+            this.Controls.Add(btnWhereUsed);
+            y += S(28);
+
             // ── Send Test Email (all users) ───────────────────────────
             Button btnTestEmail = new Button
             {
@@ -474,28 +497,10 @@ namespace PDMLite
             this.Controls.Add(btnTestEmail);
             y += S(28);
 
-            // ── Remove from Vault (Master only) ───────────────────────
-            // Retires the active file: moves its WIP copy, RELEASED snapshot and
-            // exports to SCRAP and deletes the vault record (blocked while
-            // Released). Orphans (file already deleted on disk) are auto-purged
-            // by search, so there's no separate cleanup button.
-            Button btnRemove = new Button
-            {
-                Text = "Remove from Vault",
-                Font = fBtn,
-                Width = w,
-                Height = S(24),
-                Location = new Point(x, y),
-                BackColor = cSwRed,
-                ForeColor = Color.White,
-                FlatStyle = FlatStyle.Flat,
-                Cursor = Cursors.Hand,
-                Visible = isMaster
-            };
-            btnRemove.FlatAppearance.BorderSize = 0;
-            btnRemove.Click += (s, e) => DoAction("remove");
-            this.Controls.Add(btnRemove);
-            if (isMaster) y += S(28);
+            // (Remove from Vault moved to the Vault Dashboard row right-click —
+            // "Remove from Vault…", Masters only. It acts BY PATH so the file need
+            // not be the active document, and sits next to the Mark Obsolete /
+            // Reinstate lifecycle actions where retirement logically belongs.)
 
             // 1px sentinel — pins the AutoScroll virtual bottom to remove gap
             this.Controls.Add(new Panel
@@ -580,6 +585,70 @@ namespace PDMLite
                     }
                 }
                 break; // closed normally / file opened
+            }
+        }
+
+        // Open the read-only Where Used viewer, seeded with the ACTIVE file. A
+        // drawing isn't a component, so resolve it to the model it documents and
+        // show the MODEL's where-used (the design decision). With no active file
+        // the viewer opens empty and the user searches via its Find box. If the
+        // user picks a parent assembly to open, do so after the modal closes.
+        private void OpenWhereUsed()
+        {
+            string seedPath = null, seedName = null, seedPartNo = null, seedConfig = null;
+            try
+            {
+                ModelDoc2 doc = PDMLiteAddin.SwApp?.ActiveDoc as ModelDoc2;
+                if (doc != null)
+                {
+                    if (doc.GetType() == (int)swDocumentTypes_e.swDocDRAWING)
+                    {
+                        string model = VaultManager.GetDrawingReferencedModel(doc);
+                        if (!string.IsNullOrEmpty(model))
+                        {
+                            seedPath = model; seedName = Path.GetFileName(model);
+                            // The config the drawing documents drives its Part No
+                            // (a multi-config model has a different PN per config).
+                            seedPartNo = VaultManager.GetDrawingPartNo(doc);
+                            seedConfig = VaultManager.GetDrawingPrimaryConfig(doc);
+                        }
+                    }
+                    else
+                    {
+                        string p = doc.GetPathName();
+                        if (!string.IsNullOrEmpty(p))
+                        {
+                            seedPath = p; seedName = Path.GetFileName(p);
+                            // Seed from the ACTIVE configuration (its own Part No),
+                            // not the file's primary/last-saved config.
+                            seedPartNo = PropertyValidator.GetProperty(doc, "PartNo");
+                            try
+                            {
+                                var cfg = doc.GetActiveConfiguration()
+                                    as SolidWorks.Interop.sldworks.Configuration;
+                                if (cfg != null) seedConfig = cfg.Name;
+                            }
+                            catch { }
+                        }
+                    }
+                }
+            }
+            catch { }
+
+            try
+            {
+                string toOpen = null;
+                using (var v = new WhereUsedForm(seedPath, seedName, seedPartNo, seedConfig))
+                {
+                    v.ShowDialog(this);
+                    toOpen = v.FileToOpen;
+                }
+                if (!string.IsNullOrEmpty(toOpen)) OpenFile(toOpen);
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show("Could not open Where Used:\n" + ex.Message,
+                    "BCore PDM", MessageBoxButtons.OK, MessageBoxIcon.Warning);
             }
         }
 
@@ -1424,7 +1493,6 @@ namespace PDMLite
                 return;
             }
             else if (action == "rollback") VaultManager.RollbackRevision(doc);
-            else if (action == "remove") VaultManager.RemoveFromVault(doc);
             else if (action == "requestrev") VaultManager.RequestRevision(doc);
             else if (action == "requnlock") VaultManager.RequestUnlock(doc);
             else if (action == "reqrelease") VaultManager.RequestRelease(doc);

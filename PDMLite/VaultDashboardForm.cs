@@ -87,9 +87,15 @@ namespace PDMLite
         private ContextMenuStrip _rowMenu;
         private ToolStripMenuItem _miOpen, _miOpenLinked, _miCopyPath, _miOpenFolder;
         private ToolStripMenuItem _miBaseline; // "View As-Released Baseline" (assembly rows)
+        // "Where Used" — shown for models only (parts/sub-assemblies); read-only,
+        // all users. Toggled per-row in Grid_MouseDown.
+        private ToolStripMenuItem _miWhereUsed;
         // Master-only lifecycle items — constructed ONLY for a Master (see
         // _isMaster) so engineers never see them or a dangling separator.
         private ToolStripMenuItem _miObsolete, _miReinstate;
+        // Remove from Vault — Masters only (moved here from the task pane). Retires
+        // the file BY PATH (need not be open). Built only for Masters.
+        private ToolStripMenuItem _miRemove;
         private bool _isMaster;
         private VaultFile _menuRow;       // the ROW OBJECT the menu was opened on —
                                           // not an index: the search debounce can
@@ -422,11 +428,14 @@ namespace PDMLite
             // baseline = the exact child file/rev set the assembly was last
             // released against. Opens read-only on top of the dashboard.
             _miBaseline   = new ToolStripMenuItem("View As-Released Baseline", null, (s, e) => MenuViewBaseline());
+            // Where Used: models only (toggled in Grid_MouseDown). Read-only,
+            // all users; opens nested-modal on top of the dashboard.
+            _miWhereUsed  = new ToolStripMenuItem("Where Used…", null, (s, e) => MenuWhereUsed());
             _miCopyPath   = new ToolStripMenuItem("Copy File Path", null, (s, e) => MenuCopyPath());
             _miOpenFolder = new ToolStripMenuItem("Open Containing Folder", null, (s, e) => MenuOpenFolder());
             var menuItems = new List<ToolStripItem>
             {
-                _miOpen, _miOpenLinked, _miBaseline, new ToolStripSeparator(), _miCopyPath, _miOpenFolder
+                _miOpen, _miOpenLinked, _miBaseline, _miWhereUsed, new ToolStripSeparator(), _miCopyPath, _miOpenFolder
             };
             // Master-only lifecycle actions (Grid_MouseDown shows exactly one per
             // row by status). Built only for Masters → engineers never see them
@@ -435,9 +444,13 @@ namespace PDMLite
             {
                 _miObsolete  = new ToolStripMenuItem("Mark Obsolete…", null, (s, e) => MenuMarkObsolete());
                 _miReinstate = new ToolStripMenuItem("Reinstate from Obsolete", null, (s, e) => MenuReinstate());
+                // Retirement (moves the file + snapshot + exports to SCRAP and
+                // deletes the record). Sits with the other lifecycle actions.
+                _miRemove    = new ToolStripMenuItem("Remove from Vault…", null, (s, e) => MenuRemove());
                 menuItems.Add(new ToolStripSeparator());
                 menuItems.Add(_miObsolete);
                 menuItems.Add(_miReinstate);
+                menuItems.Add(_miRemove);
             }
             _rowMenu.Items.AddRange(menuItems.ToArray());
             foreach (ToolStripItem it in _rowMenu.Items)
@@ -1394,6 +1407,10 @@ namespace PDMLite
             _miBaseline.Visible = (f.FileName ?? "")
                 .EndsWith(".sldasm", StringComparison.OrdinalIgnoreCase);
 
+            // Where Used applies to models only (a drawing isn't a component).
+            string ext = (Path.GetExtension(f.FileName ?? "") ?? "").ToLowerInvariant();
+            _miWhereUsed.Visible = ext == ".sldprt" || ext == ".sldasm";
+
             // Master lifecycle items. Mark Obsolete shows on every row — on an
             // already-Obsolete row it relabels to "Update Obsolete Details…" so a
             // Master can set/change the reason or replacement after the fact
@@ -1407,6 +1424,15 @@ namespace PDMLite
                 _miObsolete.Text = isObsolete
                     ? "Update Obsolete Details…" : "Mark Obsolete…";
                 _miReinstate.Visible = isObsolete;
+            }
+            // Remove from Vault: Masters only; disabled (not hidden) on a Released
+            // row so the menu stays predictable but the action is clearly blocked
+            // (a Released file must be Unlocked / New-Revisioned first).
+            if (_miRemove != null)
+            {
+                _miRemove.Visible = true;
+                _miRemove.Enabled = !(f.Status ?? "")
+                    .Equals("Released", StringComparison.OrdinalIgnoreCase);
             }
 
             _rowMenu.Show(_grid, e.Location);
@@ -1522,6 +1548,44 @@ namespace PDMLite
             if (f == null) return;
             VaultManager.ReinstateFromObsolete(f.FilePath);
             LoadData();
+        }
+
+        // Retire the right-clicked file (BY PATH — VaultManager opens it to read
+        // the per-config export identity, then scraps + deletes the record + closes
+        // it; its confirm / reason / role dialogs are modal on top of the dashboard,
+        // which stays open like the Obsolete actions). Refresh so the row drops out.
+        private void MenuRemove()
+        {
+            var f = MenuRow();
+            if (f == null) return;
+            VaultManager.RemoveFromVault(f.FilePath);
+            LoadData();
+        }
+
+        // Show which assemblies reference this file (read-only, on demand).
+        // Opens ON TOP of the dashboard (nested modal) so the dashboard stays
+        // put. If the user double-clicks a parent row there, the viewer closes
+        // with a FileToOpen — bubble it up through the dashboard's deferred-open
+        // so the file opens AFTER both modals close (like View Baseline).
+        private void MenuWhereUsed()
+        {
+            var f = MenuRow();
+            if (f == null) return;
+            try
+            {
+                string toOpen = null;
+                using (var v = new WhereUsedForm(f.FilePath, f.FileName, f.PartNumber))
+                {
+                    v.ShowDialog(this);
+                    toOpen = v.FileToOpen;
+                }
+                if (!string.IsNullOrEmpty(toOpen)) OpenDeferred(toOpen);
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show("Could not open Where Used:\n" + ex.Message,
+                    "BCore PDM", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            }
         }
 
         // Show the assembly's captured as-released baselines (read-only). Opens

@@ -1215,6 +1215,15 @@ namespace PDMLite
                         });
                     }
                     vf.Configurations = configs;
+
+                    // Assemblies: snapshot the DIRECT children + the config each
+                    // references (cheap — the doc is open, no resolve), so Where
+                    // Used answers "by part number" for WIP assemblies too (they
+                    // have no baseline yet). Non-fatal; empty ⇒ upsert preserves
+                    // the previous snapshot.
+                    if (docType == (int)SolidWorks.Interop.swconst
+                            .swDocumentTypes_e.swDocASSEMBLY)
+                        vf.Components = VaultManager.GetTopLevelComponentConfigs(doc);
                 }
 
                 DatabaseManager.UpsertFile(vf);

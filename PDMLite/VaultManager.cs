@@ -40,6 +40,24 @@ namespace PDMLite
         }
     }
 
+    // One assembly that directly references a given file (where-used row).
+    // Status/Revision/PartNo come from the parent's vault record. Level is the
+    // depth in a multi-level where-used walk (0 = a DIRECT parent of the queried
+    // file, 1 = an assembly that contains a level-0 parent, …); single-level
+    // results leave it 0. Qty = how many instances of THIS ROW'S immediate child
+    // the parent contains, read from the parent's latest as-released baseline
+    // (null = unknown, i.e. the parent has never been released).
+    public class WhereUsedEntry
+    {
+        public string Path     { get; set; }
+        public string Name     { get; set; }
+        public string PartNo   { get; set; }
+        public string Revision { get; set; }
+        public string Status   { get; set; }
+        public int    Level    { get; set; }
+        public int?   Qty      { get; set; }
+    }
+
     public static class VaultManager
     {
         private const string WipFolder = @"N:\PDM-SolidWorks\WIP";
@@ -463,6 +481,98 @@ namespace PDMLite
         // Revisioned first. Orphans (file already deleted on disk) are NOT
         // handled here; they are auto-purged by SearchFiles when encountered,
         // because a deleted file can't be opened to click this button.
+
+        // PATH-BASED Remove from Vault — backs the Vault Dashboard row right-click
+        // ("Remove from Vault…"), where the file need not be open. The exports are
+        // named PER CONFIG ({cfgPartNo}-R{rev}.step, {cfgDrawingNo} REV {rev}.pdf)
+        // and the open document is the only place the per-config DrawingNo lives,
+        // so this OPENS the file (read-write WIP — Released is blocked anyway) and
+        // delegates to the full doc-based flow, which already closes the doc before
+        // moving anything. Cheap guards run BEFORE the open so a Released / orphan /
+        // untracked file never pays the open cost.
+        public static void RemoveFromVault(string filePath)
+        {
+            string user = PDMLiteAddin.CurrentUser;
+            if (!IsMaster(user)) { NotMaster(); return; }
+            if (string.IsNullOrEmpty(filePath)) return;
+
+            string fileName = Path.GetFileName(filePath);
+            string status = DatabaseManager.GetFileStatus(filePath);
+            if (string.IsNullOrEmpty(status))
+            {
+                MessageBox.Show(
+                    fileName + " is not tracked in the vault — nothing to remove.",
+                    "BCore PDM — Remove from Vault",
+                    MessageBoxButtons.OK, MessageBoxIcon.Information);
+                return;
+            }
+            if (string.Equals(status, "Released", StringComparison.OrdinalIgnoreCase))
+            {
+                MessageBox.Show(
+                    "Cannot remove a Released file from the vault.\n\n" +
+                    "File : " + fileName + "\n\n" +
+                    "Unlock or start a New Revision first, then remove it.",
+                    "BCore PDM — Remove Blocked",
+                    MessageBoxButtons.OK, MessageBoxIcon.Stop);
+                return;
+            }
+
+            // Orphan: a record with no file on disk has nothing to scrap. Offer to
+            // purge just the dead record (SearchFiles auto-purges these too, but
+            // the Master asked to remove it from the dashboard).
+            if (!File.Exists(filePath))
+            {
+                if (MessageBox.Show(
+                    fileName + " is not on disk — it may already have been removed.\n\n" +
+                    "Delete its leftover vault record?",
+                    "BCore PDM — Remove from Vault",
+                    MessageBoxButtons.YesNo, MessageBoxIcon.Question)
+                    != DialogResult.Yes) return;
+                DatabaseManager.RemoveFileRecord(filePath);
+                AuditLogger.Log("RemoveFromVault", user, fileName, "", "",
+                    "orphaned record purged (file already gone from disk)");
+                return;
+            }
+
+            // Was the file already open BEFORE we touch it? If we open it only to
+            // read its export identity and the remove is then CANCELLED/aborted
+            // (the doc-based flow closes the doc only on success), we must close
+            // the doc WE opened — otherwise a cancelled remove leaves the part
+            // open in the background. A doc the user already had open is left alone.
+            bool wasOpen = (PDMLiteAddin.SwApp
+                ?.GetOpenDocumentByName(filePath) as ModelDoc2) != null;
+
+            ModelDoc2 doc = OpenByPath(filePath);
+            if (doc == null)
+            {
+                MessageBox.Show(
+                    "Could not open " + fileName + " to remove it.\n\n" +
+                    "It may be open on another machine, or the network share may " +
+                    "be unavailable. Nothing was changed.",
+                    "BCore PDM — Remove from Vault",
+                    MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                return;
+            }
+            RemoveFromVault(doc); // full flow: guards + claim + scrap + record delete + close
+
+            // We opened the doc transiently and it is STILL OPEN afterward ⇒ the
+            // remove was cancelled/aborted before the doc-flow's own CloseDoc
+            // (confirm=No, reason=Cancel, or a busy/lock abort) → close it so a
+            // cancelled remove never leaves the part open. On success / WIP-move
+            // abort the doc-flow already closed it, so GetOpenDocumentByName returns
+            // null here and we do nothing.
+            if (!wasOpen)
+            {
+                try
+                {
+                    var still = PDMLiteAddin.SwApp
+                        ?.GetOpenDocumentByName(filePath) as ModelDoc2;
+                    if (still != null) PDMLiteAddin.SwApp.CloseDoc(filePath);
+                }
+                catch { }
+            }
+        }
+
         public static void RemoveFromVault(ModelDoc2 doc)
         {
             string user = PDMLiteAddin.CurrentUser;
@@ -2705,6 +2815,501 @@ namespace PDMLite
                 }
             }
             catch { }
+        }
+
+        // ── WHERE USED ─────────────────────────────────────────────────────
+        // Config-aware filtering (the user's "use the stored assembly data" idea).
+        // A multi-config part is ONE file used as a specific CONFIG (= Part No) in
+        // each assembly; the dependency walk returns paths with no per-instance
+        // config, but the as-released BASELINES record each component's PartNo +
+        // Config. BuildConfigUsage reads <Baselines> ONCE (no file opening) and
+        // classifies every parent; null target ⇒ no filtering (file-level, as
+        // before). ParentPassesConfigFilter then drops a direct parent ONLY when
+        // its baseline PROVES a different config — verified matches AND unverified
+        // (no-baseline WIP) parents are kept, so a real usage is never hidden.
+        private static DatabaseManager.ChildConfigUsage BuildConfigUsage(
+            string filePath, string targetPartNo)
+        {
+            if (string.IsNullOrEmpty(targetPartNo)) return null;
+            try { return DatabaseManager.GetChildConfigUsage(filePath, targetPartNo); }
+            catch { return null; } // any failure ⇒ degrade to file-level (never crash)
+        }
+
+        private static bool ParentPassesConfigFilter(string parentPath,
+            DatabaseManager.ChildConfigUsage usage)
+        {
+            if (usage == null) return true;            // file-level — keep everything
+            string pf;
+            try { pf = Path.GetFullPath(parentPath); } catch { pf = parentPath; }
+            if (usage.ParentsUsingTarget.Contains(pf)) return true;          // verified: uses target config
+            if (usage.ParentsWithDifferentConfig.Contains(pf)) return false; // verified: uses a DIFFERENT config
+            return true;                                                     // unverified ⇒ keep
+        }
+
+        // Capture the assembly's DIRECT (top-level) children + the config each
+        // references, AT SAVE TIME (the doc is already open, so this opens nothing
+        // and is cheap). Reads ReferencedConfiguration WITHOUT resolving lightweight
+        // components — GetRootComponent3(FALSE) — because the referenced-config is
+        // stored in the assembly itself, so loading the child models is unnecessary
+        // (that resolve is the expensive call, and we deliberately avoid it to keep
+        // saves fast). Instances grouped by path+config with a Qty. Suppressed
+        // components are skipped (GetSuppression2, NOT IsSuppressed). NOTE: unlike
+        // the BOM/baseline this does NOT skip Toolbox / ExcludeFromBOM — for
+        // WHERE-USED that is intentional (you should still find where a hardware/
+        // jig part is used), so a Toolbox child can classify here but is absent
+        // from a released baseline; harmless since such parts are single-config
+        // (no config filtering). Best-effort + non-fatal: any failure → empty list,
+        // and the post-save upsert then PRESERVES the previous snapshot. Powers
+        // config-accurate Where Used for WIP assemblies (no baseline yet). Asm only.
+        public static List<ComponentRef> GetTopLevelComponentConfigs(ModelDoc2 doc)
+        {
+            var list = new List<ComponentRef>();
+            try
+            {
+                if (doc == null ||
+                    doc.GetType() != (int)swDocumentTypes_e.swDocASSEMBLY) return list;
+                var cfg = doc.GetActiveConfiguration() as Configuration;
+                Component2 root = cfg?.GetRootComponent3(false); // false = no resolve
+                object[] kids = root?.GetChildren() as object[];
+                if (kids == null) return list;
+
+                var index = new Dictionary<string, ComponentRef>(
+                    StringComparer.OrdinalIgnoreCase);
+                foreach (object o in kids)
+                {
+                    var comp = o as Component2;
+                    if (comp == null) continue;
+                    int sup = -1;
+                    try { sup = comp.GetSuppression2(); } catch { }
+                    if (sup == (int)swComponentSuppressionState_e.swComponentSuppressed)
+                        continue;
+                    string path = "";
+                    try { path = comp.GetPathName() ?? ""; } catch { }
+                    if (string.IsNullOrEmpty(path)) continue;
+                    string ext = Path.GetExtension(path).ToLowerInvariant();
+                    if (ext != ".sldprt" && ext != ".sldasm") continue;
+                    string refCfg = "";
+                    try { refCfg = comp.ReferencedConfiguration ?? ""; } catch { }
+                    // A flat-pattern view config resolves to its parent (real config).
+                    refCfg = PropertyValidator.ParentConfigOf(refCfg);
+
+                    string key = path.ToLowerInvariant() + "|" + refCfg.ToLowerInvariant();
+                    ComponentRef cr;
+                    if (index.TryGetValue(key, out cr)) cr.Qty++;
+                    else
+                    {
+                        cr = new ComponentRef { Path = path, Config = refCfg, Qty = 1 };
+                        index[key] = cr;
+                        list.Add(cr);
+                    }
+                }
+            }
+            catch { list.Clear(); }
+            return list;
+        }
+
+        // Public, on-demand: returns the tracked assemblies that DIRECTLY
+        // reference the given file (the immediate parents), each enriched with
+        // PartNo/Revision/Status from its vault record. Reads dependencies from
+        // disk via GetDocumentDependencies2 (traverse=FALSE → top-level
+        // components only, so the result is the DIRECT-parent set; drill up by
+        // running Where Used again on a parent). No UI/open required — same
+        // primitive GetParentAssemblies uses. Best-effort: depends on the stored
+        // reference paths matching the vault path format (same caveat as
+        // GetParentAssemblies). Used by WhereUsedForm.
+        public static List<WhereUsedEntry> GetWhereUsed(string filePath,
+            string targetPartNo = null)
+        {
+            var result = new List<WhereUsedEntry>();
+            if (string.IsNullOrEmpty(filePath)) return result;
+            // Config-aware filter (the user's "use the stored baseline data" idea):
+            // null when no target PN ⇒ file-level (every config), as before.
+            var usage = BuildConfigUsage(filePath, targetPartNo);
+            var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            var qtyCache = new Dictionary<string, DatabaseManager.ComponentQtyMap>(
+                StringComparer.OrdinalIgnoreCase);
+            string childName = Path.GetFileName(filePath);
+            try
+            {
+                string target;
+                try { target = Path.GetFullPath(filePath); }
+                catch { target = filePath; }
+
+                foreach (string asmPath in
+                         DatabaseManager.GetTrackedFilePathsByExtension(".sldasm"))
+                {
+                    string asmFull;
+                    try { asmFull = Path.GetFullPath(asmPath); }
+                    catch { asmFull = asmPath; }
+                    if (string.Equals(asmFull, target,
+                            StringComparison.OrdinalIgnoreCase)) continue; // self
+                    if (!File.Exists(asmPath)) continue;
+
+                    // traverse=false → DIRECT children only. Guard per-assembly: one
+                    // unreadable/corrupt file must not abort the whole walk (matches
+                    // GetParentAssemblies).
+                    string[] deps;
+                    try
+                    {
+                        deps = PDMLiteAddin.SwApp.GetDocumentDependencies2(
+                            asmPath, false, true, false) as string[];
+                    }
+                    catch { continue; }
+                    if (deps == null) continue;
+
+                    bool referencesTarget = false;
+                    for (int i = 1; i < deps.Length; i += 2)
+                    {
+                        if (string.IsNullOrEmpty(deps[i])) continue;
+                        string depPath;
+                        try { depPath = Path.GetFullPath(deps[i]); }
+                        catch { depPath = deps[i]; }
+                        if (string.Equals(depPath, target,
+                                StringComparison.OrdinalIgnoreCase))
+                        {
+                            referencesTarget = true;
+                            break;
+                        }
+                    }
+                    if (!referencesTarget) continue;
+                    // Dedupe by FILENAME (the vault enforces vault-wide unique
+                    // names), so a legacy RELEASED-copy / double record can't list
+                    // the same assembly twice. (Full-path dedupe would let both the
+                    // WIP record and a legacy RELEASED-copy record through.)
+                    if (!seen.Add(Path.GetFileName(asmPath))) continue;
+                    // Drop a parent only when its baseline PROVES it uses a
+                    // different config; keep verified-matches and unverified
+                    // (no-baseline) parents — never hide a possible real usage.
+                    if (!ParentPassesConfigFilter(asmPath, usage)) continue;
+
+                    var entry = new WhereUsedEntry
+                    {
+                        Path = asmPath,
+                        Name = Path.GetFileName(asmPath)
+                    };
+                    try
+                    {
+                        var rec = DatabaseManager.GetFileRecord(asmPath);
+                        if (rec != null)
+                        {
+                            entry.PartNo   = rec.PartNumber;
+                            entry.Revision = rec.Revision;
+                            entry.Status   = rec.Status;
+                        }
+                    }
+                    catch { }
+                    // Per-config qty: targetPartNo is the queried configuration
+                    // (null ⇒ file-level total).
+                    entry.Qty = DirectChildQty(asmPath, childName, targetPartNo, qtyCache);
+                    result.Add(entry);
+                }
+            }
+            catch { }
+            result.Sort((a, b) => string.Compare(a.Name, b.Name,
+                StringComparison.OrdinalIgnoreCase));
+            return result;
+        }
+
+        // MULTI-LEVEL where-used: the FULL usage chain above the file — its
+        // direct parents (Level 0), the assemblies that contain THOSE (Level 1),
+        // and so on up to the top-level assemblies — flattened in tree order
+        // (each parent immediately followed by its own ancestry). A part deep in
+        // a sub-assembly that sits inside a bigger assembly therefore shows the
+        // whole path up. WhereUsedForm uses this for its "All levels" mode; the
+        // single-level GetWhereUsed backs the default "Direct" mode.
+        //
+        // Builds the reverse-dependency map in ONE disk pass over every tracked
+        // assembly, then walks it purely in memory — far cheaper than calling
+        // GetWhereUsed per node (which re-scans every assembly on each call). An
+        // assembly is EXPANDED at most once (global guard) so shared sub-
+        // assemblies and any bad-data cycle can't loop or explode; it is still
+        // LISTED everywhere it is referenced. Depth capped at maxDepth.
+        public static List<WhereUsedEntry> GetWhereUsedTree(string filePath,
+            string targetPartNo = null, int maxDepth = 12)
+        {
+            var result = new List<WhereUsedEntry>();
+            if (string.IsNullOrEmpty(filePath)) return result;
+
+            Dictionary<string, List<WhereUsedEntry>> map;
+            try { map = BuildReverseDependencyMap(); }
+            catch { return result; }
+
+            string root;
+            try { root = Path.GetFullPath(filePath); } catch { root = filePath; }
+
+            // Config filter applies to the FIRST hop only (the DIRECT parents of
+            // the queried file — config matters at the leaf). Their ancestry is
+            // walked unfiltered (an assembly that transitively contains a matching
+            // direct parent does contain the target config).
+            var usage = BuildConfigUsage(filePath, targetPartNo);
+
+            var expanded = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+                { root };
+            var qtyCache = new Dictionary<string, DatabaseManager.ComponentQtyMap>(
+                StringComparer.OrdinalIgnoreCase);
+            // childName is the immediate child of each parent being listed — at the
+            // top it's the queried file; deeper, it's the assembly we walked up FROM.
+            WalkUp(filePath, root, 0, maxDepth, map, expanded, qtyCache, result,
+                usage, targetPartNo);
+            return result;
+        }
+
+        // Depth-first ancestry walk over the prebuilt reverse map. Each parent is
+        // CLONED per occurrence (the same map entry can appear at several levels
+        // under different children, so a shared object would have its Level/Qty
+        // overwritten). expanded bounds the recursion to one expansion per
+        // assembly. childPath is the file each listed parent immediately contains
+        // (the node we're walking up from), so Qty is the per-edge instance count.
+        private static void WalkUp(string childPath, string childFull, int level,
+            int maxDepth, Dictionary<string, List<WhereUsedEntry>> map,
+            HashSet<string> expanded,
+            Dictionary<string, DatabaseManager.ComponentQtyMap> qtyCache,
+            List<WhereUsedEntry> result,
+            DatabaseManager.ChildConfigUsage usage = null,
+            string targetConfig = null)
+        {
+            if (level >= maxDepth) return;
+            List<WhereUsedEntry> parents;
+            if (!map.TryGetValue(childFull, out parents)) return;
+            string childName = Path.GetFileName(childPath ?? childFull);
+            foreach (var parent in parents) // already name-sorted in the map
+            {
+                // Config filter on the DIRECT parents (level 0) only.
+                if (level == 0 && !ParentPassesConfigFilter(parent.Path, usage))
+                    continue;
+                result.Add(new WhereUsedEntry
+                {
+                    Path     = parent.Path,
+                    Name     = parent.Name,
+                    PartNo   = parent.PartNo,
+                    Revision = parent.Revision,
+                    Status   = parent.Status,
+                    Level    = level,
+                    // Per-config qty only at the direct (Level 0) hop, where the
+                    // child IS the queried part; deeper, childName is a sub-assembly
+                    // and the file-level total is correct.
+                    Qty      = DirectChildQty(parent.Path, childName,
+                                   level == 0 ? targetConfig : null, qtyCache)
+                });
+                string pf;
+                try { pf = Path.GetFullPath(parent.Path); } catch { pf = parent.Path; }
+                if (expanded.Add(pf))
+                    WalkUp(parent.Path, pf, level + 1, maxDepth, map, expanded,
+                        qtyCache, result);
+            }
+        }
+
+        // TOP-LEVEL where-used: only the ROOT assemblies that ULTIMATELY contain
+        // the file — i.e. the final products, skipping every intermediate sub-
+        // assembly. Collects every ancestor (BFS up the reverse map) then keeps
+        // only those that are themselves used by nothing (their path is not a
+        // child key in the map). Flat list (all Level 0); Qty left null (a top-
+        // level product rarely contains the file directly). WhereUsedForm's "Top
+        // Level Only" mode.
+        public static List<WhereUsedEntry> GetWhereUsedTopLevel(string filePath,
+            string targetPartNo = null)
+        {
+            var result = new List<WhereUsedEntry>();
+            if (string.IsNullOrEmpty(filePath)) return result;
+
+            Dictionary<string, List<WhereUsedEntry>> map;
+            try { map = BuildReverseDependencyMap(); }
+            catch { return result; }
+
+            string root;
+            try { root = Path.GetFullPath(filePath); } catch { root = filePath; }
+
+            // Config filter on the FIRST hop (the direct parents of the queried
+            // file); ancestors of the qualifying parents are then collected
+            // unfiltered (they transitively contain the target config).
+            var usage = BuildConfigUsage(filePath, targetPartNo);
+
+            var collected = new Dictionary<string, WhereUsedEntry>(
+                StringComparer.OrdinalIgnoreCase);
+            var visited = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { root };
+            var queue = new Queue<string>();
+            queue.Enqueue(root);
+            while (queue.Count > 0)
+            {
+                string cur = queue.Dequeue();
+                List<WhereUsedEntry> parents;
+                if (!map.TryGetValue(cur, out parents)) continue;
+                bool firstHop = string.Equals(cur, root,
+                    StringComparison.OrdinalIgnoreCase);
+                foreach (var parent in parents)
+                {
+                    if (firstHop && !ParentPassesConfigFilter(parent.Path, usage))
+                        continue;
+                    string pf;
+                    try { pf = Path.GetFullPath(parent.Path); } catch { pf = parent.Path; }
+                    if (!collected.ContainsKey(pf)) collected[pf] = parent;
+                    if (visited.Add(pf)) queue.Enqueue(pf);
+                }
+            }
+            foreach (var kv in collected)
+            {
+                // A root is used by nothing → its path is not a child key.
+                if (map.ContainsKey(kv.Key)) continue;
+                var p = kv.Value;
+                result.Add(new WhereUsedEntry
+                {
+                    Path = p.Path, Name = p.Name, PartNo = p.PartNo,
+                    Revision = p.Revision, Status = p.Status, Level = 0, Qty = null
+                });
+            }
+            result.Sort((a, b) => string.Compare(a.Name, b.Name,
+                StringComparison.OrdinalIgnoreCase));
+            return result;
+        }
+
+        // How many instances of childFileName the parent (asmPath) DIRECTLY
+        // contains. PREFERS the parent's CURRENT <Components> snapshot (captured at
+        // every save, so a WIP assembly has a real Qty too), else its LATEST as-
+        // released baseline (level-0 components). When childConfig is given, returns
+        // the qty of that SPECIFIC configuration (so Where Used shows a PER-CONFIG
+        // count — MAX.03 ×2 vs MAX.02 ×1 — not the file total); when null, the
+        // file-level total across configs. null = no snapshot AND no baseline →
+        // unknown ("—"). Cached per parent path for one where-used computation.
+        // Best-effort; any failure → null.
+        private static int? DirectChildQty(string parentPath, string childFileName,
+            string childConfig, Dictionary<string, DatabaseManager.ComponentQtyMap> cache)
+        {
+            if (string.IsNullOrEmpty(parentPath) ||
+                string.IsNullOrEmpty(childFileName)) return null;
+
+            DatabaseManager.ComponentQtyMap m;
+            if (!cache.TryGetValue(parentPath, out m))
+            {
+                m = null; // null = no data (no <Components> snapshot AND no baseline)
+                try
+                {
+                    // CURRENT snapshot first; fall back to the latest baseline only
+                    // when the assembly has no snapshot yet. Both carry per-config qty.
+                    m = DatabaseManager.GetComponentQtys(parentPath);
+                    if (m == null)
+                    {
+                        var bls = DatabaseManager.GetBaselines(parentPath);
+                        if (bls != null && bls.Count > 0 && bls[0].Components != null)
+                        {
+                            m = new DatabaseManager.ComponentQtyMap();
+                            foreach (var c in bls[0].Components) // most-recent first
+                            {
+                                if (c == null || c.Level != 0) continue;
+                                string cn = Path.GetFileName(c.Path ?? "");
+                                if (string.IsNullOrEmpty(cn)) continue;
+                                int q = c.Qty > 0 ? c.Qty : 0;
+                                int cur; m.ByName.TryGetValue(cn, out cur);
+                                m.ByName[cn] = cur + q;
+                                string cfg = (c.Config ?? "").Trim();
+                                if (cfg.Length > 0)
+                                {
+                                    string key = cn + "|" + cfg;
+                                    int curc; m.ByNameConfig.TryGetValue(key, out curc);
+                                    m.ByNameConfig[key] = curc + q;
+                                }
+                            }
+                            if (m.ByName.Count == 0) m = null;
+                        }
+                    }
+                }
+                catch { m = null; }
+                cache[parentPath] = m;
+            }
+            if (m == null) return null;       // no snapshot / baseline → unknown
+
+            if (!string.IsNullOrEmpty(childConfig))
+            {
+                int qc;
+                return m.ByNameConfig.TryGetValue(
+                    childFileName + "|" + childConfig.Trim(), out qc) ? qc : 0;
+            }
+            int qt;
+            return m.ByName.TryGetValue(childFileName, out qt) ? qt : 0;
+        }
+
+        // child full-path → the DIRECT parent assemblies that reference it, each
+        // enriched once from its vault record. One pass over every tracked
+        // assembly's direct dependencies (traverse=false), so the multi-level
+        // walk above runs entirely in memory afterwards. Same best-effort
+        // path-format caveat as GetWhereUsed/GetParentAssemblies.
+        private static Dictionary<string, List<WhereUsedEntry>>
+            BuildReverseDependencyMap()
+        {
+            var map = new Dictionary<string, List<WhereUsedEntry>>(
+                StringComparer.OrdinalIgnoreCase);
+            // Dedupe assemblies by FILENAME (vault-wide unique) so a legacy
+            // RELEASED-copy / double record can't add the same parent twice.
+            var seenAsmNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+            foreach (string asmPath in
+                     DatabaseManager.GetTrackedFilePathsByExtension(".sldasm"))
+            {
+                if (!File.Exists(asmPath)) continue;
+                if (!seenAsmNames.Add(Path.GetFileName(asmPath))) continue;
+                string asmFull;
+                try { asmFull = Path.GetFullPath(asmPath); }
+                catch { asmFull = asmPath; }
+
+                // Guard per-assembly: one unreadable/corrupt file must not abort
+                // the whole reverse-map build (matches GetParentAssemblies).
+                string[] deps;
+                try
+                {
+                    deps = PDMLiteAddin.SwApp.GetDocumentDependencies2(
+                        asmPath, false, true, false) as string[];
+                }
+                catch { continue; }
+                if (deps == null) continue;
+
+                // Build the parent entry lazily (record lookup once) and only if
+                // this assembly actually has children.
+                WhereUsedEntry entry = null;
+                var childSeen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+                for (int i = 1; i < deps.Length; i += 2)
+                {
+                    if (string.IsNullOrEmpty(deps[i])) continue;
+                    string childFull;
+                    try { childFull = Path.GetFullPath(deps[i]); }
+                    catch { childFull = deps[i]; }
+                    if (string.Equals(childFull, asmFull,
+                            StringComparison.OrdinalIgnoreCase)) continue; // self
+                    if (!childSeen.Add(childFull)) continue; // one edge per child
+
+                    if (entry == null)
+                    {
+                        entry = new WhereUsedEntry
+                        {
+                            Path = asmPath,
+                            Name = Path.GetFileName(asmPath)
+                        };
+                        try
+                        {
+                            var rec = DatabaseManager.GetFileRecord(asmPath);
+                            if (rec != null)
+                            {
+                                entry.PartNo   = rec.PartNumber;
+                                entry.Revision = rec.Revision;
+                                entry.Status   = rec.Status;
+                            }
+                        }
+                        catch { }
+                    }
+
+                    List<WhereUsedEntry> list;
+                    if (!map.TryGetValue(childFull, out list))
+                    {
+                        list = new List<WhereUsedEntry>();
+                        map[childFull] = list;
+                    }
+                    list.Add(entry);
+                }
+            }
+
+            foreach (var list in map.Values)
+                list.Sort((a, b) => string.Compare(a.Name, b.Name,
+                    StringComparison.OrdinalIgnoreCase));
+            return map;
         }
 
         // When a part/assembly starts a new revision, its drawing (same
