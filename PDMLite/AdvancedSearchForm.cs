@@ -38,11 +38,13 @@ namespace PDMLite
         private const int    MaxCards  = 50;
 
         private TextBox  _mainBox, _drawnByBox;
-        private ComboBox _materialBox, _finishBox, _partTypeBox;
+        private ComboBox _materialBox, _finishBox, _partTypeBox, _statusBox;
         private Panel    _resultsPanel;
         private Label    _countLabel;
         private Button   _btnExport;
         private Timer    _timer;
+        private ContextMenuStrip _cardMenu;   // shared right-click menu for result cards
+        private Card     _menuCard;           // the card the menu was opened on
 
         // EM_SETCUEBANNER — grey placeholder for a single-line TextBox (no
         // PlaceholderText on .NET Framework 4.8). Mirrors the other BCore forms.
@@ -136,6 +138,7 @@ namespace PDMLite
                 _fCardBtn?.Dispose(); _fBar?.Dispose();
                 _sfBarCenter?.Dispose();
                 _penBorder?.Dispose();
+                _cardMenu?.Dispose();
             }
             base.Dispose(disposing);
         }
@@ -155,10 +158,10 @@ namespace PDMLite
             this.MinimizeBox = false;
             this.BackColor = cBg;
             this.KeyPreview = true;
-            // Height = header(30) + filters(176) + bottom(42) + a results area
+            // Height = header(30) + filters(206) + bottom(42) + a results area
             // sized to EXACTLY 5 card rows (no 6th row peeking): 5*cardH(74) +
             // 4*rowGap(6) + top pad(6) = 400, viewport ~404 hides row 6 cleanly.
-            this.ClientSize = new Size(S(648), S(652));
+            this.ClientSize = new Size(S(648), S(682));
 
             int clientW = ClientSize.Width;
             int margin  = S(14);
@@ -207,10 +210,11 @@ namespace PDMLite
 
             this.Controls.Add(bottom);
 
-            // ── Filters panel (Top) — centred search + a 2×2 refine grid ─────
+            // ── Filters panel (Top) — centred search + a refine grid (Drawn By
+            //    + Material, Finish + Part Type, Status) ───────────────────────
             var filters = new Panel
             {
-                Dock = DockStyle.Top, Height = S(176), BackColor = cBg
+                Dock = DockStyle.Top, Height = S(206), BackColor = cBg
             };
 
             int y = S(8);
@@ -277,7 +281,15 @@ namespace PDMLite
                 typeable: false);
             AddRow(filters, "Part Type", c2LabelX, labelW, ry2, _partTypeBox);
 
-            y = ry2 + S(30);
+            // Status (lifecycle) filter on its own row — file-level, a plain
+            // dropdown list with "— Any —" (every PDM lets you scope by state).
+            int ry3 = ry2 + S(30);
+            _statusBox = MakeCombo(c1InputX, ry3, cInputW, new[]
+                { AnyOption, "WIP", "Released", "Locked", "Obsolete" },
+                typeable: false);
+            AddRow(filters, "Status", c1LabelX, labelW, ry3, _statusBox);
+
+            y = ry3 + S(30);
 
             _countLabel = new Label
             {
@@ -303,6 +315,13 @@ namespace PDMLite
             });
             this.Controls.Add(header);
 
+            // ── Shared right-click menu for result cards (acts on _menuCard) ──
+            _cardMenu = new ContextMenuStrip();
+            _cardMenu.Items.Add("Copy File Path", null, (s, e) => CardCopyPath());
+            _cardMenu.Items.Add("Open Containing Folder", null,
+                (s, e) => CardOpenFolder());
+            _cardMenu.Items.Add("Where Used…", null, (s, e) => CardWhereUsed());
+
             // ── Live search wiring (debounced) ──────────────────────────────
             _timer = new Timer { Interval = 450 };
             _timer.Tick += (s, e) => { _timer.Stop(); RunSearch(); };
@@ -314,6 +333,7 @@ namespace PDMLite
             _materialBox.TextChanged          += (s, e) => Schedule();
             _finishBox.SelectedIndexChanged   += (s, e) => Schedule();
             _finishBox.TextChanged            += (s, e) => Schedule();
+            _statusBox.SelectedIndexChanged   += (s, e) => Schedule();
             _partTypeBox.SelectedIndexChanged += (s, e) => Schedule();
 
             this.AcceptButton = null; // Enter in a box should not close the form
@@ -432,9 +452,10 @@ namespace PDMLite
             string material = ComboValue(_materialBox);
             string finish   = ComboValue(_finishBox);
             string partType = ComboValue(_partTypeBox);
+            string status   = ComboValue(_statusBox);
 
             if (main.Length == 0 && drawnBy.Length == 0 && material.Length == 0 &&
-                finish.Length == 0 && partType.Length == 0)
+                finish.Length == 0 && partType.Length == 0 && status.Length == 0)
             {
                 _countLabel.ForeColor = cTextGray;
                 _countLabel.Text = "Type a term or pick a filter to search.";
@@ -446,7 +467,8 @@ namespace PDMLite
             try
             {
                 results = DatabaseManager.SearchFilesAdvanced(
-                    main, drawnBy, material, finish, partType, out truncated);
+                    main, drawnBy, material, finish, partType, status,
+                    out truncated);
             }
             catch
             {
@@ -494,6 +516,11 @@ namespace PDMLite
                     });
                 }
             }
+
+            // Default sort: predictable order by Part No, then file name, then
+            // config — beats raw vault-file order (sorted BEFORE the cap so the
+            // first N are the alphabetical first N, not the first N on disk).
+            cards.Sort(CompareCards);
 
             if (cards.Count > MaxCards)
             {
@@ -689,7 +716,96 @@ namespace PDMLite
                 };
                 card.Controls.Add(btnDrawing);
 
+                // Right-click anywhere on the card (background or any child) opens
+                // the shared menu for THIS card. One shared menu + _menuCard (vs a
+                // ContextMenuStrip per card) — assigning a menu to a control does
+                // not make it owned/disposed, so per-card menus would leak (C4).
+                MouseEventHandler showMenu = (s, e) =>
+                {
+                    if (e.Button != MouseButtons.Right) return;
+                    _menuCard = g;
+                    _cardMenu.Show(Cursor.Position);
+                };
+                card.MouseUp += showMenu;
+                foreach (Control ch in card.Controls) ch.MouseUp += showMenu;
+
                 _resultsPanel.Controls.Add(card);
+            }
+        }
+
+        // Card sort: Part No, then file name, then config (OrdinalIgnoreCase).
+        private static int CompareCards(Card a, Card b)
+        {
+            int c = string.Compare(a.PartNumber ?? "", b.PartNumber ?? "",
+                StringComparison.OrdinalIgnoreCase);
+            if (c != 0) return c;
+            c = string.Compare(a.DisplayName ?? "", b.DisplayName ?? "",
+                StringComparison.OrdinalIgnoreCase);
+            if (c != 0) return c;
+            return string.Compare(a.ConfigName ?? "", b.ConfigName ?? "",
+                StringComparison.OrdinalIgnoreCase);
+        }
+
+        // ── Result card right-click actions (operate on _menuCard) ───────────
+        private void CardCopyPath()
+        {
+            if (_menuCard == null || string.IsNullOrEmpty(_menuCard.ModelPath))
+                return;
+            try { Clipboard.SetText(_menuCard.ModelPath); } catch { }
+        }
+
+        private void CardOpenFolder()
+        {
+            if (_menuCard == null || string.IsNullOrEmpty(_menuCard.ModelPath))
+                return;
+            string path = _menuCard.ModelPath;
+            try
+            {
+                if (File.Exists(path))
+                    System.Diagnostics.Process.Start(
+                        "explorer.exe", "/select,\"" + path + "\"");
+                else
+                {
+                    string dir = Path.GetDirectoryName(path);
+                    if (!string.IsNullOrEmpty(dir) && Directory.Exists(dir))
+                        System.Diagnostics.Process.Start(
+                            "explorer.exe", "\"" + dir + "\"");
+                    else
+                        MessageBox.Show("Folder not found:\n" + path, "BCore PDM",
+                            MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                }
+            }
+            catch { }
+        }
+
+        private void CardWhereUsed()
+        {
+            if (_menuCard == null || string.IsNullOrEmpty(_menuCard.ModelPath))
+                return;
+            var c = _menuCard;
+            string fileName = Path.GetFileName(c.ModelPath);
+            try
+            {
+                using (var wu = new WhereUsedForm(
+                    c.ModelPath, fileName, c.PartNumber, c.ConfigName))
+                {
+                    wu.ShowDialog(this);
+                    // If the user opened a parent assembly there, cascade that open
+                    // up through this modal to the task-pane caller.
+                    if (!string.IsNullOrEmpty(wu.FileToOpen))
+                    {
+                        FileToOpen = wu.FileToOpen;
+                        FileToOpenConfig = null;
+                        OpenDrawing = false;
+                        DialogResult = DialogResult.OK;
+                        Close();
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show("Where Used could not open:\n" + ex.Message,
+                    "BCore PDM", MessageBoxButtons.OK, MessageBoxIcon.Warning);
             }
         }
 
@@ -705,8 +821,9 @@ namespace PDMLite
             string material = ComboValue(_materialBox);
             string finish   = ComboValue(_finishBox);
             string partType = ComboValue(_partTypeBox);
+            string status   = ComboValue(_statusBox);
             if (main.Length == 0 && drawnBy.Length == 0 && material.Length == 0 &&
-                finish.Length == 0 && partType.Length == 0)
+                finish.Length == 0 && partType.Length == 0 && status.Length == 0)
                 return;
 
             List<VaultFile> all;
@@ -714,8 +831,8 @@ namespace PDMLite
             {
                 bool exTrunc;
                 all = DatabaseManager.SearchFilesAdvanced(
-                    main, drawnBy, material, finish, partType, out exTrunc,
-                    int.MaxValue);
+                    main, drawnBy, material, finish, partType, status,
+                    out exTrunc, int.MaxValue);
             }
             catch
             {
@@ -725,6 +842,31 @@ namespace PDMLite
                 return;
             }
             if (all.Count == 0) return;
+
+            // Flatten to one row per matching config, then sort by Part No (then
+            // file name) so the CSV matches the on-screen default order.
+            var rows = new List<string[]>();
+            foreach (var f in all)
+            {
+                string fileName = string.IsNullOrEmpty(f.FileName)
+                    ? Path.GetFileName(f.FilePath) : f.FileName;
+                foreach (var c in f.Configurations)
+                    rows.Add(new[]
+                    {
+                        fileName,
+                        string.IsNullOrEmpty(c.PartNo) ? f.PartNumber : c.PartNo,
+                        c.DrawingNo ?? "",
+                        string.IsNullOrEmpty(c.Description) ? f.Description : c.Description,
+                        c.Revision ?? "", c.Material ?? "", c.FinishType ?? "",
+                        c.DrawnBy ?? "", c.PartType ?? ""
+                    });
+            }
+            rows.Sort((a, b) =>
+            {
+                int c1 = string.Compare(a[1], b[1], StringComparison.OrdinalIgnoreCase);
+                return c1 != 0 ? c1
+                    : string.Compare(a[0], b[0], StringComparison.OrdinalIgnoreCase);
+            });
 
             using (var sfd = new SaveFileDialog
             {
@@ -736,40 +878,21 @@ namespace PDMLite
                 if (sfd.ShowDialog(this) != DialogResult.OK) return;
                 try
                 {
-                    int rows = 0;
                     var sb = new StringBuilder();
                     sb.AppendLine(string.Join(",", new[]
                     {
                         "File Name", "Part No", "Drawing No", "Description",
                         "Rev", "Material", "Finish", "Drawn By", "Part Type"
                     }));
-                    foreach (var f in all)
+                    foreach (var r in rows)
                     {
-                        string fileName = string.IsNullOrEmpty(f.FileName)
-                            ? Path.GetFileName(f.FilePath) : f.FileName;
-                        foreach (var c in f.Configurations)
-                        {
-                            sb.AppendLine(string.Join(",", new[]
-                            {
-                                Csv(fileName),
-                                Csv(string.IsNullOrEmpty(c.PartNo)
-                                        ? f.PartNumber : c.PartNo),
-                                Csv(c.DrawingNo),
-                                Csv(string.IsNullOrEmpty(c.Description)
-                                        ? f.Description : c.Description),
-                                Csv(c.Revision),
-                                Csv(c.Material),
-                                Csv(c.FinishType),
-                                Csv(c.DrawnBy),
-                                Csv(c.PartType)
-                            }));
-                            rows++;
-                        }
+                        for (int i = 0; i < r.Length; i++) r[i] = Csv(r[i]);
+                        sb.AppendLine(string.Join(",", r));
                     }
                     File.WriteAllText(sfd.FileName, sb.ToString());
-                    MessageBox.Show("Exported " + rows +
-                        " row" + (rows == 1 ? "" : "s") + " to:\n" + sfd.FileName,
-                        "BCore PDM — Exported",
+                    MessageBox.Show("Exported " + rows.Count +
+                        " row" + (rows.Count == 1 ? "" : "s") + " to:\n" +
+                        sfd.FileName, "BCore PDM — Exported",
                         MessageBoxButtons.OK, MessageBoxIcon.Information);
                 }
                 catch (Exception ex)

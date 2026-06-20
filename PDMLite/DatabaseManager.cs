@@ -1777,6 +1777,8 @@ namespace PDMLite
         //   material — EXACT (case-insensitive) match on the config's Material1
         //   finish   — EXACT match on the config's FinishType
         //   partType — EXACT match on the config's PartType (Manufactured|Purchased)
+        //   statusFilter — EXACT match on the FILE status (WIP/Released/Locked/
+        //              Obsolete), file-level (all configs share one status)
         //
         // Returns PARTS/ASSEMBLIES only — the four indexed properties live on the
         // model, not on drawings (the result card's Open DRW still reaches the
@@ -1791,7 +1793,8 @@ namespace PDMLite
         // lock mode; the quick SearchFiles owns orphan cleanup).
         public static List<VaultFile> SearchFilesAdvanced(
             string mainTerm, string drawnBy, string material, string finish,
-            string partType, out bool truncated, int maxResults = MaxSearchResults)
+            string partType, string statusFilter, out bool truncated,
+            int maxResults = MaxSearchResults)
         {
             truncated = false;
             var results = new List<VaultFile>();
@@ -1801,10 +1804,11 @@ namespace PDMLite
             string mat  = (material ?? "").Trim();
             string fin  = (finish   ?? "").Trim();
             string pt   = (partType ?? "").Trim();
+            string st   = (statusFilter ?? "").Trim(); // file-level status (WIP/Released/Locked/Obsolete)
 
             // Nothing to search — every field blank.
             if (main.Length == 0 && drw.Length == 0 && mat.Length == 0 &&
-                fin.Length == 0 && pt.Length == 0)
+                fin.Length == 0 && pt.Length == 0 && st.Length == 0)
                 return results;
 
             var seenFileNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
@@ -1823,6 +1827,11 @@ namespace PDMLite
                 {
                     string status = (string)el.Element("Status") ?? "";
                     if (string.IsNullOrEmpty(status)) continue;
+
+                    // Lifecycle filter (file-level — all configs share one status).
+                    if (st.Length > 0 &&
+                        !string.Equals(status, st, StringComparison.OrdinalIgnoreCase))
+                        continue;
 
                     string fileName = (string)el.Element("FileName") ?? "";
 
