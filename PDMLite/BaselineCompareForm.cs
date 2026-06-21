@@ -49,8 +49,8 @@ namespace PDMLite
             public string PartNo;
             public string FromRev;
             public string ToRev;
-            public int    FromQty;
-            public int    ToQty;
+            public long   FromQty;
+            public long   ToQty;
             public Color  Colour;
         }
 
@@ -233,10 +233,63 @@ namespace PDMLite
             return (i < 0 || i >= _baselines.Count) ? null : _baselines[i];
         }
 
-        // Key a component by its path (fall back to name) for matching across
-        // the two snapshots.
-        private static string Key(BaselineComponent c) =>
-            (!string.IsNullOrEmpty(c.Path) ? c.Path : c.Name ?? "").ToLowerInvariant();
+        // One rolled-up parts-list line for a baseline: a unique part
+        // (path + config) with its EXTENDED, whole-tree quantity.
+        private sealed class AggRow
+        {
+            public string Name;
+            public string PartNo;
+            public string Revision;
+            public long   Qty; // extended (rolled-up) quantity
+        }
+
+        // Roll a baseline's stored depth-first tree up into a flat parts map
+        // keyed by PATH + CONFIG, with EXTENDED quantities. Keying by path
+        // alone collapsed a multi-config part (e.g. MAX used as MAX.01 / MAX.02
+        // / MAX.03 — three distinct part numbers) into a single row, losing the
+        // other configs; keying by path+config gives each config its own diff
+        // line. Quantities roll up the tree (a part used in two sub-assemblies,
+        // or inside a sub-assembly used N times, is counted across the whole
+        // tree) — mirrors the viewer's Flatten so a "1 → 2" qty change is real.
+        private static Dictionary<string, AggRow> Flatten(AssemblyBaseline b)
+        {
+            var map = new Dictionary<string, AggRow>(StringComparer.OrdinalIgnoreCase);
+            if (b == null || b.Components == null) return map;
+
+            // ext[level] = extended qty of the current open ancestor at that
+            // level; a component's extended qty = its per-parent Qty × its
+            // parent's extended qty (top-level parent = 1).
+            var ext = new List<long>();
+            foreach (var c in b.Components)
+            {
+                int lvl = c.Level < 0 ? 0 : c.Level;
+                long qty = c.Qty <= 0 ? 1 : c.Qty;
+                long parent = lvl == 0 ? 1
+                    : (lvl - 1 < ext.Count ? ext[lvl - 1] : 1);
+                long e = parent * qty;
+                while (ext.Count <= lvl) ext.Add(1);
+                ext[lvl] = e;
+
+                string key = (c.Path ?? "").ToLowerInvariant() + "|" +
+                             (c.Config ?? "").ToLowerInvariant();
+                AggRow r;
+                if (!map.TryGetValue(key, out r))
+                {
+                    r = new AggRow
+                    {
+                        Name = c.Name, PartNo = c.PartNo, Revision = c.Revision
+                    };
+                    map[key] = r;
+                }
+                r.Qty += e;
+                // PartNo/Revision/Name are consistent per path+config; keep the
+                // first non-empty in case an occurrence has a blank.
+                if (string.IsNullOrEmpty(r.PartNo))   r.PartNo = c.PartNo;
+                if (string.IsNullOrEmpty(r.Revision)) r.Revision = c.Revision;
+                if (string.IsNullOrEmpty(r.Name))     r.Name = c.Name;
+            }
+            return map;
+        }
 
         private List<DiffRow> _rows = new List<DiffRow>();
 
@@ -288,17 +341,18 @@ namespace PDMLite
             var to = At(_toPicker);
             if (from == null || to == null) return rows;
 
-            var fromMap = new Dictionary<string, BaselineComponent>(StringComparer.OrdinalIgnoreCase);
-            foreach (var c in from.Components) fromMap[Key(c)] = c;
-            var toMap = new Dictionary<string, BaselineComponent>(StringComparer.OrdinalIgnoreCase);
-            foreach (var c in to.Components) toMap[Key(c)] = c;
+            // Roll each baseline up to a flat parts list keyed by path+config
+            // (extended quantities), then diff those — so multi-config parts and
+            // parts used in several places compare correctly.
+            var fromMap = Flatten(from);
+            var toMap = Flatten(to);
 
             var keys = new HashSet<string>(fromMap.Keys, StringComparer.OrdinalIgnoreCase);
             foreach (var k in toMap.Keys) keys.Add(k);
 
             foreach (var k in keys)
             {
-                BaselineComponent fc, tc;
+                AggRow fc, tc;
                 fromMap.TryGetValue(k, out fc);
                 toMap.TryGetValue(k, out tc);
 
@@ -333,13 +387,18 @@ namespace PDMLite
                 }
             }
 
-            // Added → Removed → Changed → Unchanged, then by name.
+            // Added → Removed → Changed → Unchanged, then by part number (so a
+            // multi-config part's rows — MAX.01/.02/.03 — order predictably),
+            // then by name.
             int Rank(string c) => c == "Added" ? 0 : c == "Removed" ? 1
                 : c == "Changed" ? 2 : 3;
             rows.Sort((a, b) =>
             {
                 int r = Rank(a.Change).CompareTo(Rank(b.Change));
-                return r != 0 ? r
+                if (r != 0) return r;
+                int p = string.Compare(a.PartNo ?? "", b.PartNo ?? "",
+                    StringComparison.OrdinalIgnoreCase);
+                return p != 0 ? p
                     : string.Compare(a.Name, b.Name, StringComparison.OrdinalIgnoreCase);
             });
             return rows;
