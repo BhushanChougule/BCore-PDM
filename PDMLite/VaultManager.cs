@@ -1124,6 +1124,59 @@ namespace PDMLite
                 }
             }
 
+            // ── Unsaved-changes guard ─────────────────────────────────────
+            // The release's gates (the assembly parts-Released walk and the
+            // broken-ref check) and the as-released baseline all read the file
+            // FROM DISK, and the release's own save happens LATER (just before
+            // export). So an open file with unsaved edits — e.g. an obsolete or
+            // unreleased child just suppressed/deleted — would be judged on its
+            // STALE on-disk copy and wrongly block (found in shop testing:
+            // delete an obsolete part, hit Release, still blocked until a manual
+            // save). Flush it to disk up front so every check sees the current
+            // file. A clean (already-saved) doc skips this entirely.
+            bool dirty = false;
+            try { dirty = doc.GetSaveFlag(); } catch { }
+            if (dirty)
+            {
+                string docNoun = isDrawing ? "drawing"
+                    : docType == (int)swDocumentTypes_e.swDocASSEMBLY
+                        ? "assembly" : "part";
+
+                // Interactive release: ask before touching the user's file.
+                // Bulk/chained release (suppressPrompts) saves silently.
+                if (!suppressPrompts)
+                {
+                    var saveChoice = MessageBox.Show(
+                        "This " + docNoun + " has unsaved changes.\n\n" +
+                        "It must be saved before release — the release checks " +
+                        "read the saved file on disk, so unsaved edits (such as " +
+                        "a removed or suppressed component) would not be seen.\n\n" +
+                        "Save now and continue with the release?",
+                        "BCore PDM — Unsaved Changes",
+                        MessageBoxButtons.YesNo, MessageBoxIcon.Question);
+                    if (saveChoice != DialogResult.Yes) return;
+                }
+
+                // TrySaveVerified saves under SuppressSaveValidation (no extra
+                // PropertyForm pass — the release runs its own ValidateAllConfigs)
+                // and confirms via the dirty flag. A genuine save failure aborts
+                // before anything is mutated.
+                if (!TrySaveVerified(doc))
+                {
+                    AuditLogger.Log("ReleaseFailed", user,
+                        Path.GetFileName(filePath), "", "",
+                        "Save failed before release gates (unsaved changes)");
+                    MessageBox.Show(
+                        "Release ABORTED — SOLIDWORKS could not save the file:\n" +
+                        filePath + "\n\n" +
+                        "The file may be read-only on disk or the network share " +
+                        "unavailable. Resolve the save problem and release again.",
+                        "BCore PDM — Release Failed",
+                        MessageBoxButtons.OK, MessageBoxIcon.Error);
+                    return;
+                }
+            }
+
             // ── Drawing: check referenced part is Released first ──────────
             if (isDrawing)
             {
