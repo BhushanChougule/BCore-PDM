@@ -4051,7 +4051,19 @@ namespace PDMLite
                                     DrawingNo   = PropertyValidator.GetProperty(
                                                       restored, "DrawingNo", c),
                                     Revision    = PropertyValidator.GetProperty(
-                                                      restored, "Revision", c)
+                                                      restored, "Revision", c),
+                                    // Advanced-search index — UpsertFile rebuilds the
+                                    // whole <Configurations> block, so these must be
+                                    // re-captured here or a rollback blanks them until
+                                    // the file's next save (the restored doc is open).
+                                    Material    = PropertyValidator.GetProperty(
+                                                      restored, "Material1", c),
+                                    FinishType  = PropertyValidator.GetProperty(
+                                                      restored, "FinishType", c),
+                                    DrawnBy     = PropertyValidator.GetProperty(
+                                                      restored, "DrawnBy", c),
+                                    PartType    = PropertyValidator.GetProperty(
+                                                      restored, "PartType", c)
                                 });
                             }
                             sync.Configurations = cfgs;

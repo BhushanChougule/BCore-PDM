@@ -133,6 +133,18 @@ namespace PDMLite
             }}
         };
 
+        // Single source of truth for the Material / Finish / PartType option
+        // lists, shared with the Advanced Search popup so its dropdowns can never
+        // drift from this property dialog. Returns a CLONE (callers can't mutate
+        // the source). Material1 / FinishType include the leading "-- Select --"
+        // sentinel — consumers wanting a clean list skip index 0.
+        public static string[] MaterialOptions()
+            => (string[])Dropdowns["Material1"].Clone();
+        public static string[] FinishTypeOptions()
+            => (string[])Dropdowns["FinishType"].Clone();
+        public static string[] PartTypeOptions()
+            => (string[])Dropdowns["PartType"].Clone();
+
         // Active-config mode (save-time Rules 3/3.5): one row per missing
         // field; values are written to the ACTIVE configuration.
         // askDrawingScope (Rule 3.5 new-config flow only): appends a
