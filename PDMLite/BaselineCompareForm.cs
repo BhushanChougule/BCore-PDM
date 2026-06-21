@@ -21,10 +21,10 @@ namespace PDMLite
         private readonly string _asmName;
         private List<AssemblyBaseline> _baselines = new List<AssemblyBaseline>();
 
-        private ComboBox _fromPicker, _toPicker;
+        private ComboBox _fromPicker, _toPicker, _typeFilter;
         private CheckBox _showUnchanged;
         private DataGridView _grid;
-        private Label _summary;
+        private Label _summary, _reasonLabel, _impactLabel;
         private Button _btnExport;
 
         private float _scale = 1f;
@@ -47,10 +47,15 @@ namespace PDMLite
             public string Change;   // Added / Removed / Changed / Unchanged
             public string Name;
             public string PartNo;
+            public string FromDesc;
+            public string ToDesc;
             public string FromRev;
             public string ToRev;
             public long   FromQty;
             public long   ToQty;
+            public double FromWeight; // extended LEAF weight (lb), From side
+            public double ToWeight;   // extended LEAF weight (lb), To side
+            public bool   NoRevBump;  // Changed, but the revision letter did NOT change
             public Color  Colour;
         }
 
@@ -83,8 +88,8 @@ namespace PDMLite
             this.MinimizeBox = false;
             this.BackColor = cBg;
             this.KeyPreview = true;
-            this.ClientSize = new Size(S(640), S(560));
-            this.MinimumSize = new Size(S(480), S(360));
+            this.ClientSize = new Size(S(880), S(580));
+            this.MinimumSize = new Size(S(620), S(380));
 
             var headerBar = new Panel { BackColor = cBrandDark, Dock = DockStyle.Top, Height = S(30) };
             headerBar.Controls.Add(new Label
@@ -94,14 +99,14 @@ namespace PDMLite
                 Dock = DockStyle.Fill, TextAlign = ContentAlignment.MiddleCenter
             });
 
-            var top = new Panel { Dock = DockStyle.Top, Height = S(92), BackColor = cBg };
+            var top = new Panel { Dock = DockStyle.Top, Height = S(126), BackColor = cBg };
             top.Controls.Add(new Label
             {
                 Text = string.IsNullOrEmpty(_asmName)
                     ? Path.GetFileName(_asmPath ?? "") : _asmName,
                 Font = _fSub, ForeColor = cTextDark,
                 Location = new Point(S(14), S(8)),
-                AutoSize = false, Width = S(600), Height = S(20), AutoEllipsis = true
+                AutoSize = false, Width = S(852), Height = S(20), AutoEllipsis = true
             });
 
             top.Controls.Add(new Label
@@ -112,19 +117,19 @@ namespace PDMLite
             _fromPicker = new ComboBox
             {
                 Font = _fMeta, DropDownStyle = ComboBoxStyle.DropDownList,
-                Location = new Point(S(54), S(33)), Width = S(230)
+                Location = new Point(S(54), S(33)), Width = S(260)
             };
             top.Controls.Add(_fromPicker);
 
             top.Controls.Add(new Label
             {
                 Text = "To:", Font = _fMeta, ForeColor = cTextDark,
-                Location = new Point(S(300), S(36)), AutoSize = true
+                Location = new Point(S(330), S(36)), AutoSize = true
             });
             _toPicker = new ComboBox
             {
                 Font = _fMeta, DropDownStyle = ComboBoxStyle.DropDownList,
-                Location = new Point(S(330), S(33)), Width = S(230)
+                Location = new Point(S(360), S(33)), Width = S(260)
             };
             top.Controls.Add(_toPicker);
 
@@ -143,21 +148,55 @@ namespace PDMLite
             _fromPicker.SelectedIndexChanged += (s, e) => Recompute();
             _toPicker.SelectedIndexChanged += (s, e) => Recompute();
 
+            // Reason-for-change of each release (the "why" behind the change).
+            _reasonLabel = new Label
+            {
+                Font = _fMeta, ForeColor = Color.FromArgb(110, 116, 126),
+                Location = new Point(S(14), S(60)),
+                AutoSize = false, Width = S(852), Height = S(16), AutoEllipsis = true
+            };
+            top.Controls.Add(_reasonLabel);
+
             _showUnchanged = new CheckBox
             {
                 Text = "Show unchanged", Font = _fMeta, ForeColor = cTextDark,
-                Location = new Point(S(14), S(62)), AutoSize = true, Checked = false
+                Location = new Point(S(14), S(82)), AutoSize = true, Checked = false
             };
             _showUnchanged.CheckedChanged += (s, e) => Recompute();
             top.Controls.Add(_showUnchanged);
 
+            // Quick filter to one change type (Added/Removed/Changed only).
+            top.Controls.Add(new Label
+            {
+                Text = "Show:", Font = _fMeta, ForeColor = cTextDark,
+                Location = new Point(S(172), S(84)), AutoSize = true
+            });
+            _typeFilter = new ComboBox
+            {
+                Font = _fMeta, DropDownStyle = ComboBoxStyle.DropDownList,
+                Location = new Point(S(212), S(81)), Width = S(120)
+            };
+            _typeFilter.Items.AddRange(new object[] { "All changes", "Added", "Removed", "Changed" });
+            _typeFilter.SelectedIndex = 0;
+            _typeFilter.SelectedIndexChanged += (s, e) => Recompute();
+            top.Controls.Add(_typeFilter);
+
             _summary = new Label
             {
                 Font = _fMeta, ForeColor = Color.FromArgb(110, 116, 126),
-                Location = new Point(S(150), S(63)),
-                AutoSize = false, Width = S(470), Height = S(18), AutoEllipsis = true
+                Location = new Point(S(348), S(83)),
+                AutoSize = false, Width = S(518), Height = S(16), AutoEllipsis = true
             };
             top.Controls.Add(_summary);
+
+            // Change-impact line: total qty + total mass deltas (the ECO magnitude).
+            _impactLabel = new Label
+            {
+                Font = _fMeta, ForeColor = cTextDark,
+                Location = new Point(S(14), S(104)),
+                AutoSize = false, Width = S(852), Height = S(16), AutoEllipsis = true
+            };
+            top.Controls.Add(_impactLabel);
 
             var bottom = new Panel { Dock = DockStyle.Bottom, Height = S(44), BackColor = cBg };
             var btnClose = MakeButton("Close", Color.FromArgb(220, 220, 220), cTextDark);
@@ -190,12 +229,15 @@ namespace PDMLite
             _grid.ColumnHeadersHeight = S(26);
             _grid.AlternatingRowsDefaultCellStyle.BackColor = Color.FromArgb(245, 248, 251);
             _grid.RowTemplate.Height = S(22);
-            AddCol("Change", 0.16f);
-            AddCol("Component", 0.30f);
-            AddCol("Part No", 0.20f);
-            AddCol("Rev (from)", 0.11f);
-            AddCol("Rev (to)", 0.11f);
-            AddCol("Qty", 0.12f); // "from → to"
+            AddCol("Change", 0.12f);
+            AddCol("Component", 0.17f);
+            AddCol("Part No", 0.13f);
+            AddCol("Description", 0.21f);
+            AddCol("Rev (from)", 0.08f);
+            AddCol("Rev (to)", 0.08f);
+            AddCol("Qty", 0.09f);       // "from → to"
+            AddCol("Δ", 0.05f);          // net qty (+/-)
+            AddCol("Wt Δ (lb)", 0.09f); // extended weight delta
             _grid.CellFormatting += Grid_CellFormatting;
 
             // Fill control first (resolved last → middle), then edges; inner top
@@ -240,7 +282,9 @@ namespace PDMLite
             public string Name;
             public string PartNo;
             public string Revision;
-            public long   Qty; // extended (rolled-up) quantity
+            public string Description;
+            public long   Qty;    // extended (rolled-up) quantity
+            public double Weight; // extended LEAF weight (lb); 0 for sub-assemblies
         }
 
         // Roll a baseline's stored depth-first tree up into a flat parts map
@@ -259,9 +303,11 @@ namespace PDMLite
             // ext[level] = extended qty of the current open ancestor at that
             // level; a component's extended qty = its per-parent Qty × its
             // parent's extended qty (top-level parent = 1).
+            var comps = b.Components;
             var ext = new List<long>();
-            foreach (var c in b.Components)
+            for (int i = 0; i < comps.Count; i++)
             {
+                var c = comps[i];
                 int lvl = c.Level < 0 ? 0 : c.Level;
                 long qty = c.Qty <= 0 ? 1 : c.Qty;
                 long parent = lvl == 0 ? 1
@@ -277,16 +323,24 @@ namespace PDMLite
                 {
                     r = new AggRow
                     {
-                        Name = c.Name, PartNo = c.PartNo, Revision = c.Revision
+                        Name = c.Name, PartNo = c.PartNo,
+                        Revision = c.Revision, Description = c.Description
                     };
                     map[key] = r;
                 }
                 r.Qty += e;
-                // PartNo/Revision/Name are consistent per path+config; keep the
-                // first non-empty in case an occurrence has a blank.
-                if (string.IsNullOrEmpty(r.PartNo))   r.PartNo = c.PartNo;
-                if (string.IsNullOrEmpty(r.Revision)) r.Revision = c.Revision;
-                if (string.IsNullOrEmpty(r.Name))     r.Name = c.Name;
+                // Weight rolls up only on LEAF components (no deeper child): a
+                // sub-assembly's own stored mass already covers its children, so
+                // counting leaves matches the viewer's footer mass AND lets the
+                // per-row weight deltas sum to the assembly total.
+                bool isLeaf = !(i + 1 < comps.Count && comps[i + 1].Level > lvl);
+                if (isLeaf) r.Weight += c.Weight * e;
+                // PartNo/Revision/Name/Description are consistent per path+config;
+                // keep the first non-empty in case an occurrence has a blank.
+                if (string.IsNullOrEmpty(r.PartNo))      r.PartNo = c.PartNo;
+                if (string.IsNullOrEmpty(r.Revision))    r.Revision = c.Revision;
+                if (string.IsNullOrEmpty(r.Name))        r.Name = c.Name;
+                if (string.IsNullOrEmpty(r.Description)) r.Description = c.Description;
             }
             return map;
         }
@@ -299,31 +353,127 @@ namespace PDMLite
             _rows = BuildDiff();
             _grid.Rows.Clear();
 
-            bool showUnch = _showUnchanged != null && _showUnchanged.Checked;
-            int added = 0, removed = 0, changed = 0, unchanged = 0;
+            int added = 0, removed = 0, changed = 0, unchanged = 0, noRevBump = 0;
             foreach (var r in _rows)
             {
                 if (r.Change == "Added") added++;
                 else if (r.Change == "Removed") removed++;
-                else if (r.Change == "Changed") changed++;
+                else if (r.Change == "Changed") { changed++; if (r.NoRevBump) noRevBump++; }
                 else unchanged++;
 
-                if (r.Change == "Unchanged" && !showUnch) continue;
-                _grid.Rows.Add(r.Change, Path.GetFileNameWithoutExtension(r.Name ?? ""),
-                    r.PartNo, r.FromRev, r.ToRev, QtyCell(r));
+                if (!IsVisible(r)) continue;
+                int row = _grid.Rows.Add(
+                    r.Change + (r.NoRevBump ? " *" : ""),
+                    Path.GetFileNameWithoutExtension(r.Name ?? ""),
+                    r.PartNo, DescCell(r), r.FromRev, r.ToRev,
+                    QtyCell(r), DeltaCell(r), WeightDeltaCell(r));
+                if (r.NoRevBump)
+                    _grid.Rows[row].Cells[0].ToolTipText =
+                        "Changed without a revision bump (quantity or description edited)";
             }
 
             var from = At(_fromPicker); var to = At(_toPicker);
+            bool valid = from != null && to != null && !ReferenceEquals(from, to) &&
+                !(from.Revision == to.Revision && from.ReleasedDate == to.ReleasedDate);
+
+            if (_reasonLabel != null)
+                _reasonLabel.Text = (from == null || to == null) ? "" :
+                    "Reason — From: " + ReasonOf(from) + "      To: " + ReasonOf(to);
+
             if (from == null || to == null)
                 _summary.Text = "Select two releases to compare.";
-            else if (ReferenceEquals(from, to) ||
-                     (from.Revision == to.Revision && from.ReleasedDate == to.ReleasedDate))
+            else if (!valid)
                 _summary.Text = "Same release selected — choose two different releases.";
             else
                 _summary.Text = added + " added · " + removed + " removed · " +
-                    changed + " changed · " + unchanged + " unchanged";
-            if (_btnExport != null) _btnExport.Enabled = _rows.Count > 0;
+                    changed + " changed · " + unchanged + " unchanged" +
+                    (noRevBump > 0 ? "    ( * " + noRevBump + " changed w/o rev bump)" : "");
+
+            if (_impactLabel != null)
+            {
+                if (!valid) _impactLabel.Text = "";
+                else
+                {
+                    long qF = TotalQty(from), qT = TotalQty(to);
+                    double wF = TotalWeight(from), wT = TotalWeight(to);
+                    _impactLabel.Text =
+                        "Qty " + qF + " → " + qT + " (" + Signed(qT - qF) + ")" +
+                        "        Weight " + Fmt(wF) + " → " + Fmt(wT) + " lb (" +
+                        SignedF(wT - wF) + ")";
+                }
+            }
+
+            if (_btnExport != null) _btnExport.Enabled = valid && _rows.Count > 0;
         }
+
+        // A row is visible when it passes the change-type filter. "All changes"
+        // shows Added/Removed/Changed, plus Unchanged when the checkbox is ticked.
+        private bool IsVisible(DiffRow r)
+        {
+            string sel = _typeFilter?.SelectedItem as string ?? "All changes";
+            if (sel == "Added")   return r.Change == "Added";
+            if (sel == "Removed") return r.Change == "Removed";
+            if (sel == "Changed") return r.Change == "Changed";
+            bool showUnch = _showUnchanged != null && _showUnchanged.Checked;
+            return r.Change != "Unchanged" || showUnch;
+        }
+
+        private static string ReasonOf(AssemblyBaseline b) =>
+            string.IsNullOrWhiteSpace(b?.Reason) ? "—" : b.Reason.Trim();
+
+        // Description cell: "old → new" when it changed (so an un-bumped edit is
+        // visible), else the single value.
+        private static string DescCell(DiffRow r)
+        {
+            string f = (r.FromDesc ?? "").Trim(), t = (r.ToDesc ?? "").Trim();
+            if (r.Change == "Added") return t;
+            if (r.Change == "Removed") return f;
+            return string.Equals(f, t, StringComparison.OrdinalIgnoreCase)
+                ? t : (f + " → " + t);
+        }
+
+        private static string DeltaCell(DiffRow r)
+        {
+            long d = r.ToQty - r.FromQty;
+            return d == 0 ? "" : Signed(d);
+        }
+
+        private static string WeightDeltaCell(DiffRow r)
+        {
+            double d = r.ToWeight - r.FromWeight;
+            return Math.Abs(d) < 0.0005 ? "" : SignedF(d);
+        }
+
+        // Sum of per-line quantities — matches the viewer's "Total Qty" footer.
+        private static long TotalQty(AssemblyBaseline b)
+        {
+            long t = 0;
+            if (b?.Components != null)
+                foreach (var c in b.Components) t += c.Qty <= 0 ? 1 : c.Qty;
+            return t;
+        }
+
+        // Total assembly mass (lb) = sum of the flattened LEAF weights (matches
+        // the viewer footer; sub-assemblies contribute 0 to avoid double-count).
+        private static double TotalWeight(AssemblyBaseline b)
+        {
+            double t = 0;
+            foreach (var r in Flatten(b).Values) t += r.Weight;
+            return t;
+        }
+
+        private static string Signed(long v) =>
+            v == 0 ? "0" : (v > 0 ? "+" + v : v.ToString());
+
+        private static string SignedF(double v)
+        {
+            if (Math.Abs(v) < 0.0005) return "0";
+            return (v > 0 ? "+" : "-") + Math.Abs(v).ToString("0.###",
+                System.Globalization.CultureInfo.InvariantCulture);
+        }
+
+        private static string Fmt(double v) =>
+            v.ToString("0.###", System.Globalization.CultureInfo.InvariantCulture);
 
         private static string QtyCell(DiffRow r)
         {
@@ -360,29 +510,40 @@ namespace PDMLite
                     rows.Add(new DiffRow
                     {
                         Change = "Added", Name = tc.Name, PartNo = tc.PartNo,
+                        FromDesc = "", ToDesc = tc.Description,
                         FromRev = "", ToRev = tc.Revision, FromQty = 0, ToQty = tc.Qty,
-                        Colour = cGreen
+                        FromWeight = 0, ToWeight = tc.Weight, Colour = cGreen
                     });
                 else if (fc != null && tc == null)
                     rows.Add(new DiffRow
                     {
                         Change = "Removed", Name = fc.Name, PartNo = fc.PartNo,
+                        FromDesc = fc.Description, ToDesc = "",
                         FromRev = fc.Revision, ToRev = "", FromQty = fc.Qty, ToQty = 0,
-                        Colour = cRed
+                        FromWeight = fc.Weight, ToWeight = 0, Colour = cRed
                     });
                 else
                 {
                     bool revChanged = !string.Equals(fc.Revision ?? "", tc.Revision ?? "",
                         StringComparison.OrdinalIgnoreCase);
                     bool qtyChanged = fc.Qty != tc.Qty;
+                    bool descChanged = !string.Equals((fc.Description ?? "").Trim(),
+                        (tc.Description ?? "").Trim(), StringComparison.OrdinalIgnoreCase);
+                    bool anyChange = revChanged || qtyChanged || descChanged;
                     rows.Add(new DiffRow
                     {
-                        Change = (revChanged || qtyChanged) ? "Changed" : "Unchanged",
+                        Change = anyChange ? "Changed" : "Unchanged",
                         Name = tc.Name ?? fc.Name,
                         PartNo = string.IsNullOrEmpty(tc.PartNo) ? fc.PartNo : tc.PartNo,
+                        FromDesc = fc.Description, ToDesc = tc.Description,
                         FromRev = fc.Revision, ToRev = tc.Revision,
                         FromQty = fc.Qty, ToQty = tc.Qty,
-                        Colour = (revChanged || qtyChanged) ? cOrange : cGray
+                        FromWeight = fc.Weight, ToWeight = tc.Weight,
+                        // A change with NO rev bump — the shop's rule is that any
+                        // change bumps the rev, so flag a qty/description edit that
+                        // left the rev letter untouched.
+                        NoRevBump = anyChange && !revChanged,
+                        Colour = anyChange ? cOrange : cGray
                     });
                 }
             }
@@ -409,9 +570,9 @@ namespace PDMLite
             if (e.RowIndex < 0 || _grid.Columns[e.ColumnIndex].HeaderText != "Change")
                 return;
             string s = (e.Value as string) ?? "";
-            if (s == "Added") e.CellStyle.ForeColor = cGreen;
-            else if (s == "Removed") e.CellStyle.ForeColor = cRed;
-            else if (s == "Changed") e.CellStyle.ForeColor = cOrange;
+            if (s.StartsWith("Added")) e.CellStyle.ForeColor = cGreen;
+            else if (s.StartsWith("Removed")) e.CellStyle.ForeColor = cRed;
+            else if (s.StartsWith("Changed")) e.CellStyle.ForeColor = cOrange;
             else e.CellStyle.ForeColor = cGray;
             e.CellStyle.Font = _fGridHead; // bold the change column
         }
@@ -430,23 +591,39 @@ namespace PDMLite
                 if (sfd.ShowDialog(this) != DialogResult.OK) return;
                 try
                 {
-                    bool showUnch = _showUnchanged.Checked;
                     var sb = new StringBuilder();
                     sb.AppendLine("Assembly,From REV,To REV");
-                    sb.AppendLine(Csv(_asmName) + "," + Csv(from.Revision) + "," + Csv(to.Revision));
+                    sb.AppendLine(Csv(_asmName) + "," + Csv("REV " + from.Revision) +
+                        "," + Csv("REV " + to.Revision));
+                    sb.AppendLine("Reason (from),Reason (to)");
+                    sb.AppendLine(Csv(ReasonOf(from)) + "," + Csv(ReasonOf(to)));
                     sb.AppendLine();
-                    sb.AppendLine("Change,Component,PartNo,Rev (from),Rev (to),Qty (from),Qty (to)");
+                    sb.AppendLine("Change,Component,PartNo,Description (from),Description (to)," +
+                        "Rev (from),Rev (to),Qty (from),Qty (to),Qty Delta,Weight Delta (lb)");
                     foreach (var r in _rows)
                     {
-                        if (r.Change == "Unchanged" && !showUnch) continue;
+                        if (!IsVisible(r)) continue;
                         sb.AppendLine(string.Join(",", new[]
                         {
-                            Csv(r.Change),
+                            Csv(r.Change + (r.NoRevBump ? " (no rev bump)" : "")),
                             Csv(Path.GetFileNameWithoutExtension(r.Name ?? "")),
-                            Csv(r.PartNo), Csv(r.FromRev), Csv(r.ToRev),
-                            Csv(r.FromQty.ToString()), Csv(r.ToQty.ToString())
+                            Csv(r.PartNo), Csv(r.FromDesc), Csv(r.ToDesc),
+                            Csv(r.FromRev), Csv(r.ToRev),
+                            Csv(r.FromQty.ToString()), Csv(r.ToQty.ToString()),
+                            Csv(DeltaCell(r)), Csv(WeightDeltaCell(r))
                         }));
                     }
+                    sb.AppendLine();
+                    sb.AppendLine("Totals,Qty (from),Qty (to),Qty Delta," +
+                        "Weight from (lb),Weight to (lb),Weight Delta (lb)");
+                    sb.AppendLine(string.Join(",", new[]
+                    {
+                        "",
+                        Csv(TotalQty(from).ToString()), Csv(TotalQty(to).ToString()),
+                        Csv(Signed(TotalQty(to) - TotalQty(from))),
+                        Csv(Fmt(TotalWeight(from))), Csv(Fmt(TotalWeight(to))),
+                        Csv(SignedF(TotalWeight(to) - TotalWeight(from)))
+                    }));
                     File.WriteAllText(sfd.FileName, sb.ToString());
                     MessageBox.Show("Comparison exported to:\n" + sfd.FileName,
                         "BCore PDM — Exported",
@@ -464,7 +641,7 @@ namespace PDMLite
         private static string Csv(string field)
         {
             field = field ?? "";
-            if (field.Length > 0 && "=+-@".IndexOf(field[0]) >= 0)
+            if (field.Length > 0 && "=+-@\t\r".IndexOf(field[0]) >= 0)
                 field = "'" + field;
             if (field.IndexOfAny(new[] { ',', '"', '\n', '\r' }) >= 0)
                 field = "\"" + field.Replace("\"", "\"\"") + "\"";
