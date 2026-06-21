@@ -487,6 +487,15 @@ namespace PDMLite
                 return;
             }
 
+            // No matches — report and stop BEFORE the drawing-index load below,
+            // so a no-results tick doesn't pay an extra full vault.xml read.
+            if (results.Count == 0)
+            {
+                _countLabel.ForeColor = cTextGray;
+                _countLabel.Text = "No matching files.";
+                return;
+            }
+
             // Drawing snapshot for the Open DRW wiring (ONE load for the search,
             // not one per card — mirrors the task-pane search).
             DatabaseManager.DrawingIndex drwIndex;
@@ -735,6 +744,10 @@ namespace PDMLite
                 MouseEventHandler showMenu = (s, e) =>
                 {
                     if (e.Button != MouseButtons.Right) return;
+                    // Stop the debounce timer while the menu is up: a queued tick
+                    // would otherwise ClearAndDispose the card the menu sits on
+                    // (consistent with the CardWhereUsed / ExportCsv guards).
+                    _timer.Stop();
                     _menuCard = g;
                     _cardMenu.Show(Cursor.Position);
                 };
