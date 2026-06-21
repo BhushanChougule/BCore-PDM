@@ -176,7 +176,8 @@ namespace PDMLite
 
             _showUnchanged = new CheckBox
             {
-                Text = "Show unchanged", Font = _fMeta, ForeColor = cTextDark,
+                // Leading spaces add a gap between the tick box and the label.
+                Text = "  Show unchanged", Font = _fMeta, ForeColor = cTextDark,
                 AutoSize = true, Checked = false
             };
             _showUnchanged.CheckedChanged += (s, e) => Recompute();
@@ -279,12 +280,13 @@ namespace PDMLite
             _lblTo.Location = new Point(tx, by + S(4));
             _toPicker.Location = new Point(tx + tW + S(6), by);
 
-            // Row C: reasons — From under the From picker, To under the To picker.
+            // Row C: reasons — From under the From picker; the To reason VALUE
+            // aligns to the To picker box's left edge so it sits below the rev box.
             int ry = S(60);
             _reasonFrom.SetBounds(_lblFrom.Left, ry,
                 Math.Max(S(40), _lblTo.Left - _lblFrom.Left - g), S(16));
-            _reasonTo.SetBounds(_lblTo.Left, ry,
-                Math.Max(S(40), _toPicker.Right - _lblTo.Left), S(16));
+            _reasonTo.SetBounds(_toPicker.Left, ry,
+                Math.Max(S(40), W - pad - _toPicker.Left), S(16));
 
             // Rows D/E: a 2×2 block — left column [Show: filter / Show unchanged]
             // over right column [counts / impact] — centred as one unit, columns
@@ -428,7 +430,7 @@ namespace PDMLite
             if (_reasonFrom != null && _reasonTo != null)
             {
                 _reasonFrom.Text = from == null ? "" : "Reason — From: " + ReasonOf(from);
-                _reasonTo.Text = to == null ? "" : "To: " + ReasonOf(to);
+                _reasonTo.Text = to == null ? "" : ReasonOf(to);
             }
 
             if (from == null || to == null)
