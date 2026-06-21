@@ -24,7 +24,9 @@ namespace PDMLite
         private ComboBox _fromPicker, _toPicker, _typeFilter;
         private CheckBox _showUnchanged;
         private DataGridView _grid;
-        private Label _summary, _reasonLabel, _impactLabel;
+        private Panel _topPanel;
+        private Label _nameLbl, _lblFrom, _lblTo, _lblShow;
+        private Label _summary, _reasonFrom, _reasonTo, _impactLabel;
         private Button _btnExport;
 
         private float _scale = 1f;
@@ -99,37 +101,34 @@ namespace PDMLite
                 Dock = DockStyle.Fill, TextAlign = ContentAlignment.MiddleCenter
             });
 
-            var top = new Panel { Dock = DockStyle.Top, Height = S(126), BackColor = cBg };
-            top.Controls.Add(new Label
+            // Top block — all positions are set (and re-centered on resize) by
+            // LayoutTop, so the header content centres like the other BCore popups.
+            _topPanel = new Panel { Dock = DockStyle.Top, Height = S(132), BackColor = cBg };
+            var top = _topPanel;
+            var cReason = Color.FromArgb(110, 116, 126);
+
+            _nameLbl = new Label
             {
                 Text = string.IsNullOrEmpty(_asmName)
                     ? Path.GetFileName(_asmPath ?? "") : _asmName,
                 Font = _fSub, ForeColor = cTextDark,
-                Location = new Point(S(14), S(8)),
-                AutoSize = false, Width = S(852), Height = S(20), AutoEllipsis = true
-            });
+                AutoSize = false, Height = S(20),
+                TextAlign = ContentAlignment.MiddleCenter, AutoEllipsis = true
+            };
+            top.Controls.Add(_nameLbl);
 
-            top.Controls.Add(new Label
-            {
-                Text = "From:", Font = _fMeta, ForeColor = cTextDark,
-                Location = new Point(S(14), S(36)), AutoSize = true
-            });
+            _lblFrom = new Label { Text = "From:", Font = _fMeta, ForeColor = cTextDark, AutoSize = true };
+            top.Controls.Add(_lblFrom);
             _fromPicker = new ComboBox
             {
-                Font = _fMeta, DropDownStyle = ComboBoxStyle.DropDownList,
-                Location = new Point(S(54), S(33)), Width = S(260)
+                Font = _fMeta, DropDownStyle = ComboBoxStyle.DropDownList, Width = S(260)
             };
             top.Controls.Add(_fromPicker);
-
-            top.Controls.Add(new Label
-            {
-                Text = "To:", Font = _fMeta, ForeColor = cTextDark,
-                Location = new Point(S(330), S(36)), AutoSize = true
-            });
+            _lblTo = new Label { Text = "To:", Font = _fMeta, ForeColor = cTextDark, AutoSize = true };
+            top.Controls.Add(_lblTo);
             _toPicker = new ComboBox
             {
-                Font = _fMeta, DropDownStyle = ComboBoxStyle.DropDownList,
-                Location = new Point(S(360), S(33)), Width = S(260)
+                Font = _fMeta, DropDownStyle = ComboBoxStyle.DropDownList, Width = S(260)
             };
             top.Controls.Add(_toPicker);
 
@@ -148,55 +147,48 @@ namespace PDMLite
             _fromPicker.SelectedIndexChanged += (s, e) => Recompute();
             _toPicker.SelectedIndexChanged += (s, e) => Recompute();
 
-            // Reason-for-change of each release (the "why" behind the change).
-            _reasonLabel = new Label
+            // Reason-for-change of each release — From aligns under the From picker,
+            // To aligns under the To picker (set in LayoutTop).
+            _reasonFrom = new Label
             {
-                Font = _fMeta, ForeColor = Color.FromArgb(110, 116, 126),
-                Location = new Point(S(14), S(60)),
-                AutoSize = false, Width = S(852), Height = S(16), AutoEllipsis = true
+                Font = _fMeta, ForeColor = cReason,
+                AutoSize = false, Height = S(16), AutoEllipsis = true
             };
-            top.Controls.Add(_reasonLabel);
-
-            _showUnchanged = new CheckBox
+            _reasonTo = new Label
             {
-                Text = "Show unchanged", Font = _fMeta, ForeColor = cTextDark,
-                Location = new Point(S(14), S(82)), AutoSize = true, Checked = false
+                Font = _fMeta, ForeColor = cReason,
+                AutoSize = false, Height = S(16), AutoEllipsis = true
             };
-            _showUnchanged.CheckedChanged += (s, e) => Recompute();
-            top.Controls.Add(_showUnchanged);
+            top.Controls.Add(_reasonFrom);
+            top.Controls.Add(_reasonTo);
 
-            // Quick filter to one change type (Added/Removed/Changed only).
-            top.Controls.Add(new Label
-            {
-                Text = "Show:", Font = _fMeta, ForeColor = cTextDark,
-                Location = new Point(S(172), S(84)), AutoSize = true
-            });
+            // Left column: "Show:" filter (top) over "Show unchanged" (below).
+            _lblShow = new Label { Text = "Show:", Font = _fMeta, ForeColor = cTextDark, AutoSize = true };
+            top.Controls.Add(_lblShow);
             _typeFilter = new ComboBox
             {
-                Font = _fMeta, DropDownStyle = ComboBoxStyle.DropDownList,
-                Location = new Point(S(212), S(81)), Width = S(120)
+                Font = _fMeta, DropDownStyle = ComboBoxStyle.DropDownList, Width = S(130)
             };
             _typeFilter.Items.AddRange(new object[] { "All changes", "Added", "Removed", "Changed" });
             _typeFilter.SelectedIndex = 0;
             _typeFilter.SelectedIndexChanged += (s, e) => Recompute();
             top.Controls.Add(_typeFilter);
 
-            _summary = new Label
+            _showUnchanged = new CheckBox
             {
-                Font = _fMeta, ForeColor = Color.FromArgb(110, 116, 126),
-                Location = new Point(S(348), S(83)),
-                AutoSize = false, Width = S(518), Height = S(16), AutoEllipsis = true
+                Text = "Show unchanged", Font = _fMeta, ForeColor = cTextDark,
+                AutoSize = true, Checked = false
             };
-            top.Controls.Add(_summary);
+            _showUnchanged.CheckedChanged += (s, e) => Recompute();
+            top.Controls.Add(_showUnchanged);
 
-            // Change-impact line: total qty + total mass deltas (the ECO magnitude).
-            _impactLabel = new Label
-            {
-                Font = _fMeta, ForeColor = cTextDark,
-                Location = new Point(S(14), S(104)),
-                AutoSize = false, Width = S(852), Height = S(16), AutoEllipsis = true
-            };
+            // Right column: counts summary (top) over the change-impact line (below).
+            _summary = new Label { Font = _fMeta, ForeColor = cReason, AutoSize = true };
+            top.Controls.Add(_summary);
+            _impactLabel = new Label { Font = _fMeta, ForeColor = cTextDark, AutoSize = true };
             top.Controls.Add(_impactLabel);
+
+            top.Resize += (s, e) => LayoutTop(top);
 
             var bottom = new Panel { Dock = DockStyle.Bottom, Height = S(44), BackColor = cBg };
             var btnClose = MakeButton("Close", Color.FromArgb(220, 220, 220), cTextDark);
@@ -226,18 +218,21 @@ namespace PDMLite
             _grid.ColumnHeadersDefaultCellStyle.BackColor = cBrandDark;
             _grid.ColumnHeadersDefaultCellStyle.ForeColor = Color.White;
             _grid.ColumnHeadersDefaultCellStyle.Font = _fGridHead;
-            _grid.ColumnHeadersHeight = S(26);
+            _grid.ColumnHeadersDefaultCellStyle.Alignment =
+                DataGridViewContentAlignment.MiddleCenter;
+            // Tall enough that a two-line header ("Rev" / "(from)") shows fully.
+            _grid.ColumnHeadersHeight = S(40);
             _grid.AlternatingRowsDefaultCellStyle.BackColor = Color.FromArgb(245, 248, 251);
             _grid.RowTemplate.Height = S(22);
             AddCol("Change", 0.12f);
-            AddCol("Component", 0.17f);
+            AddCol("Component", 0.16f);
             AddCol("Part No", 0.13f);
-            AddCol("Description", 0.21f);
-            AddCol("Rev (from)", 0.08f);
-            AddCol("Rev (to)", 0.08f);
-            AddCol("Qty", 0.09f);       // "from → to"
-            AddCol("Δ", 0.05f);          // net qty (+/-)
-            AddCol("Wt Δ (lb)", 0.09f); // extended weight delta
+            AddCol("Description", 0.19f);
+            AddCol("Rev (from)", 0.09f, true);
+            AddCol("Rev (to)", 0.09f, true);
+            AddCol("Qty", 0.09f, true);       // "from → to"
+            AddCol("Δ", 0.05f, true);          // net qty (+/-)
+            AddCol("Wt Δ (lb)", 0.09f, true); // extended weight delta
             _grid.CellFormatting += Grid_CellFormatting;
 
             // Fill control first (resolved last → middle), then edges; inner top
@@ -249,6 +244,7 @@ namespace PDMLite
 
             btnClose.Location = new Point(bottom.Width - btnClose.Width - S(14), S(9));
             _btnExport.Location = new Point(btnClose.Left - _btnExport.Width - S(8), S(9));
+            LayoutTop(top); // initial centred layout (re-runs on resize + Recompute)
 
             this.FormClosed += (s, e) =>
             {
@@ -258,15 +254,68 @@ namespace PDMLite
             this.KeyDown += (s, e) => { if (e.KeyCode == Keys.Escape) this.Close(); };
         }
 
-        private void AddCol(string header, float weight)
+        // Centre the header block (name · pickers · reasons · filter+summary),
+        // re-run on resize and after every Recompute. Mirrors the As-Released
+        // Baseline viewer's centred top block.
+        private void LayoutTop(Panel top)
         {
-            _grid.Columns.Add(new DataGridViewTextBoxColumn
+            if (top == null || _fromPicker == null) return;
+            int W = top.ClientSize.Width;
+            int cx = W / 2;
+            int pad = S(10);
+
+            // Row A: name spans the width, centred via TextAlign.
+            _nameLbl.SetBounds(pad, S(8), Math.Max(W - 2 * pad, S(120)), S(20));
+
+            // Row B: From [picker]   To [picker], centred as a group.
+            int pw = S(260), g = S(28);
+            int fW = _lblFrom.Width, tW = _lblTo.Width;
+            int groupW = fW + S(6) + pw + g + tW + S(6) + pw;
+            int bx = Math.Max(pad, cx - groupW / 2);
+            int by = S(33);
+            _lblFrom.Location = new Point(bx, by + S(4));
+            _fromPicker.Location = new Point(bx + fW + S(6), by);
+            int tx = _fromPicker.Right + g;
+            _lblTo.Location = new Point(tx, by + S(4));
+            _toPicker.Location = new Point(tx + tW + S(6), by);
+
+            // Row C: reasons — From under the From picker, To under the To picker.
+            int ry = S(60);
+            _reasonFrom.SetBounds(_lblFrom.Left, ry,
+                Math.Max(S(40), _lblTo.Left - _lblFrom.Left - g), S(16));
+            _reasonTo.SetBounds(_lblTo.Left, ry,
+                Math.Max(S(40), _toPicker.Right - _lblTo.Left), S(16));
+
+            // Rows D/E: a 2×2 block — left column [Show: filter / Show unchanged]
+            // over right column [counts / impact] — centred as one unit, columns
+            // aligned (Show unchanged under Show:, impact under counts).
+            int leftColW = Math.Max(_lblShow.Width + S(6) + _typeFilter.Width,
+                _showUnchanged.Width);
+            int rightColW = Math.Max(_summary.Width, _impactLabel.Width);
+            int cg = S(40);
+            int total = leftColW + cg + rightColW;
+            int sx = Math.Max(pad, cx - total / 2);
+            int rx = sx + leftColW + cg;
+            int dY = S(86), eY = S(108);
+            _lblShow.Location = new Point(sx, dY + S(3));
+            _typeFilter.Location = new Point(sx + _lblShow.Width + S(6), dY);
+            _summary.Location = new Point(rx, dY + S(3));
+            _showUnchanged.Location = new Point(sx, eY);
+            _impactLabel.Location = new Point(rx, eY);
+        }
+
+        private void AddCol(string header, float weight, bool center = false)
+        {
+            var col = new DataGridViewTextBoxColumn
             {
                 HeaderText = header, ReadOnly = true,
                 SortMode = DataGridViewColumnSortMode.NotSortable,
                 FillWeight = weight * 100f,
                 AutoSizeMode = DataGridViewAutoSizeColumnMode.Fill
-            });
+            };
+            if (center)
+                col.DefaultCellStyle.Alignment = DataGridViewContentAlignment.MiddleCenter;
+            _grid.Columns.Add(col);
         }
 
         private AssemblyBaseline At(ComboBox cb)
@@ -376,9 +425,11 @@ namespace PDMLite
             bool valid = from != null && to != null && !ReferenceEquals(from, to) &&
                 !(from.Revision == to.Revision && from.ReleasedDate == to.ReleasedDate);
 
-            if (_reasonLabel != null)
-                _reasonLabel.Text = (from == null || to == null) ? "" :
-                    "Reason — From: " + ReasonOf(from) + "      To: " + ReasonOf(to);
+            if (_reasonFrom != null && _reasonTo != null)
+            {
+                _reasonFrom.Text = from == null ? "" : "Reason — From: " + ReasonOf(from);
+                _reasonTo.Text = to == null ? "" : "To: " + ReasonOf(to);
+            }
 
             if (from == null || to == null)
                 _summary.Text = "Select two releases to compare.";
@@ -404,6 +455,9 @@ namespace PDMLite
             }
 
             if (_btnExport != null) _btnExport.Enabled = valid && _rows.Count > 0;
+
+            // The summary/reason text widths just changed — re-centre the block.
+            LayoutTop(_topPanel);
         }
 
         // A row is visible when it passes the change-type filter. "All changes"
