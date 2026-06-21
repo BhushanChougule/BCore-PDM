@@ -2219,21 +2219,41 @@ namespace PDMLite
                 }
             }
 
-            // CRITICAL: the file was opened read-only (it was Released), so
-            // SOLIDWORKS keeps it in read-only mode internally and silently
-            // refuses to Save3 — the revision bump would update memory but never
-            // reach disk. We must remove the OS read-only flag and reopen the
-            // document as WRITABLE *before* bumping the revision and saving.
+            // The file was opened read-only (it was Released), and SOLIDWORKS
+            // caches that read-only state from open time — clearing the OS
+            // attribute below is not enough on its own. A plain CloseDoc+reopen
+            // can't promote it when a PARENT ASSEMBLY holds the part as a
+            // component: CloseDoc no-ops while the assembly references it, so the
+            // cached read-only doc is handed straight back and the rev-bump Save3
+            // then fails (found in shop testing: New Revision on a part while its
+            // assembly was open). ReloadOrReplace (File > Reload) re-reads the
+            // now-writable file and promotes the OPEN doc — even an assembly-held
+            // component — to read-write; its return polarity is interop-unreliable,
+            // so the SIDE EFFECT is what counts. Fall back to close+reopen only
+            // when nothing is open or the reload THROWS. Same proven pattern as
+            // UnlockFile / ReinstateFromObsolete.
             SetReadOnly(filePath, false);
-            PDMLiteAddin.SwApp.CloseDoc(filePath);
-            int oErr = 0, oWarn = 0;
-            ModelDoc2 fresh = PDMLiteAddin.SwApp.OpenDoc6(filePath, reopenType,
-                (int)swOpenDocOptions_e.swOpenDocOptions_Silent,
-                "", ref oErr, ref oWarn) as ModelDoc2;
 
-            // OpenDoc6 can return null or the wrong doc on some SW versions even
-            // when the file opened successfully (e.g. another doc becomes ActiveDoc
-            // during the reopen). Always verify by path.
+            ModelDoc2 fresh = PDMLiteAddin.SwApp
+                .GetOpenDocumentByName(filePath) as ModelDoc2;
+            bool promoted = false;
+            if (fresh != null)
+            {
+                try { fresh.ReloadOrReplace(false, filePath, true); promoted = true; }
+                catch { promoted = false; }
+            }
+            if (!promoted)
+            {
+                PDMLiteAddin.SwApp.CloseDoc(filePath);
+                int oErr = 0, oWarn = 0;
+                fresh = PDMLiteAddin.SwApp.OpenDoc6(filePath, reopenType,
+                    (int)swOpenDocOptions_e.swOpenDocOptions_Silent,
+                    "", ref oErr, ref oWarn) as ModelDoc2;
+            }
+
+            // ReloadOrReplace/OpenDoc6 can return null or the wrong doc on some SW
+            // versions even when it worked (e.g. another doc becomes ActiveDoc).
+            // Always verify by path.
             if (fresh == null || !string.Equals(
                     fresh.GetPathName(), filePath,
                     StringComparison.OrdinalIgnoreCase))
