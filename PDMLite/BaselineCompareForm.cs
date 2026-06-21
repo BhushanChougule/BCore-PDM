@@ -26,7 +26,7 @@ namespace PDMLite
         private DataGridView _grid;
         private Panel _topPanel;
         private Label _nameLbl, _lblFrom, _lblTo, _lblShow;
-        private Label _summary, _reasonFrom, _reasonTo, _impactLabel;
+        private Label _summary, _reasonFrom, _reasonTo, _reasonToLbl, _impactLabel;
         private Button _btnExport;
 
         private float _scale = 1f;
@@ -159,7 +159,13 @@ namespace PDMLite
                 Font = _fMeta, ForeColor = cReason,
                 AutoSize = false, Height = S(16), AutoEllipsis = true
             };
+            // "To:" prefix sits under the To-picker label; the value below the box.
+            _reasonToLbl = new Label
+            {
+                Text = "To:", Font = _fMeta, ForeColor = cReason, AutoSize = true
+            };
             top.Controls.Add(_reasonFrom);
+            top.Controls.Add(_reasonToLbl);
             top.Controls.Add(_reasonTo);
 
             // Left column: "Show:" filter (top) over "Show unchanged" (below).
@@ -280,11 +286,12 @@ namespace PDMLite
             _lblTo.Location = new Point(tx, by + S(4));
             _toPicker.Location = new Point(tx + tW + S(6), by);
 
-            // Row C: reasons — From under the From picker; the To reason VALUE
-            // aligns to the To picker box's left edge so it sits below the rev box.
+            // Row C: reasons mirror the picker row — "Reason — From: x" under the
+            // From picker; "To:" under the To label and the To value under the box.
             int ry = S(60);
             _reasonFrom.SetBounds(_lblFrom.Left, ry,
                 Math.Max(S(40), _lblTo.Left - _lblFrom.Left - g), S(16));
+            _reasonToLbl.Location = new Point(_lblTo.Left, ry);
             _reasonTo.SetBounds(_toPicker.Left, ry,
                 Math.Max(S(40), W - pad - _toPicker.Left), S(16));
 
@@ -430,6 +437,7 @@ namespace PDMLite
             if (_reasonFrom != null && _reasonTo != null)
             {
                 _reasonFrom.Text = from == null ? "" : "Reason — From: " + ReasonOf(from);
+                _reasonToLbl.Text = to == null ? "" : "To:";
                 _reasonTo.Text = to == null ? "" : ReasonOf(to);
             }
 
