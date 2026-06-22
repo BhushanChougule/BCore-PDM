@@ -483,7 +483,56 @@ namespace PDMLite
                 ConfigName = configName,
                 Field = field
             });
+
+            // Part Number rows get a "Gen" button that issues the next number
+            // from the per-division scheme (atomically reserved in vault.xml), so
+            // engineers stop hand-typing — and pick a unique, non-colliding value.
+            // Shrink the input to make room and drop the button on its right.
+            if (field == "PartNo" && input is TextBox pnTb)
+            {
+                int genW = S(46);
+                pnTb.Width = S(InputWidth) - genW - S(4);
+                var btnGen = new Button
+                {
+                    Text = "Gen",
+                    Font = _labelFont,
+                    Width = genW,
+                    Height = pnTb.Height,
+                    Location = new Point(pnTb.Right + S(4), y),
+                    BackColor = Color.FromArgb(0, 122, 204),
+                    ForeColor = Color.White,
+                    FlatStyle = FlatStyle.Flat,
+                    Cursor = Cursors.Hand
+                };
+                btnGen.FlatAppearance.BorderSize = 0;
+                btnGen.Click += (s, e) => GeneratePartNo(pnTb);
+                parent.Controls.Add(btnGen);
+            }
+
             return y + S(RowHeight);
+        }
+
+        // Open the part-number generator (and per-division scheme admin spot)
+        // and, on OK, fill the Part Number box with the reserved number. The
+        // division defaults to the file's own WIP division when its path is
+        // already known (a re-save / known target); a brand-new untitled doc has
+        // no path yet, so the dialog opens on the first division for the user to
+        // pick. Non-fatal — any failure leaves the field for manual entry.
+        private void GeneratePartNo(TextBox target)
+        {
+            try
+            {
+                string autoKey = "";
+                try { autoKey = DatabaseManager.DivisionKeyFromPath(_doc.GetPathName()); }
+                catch { }
+                using (var dlg = new PartNoSchemeDialog(autoKey))
+                {
+                    if (dlg.ShowDialog(this) == DialogResult.OK &&
+                        !string.IsNullOrEmpty(dlg.GeneratedPartNo))
+                        target.Text = dlg.GeneratedPartNo;
+                }
+            }
+            catch { /* non-fatal — fall back to manual entry */ }
         }
 
         // Current user's initials: first two letters of the Windows username,

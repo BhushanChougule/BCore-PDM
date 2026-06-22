@@ -90,6 +90,9 @@
     </Compile>
     <Compile Include="EmailManager.cs" />
     <Compile Include="ExportManager.cs" />
+    <Compile Include="PartNoSchemeDialog.cs">
+      <SubType>Form</SubType>
+    </Compile>
     <Compile Include="PendingRequestsForm.cs">
       <SubType>Form</SubType>
     </Compile>

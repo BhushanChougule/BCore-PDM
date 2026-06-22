@@ -39,6 +39,16 @@ namespace PDMLite
         public int    Qty    { get; set; }
     }
 
+    // A per-division part-number scheme: {Prefix}{Next zero-padded to Pad}.
+    // Stored under vault.xml <NumberingSchemes>; the auto-numbering source.
+    public class NumberingScheme
+    {
+        public string Division { get; set; } // scheme key, e.g. "A"
+        public string Prefix   { get; set; } // e.g. "A"
+        public int    Pad      { get; set; } // zero-pad width, e.g. 4 → 0001
+        public int    Next     { get; set; } // next sequence value to issue
+    }
+
     public class VaultFile
     {
         public string FilePath    { get; set; }
@@ -2963,6 +2973,190 @@ namespace PDMLite
             // One DB load (BuildDrawingIndex), then the shared in-memory matcher
             // — same single-load cost callers had before.
             return BuildDrawingIndex().DrawingsForConfig(modelFilePath, configName);
+        }
+
+        // ── Auto-numbering (per-division part-number schemes) ───────────────
+
+        // The scheme KEY for a division: the leading token of a WIP division
+        // folder name ("A - Aurora Shelving" → "A"), upper-cased/trimmed. A bare
+        // key passes through. "" for empty input.
+        public static string DivisionKey(string divisionFolderOrKey)
+        {
+            string s = (divisionFolderOrKey ?? "").Trim();
+            if (s.Length == 0) return "";
+            int dash = s.IndexOf(" - ", StringComparison.Ordinal);
+            if (dash > 0) s = s.Substring(0, dash).Trim();
+            return s.ToUpperInvariant();
+        }
+
+        // The division a file path belongs to (its WIP subfolder), as a scheme
+        // key; "" when the path isn't under a known WIP division (e.g. a brand-
+        // new unsaved doc with no path yet).
+        public static string DivisionKeyFromPath(string filePath)
+        {
+            try
+            {
+                string p = (filePath ?? "").Trim();
+                if (p.Length == 0) return "";
+                if (!p.StartsWith(WipRoot + "\\", StringComparison.OrdinalIgnoreCase))
+                    return "";
+                string rest = p.Substring(WipRoot.Length + 1); // after "WIP\"
+                int slash = rest.IndexOf('\\');
+                string sub = slash >= 0 ? rest.Substring(0, slash) : rest;
+                return DivisionKey(sub);
+            }
+            catch { return ""; }
+        }
+
+        private static int ParseIntAttr(XElement el, string name, int fallback)
+        {
+            int v;
+            return int.TryParse((string)el.Attribute(name), out v) ? v : fallback;
+        }
+
+        // Atomically RESERVE and return the next part number for a division's
+        // scheme ({Prefix}{Next zero-padded to Pad}). The whole read → format →
+        // increment → save runs under the cross-machine vault lock, so two
+        // engineers (even on different machines) can never be handed the same
+        // number — the lock that already serialises every vault.xml write is the
+        // reservation. Any candidate that already exists as a part number
+        // ANYWHERE in the vault (file-level or per-config) is skipped, so the
+        // result always passes the duplicate check. The scheme is auto-created
+        // on first use (Prefix = division key, Pad = 4, Next = 1). Returns "" on
+        // failure — the caller falls back to manual entry (never blocks).
+        public static string GenerateNextPartNo(string division)
+        {
+            try
+            {
+                string key = DivisionKey(division);
+                if (key.Length == 0) key = "GEN";
+
+                lock (_lock) using (AcquireProcessLock())
+                {
+                    var doc = LoadOrCreate();
+                    var root = doc.Root;
+
+                    var schemes = root.Element("NumberingSchemes");
+                    if (schemes == null)
+                    {
+                        schemes = new XElement("NumberingSchemes");
+                        root.Add(schemes);
+                    }
+
+                    var scheme = schemes.Elements("Scheme").FirstOrDefault(s =>
+                        string.Equals((string)s.Attribute("Division"), key,
+                            StringComparison.OrdinalIgnoreCase));
+                    if (scheme == null)
+                    {
+                        scheme = new XElement("Scheme",
+                            new XAttribute("Division", key),
+                            new XAttribute("Prefix", key),
+                            new XAttribute("Pad", 4),
+                            new XAttribute("Next", 1));
+                        schemes.Add(scheme);
+                    }
+
+                    string prefix = (string)scheme.Attribute("Prefix") ?? key;
+                    int pad  = ParseIntAttr(scheme, "Pad", 4);
+                    int next = ParseIntAttr(scheme, "Next", 1);
+                    if (pad < 1)  pad = 1;
+                    if (next < 1) next = 1;
+
+                    // Existing part numbers (file-level + per-config) so a
+                    // generated number can never collide with a hand-typed one.
+                    var taken = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                    var filesEl = root.Element("Files");
+                    if (filesEl != null)
+                        foreach (var el in filesEl.Elements("File"))
+                        {
+                            string fp = ((string)el.Element("PartNumber") ?? "").Trim();
+                            if (fp.Length > 0) taken.Add(fp);
+                            var cfgEl = el.Element("Configurations");
+                            if (cfgEl != null)
+                                foreach (var c in cfgEl.Elements("Config"))
+                                {
+                                    string cp = ((string)c.Element("PartNo") ?? "").Trim();
+                                    if (cp.Length > 0) taken.Add(cp);
+                                }
+                        }
+
+                    string candidate;
+                    int guard = 0;
+                    do
+                    {
+                        candidate = prefix + next.ToString(
+                            System.Globalization.CultureInfo.InvariantCulture)
+                            .PadLeft(pad, '0');
+                        next++;
+                        guard++;
+                    } while (taken.Contains(candidate) && guard < 1000000);
+
+                    scheme.SetAttributeValue("Next", next); // reserve past it
+                    Save(doc);
+                    return candidate;
+                }
+            }
+            catch { return ""; }
+        }
+
+        // All configured division schemes (for the admin editor). Read-only.
+        public static List<NumberingScheme> GetNumberingSchemes()
+        {
+            var list = new List<NumberingScheme>();
+            try
+            {
+                lock (_lock) using (AcquireProcessLock())
+                {
+                    var doc = LoadOrCreate();
+                    var schemes = doc.Root.Element("NumberingSchemes");
+                    if (schemes != null)
+                        foreach (var s in schemes.Elements("Scheme"))
+                            list.Add(new NumberingScheme
+                            {
+                                Division = (string)s.Attribute("Division") ?? "",
+                                Prefix   = (string)s.Attribute("Prefix") ?? "",
+                                Pad      = ParseIntAttr(s, "Pad", 4),
+                                Next     = ParseIntAttr(s, "Next", 1)
+                            });
+                }
+            }
+            catch { }
+            return list;
+        }
+
+        // Upsert a division's numbering scheme (the admin editor — Master-gated
+        // at the UI; the DB write itself is unguarded like every other mutation).
+        public static void SetNumberingScheme(string division, string prefix,
+            int pad, int next)
+        {
+            string key = DivisionKey(division);
+            if (key.Length == 0) return;
+            if (pad < 1)  pad = 1;
+            if (next < 1) next = 1;
+            lock (_lock) using (AcquireProcessLock())
+            {
+                var doc = LoadOrCreate();
+                var root = doc.Root;
+                var schemes = root.Element("NumberingSchemes");
+                if (schemes == null)
+                {
+                    schemes = new XElement("NumberingSchemes");
+                    root.Add(schemes);
+                }
+                var scheme = schemes.Elements("Scheme").FirstOrDefault(s =>
+                    string.Equals((string)s.Attribute("Division"), key,
+                        StringComparison.OrdinalIgnoreCase));
+                if (scheme == null)
+                {
+                    scheme = new XElement("Scheme", new XAttribute("Division", key));
+                    schemes.Add(scheme);
+                }
+                scheme.SetAttributeValue("Prefix",
+                    string.IsNullOrEmpty(prefix) ? key : prefix);
+                scheme.SetAttributeValue("Pad", pad);
+                scheme.SetAttributeValue("Next", next);
+                Save(doc);
+            }
         }
 
         // Returns all configuration entries for a tracked file path.

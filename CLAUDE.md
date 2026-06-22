@@ -28,7 +28,7 @@ D:\\06 SOLIDWORKS\_Automation\\08\_Documentation\\PDMLite\_CL\\PDMLite\\PDMLite\
 
 N:\\PDM-SolidWorks\\
 
-\- VAULT\\vault.xml        → XML database (System.Xml.Linq, no SQLite)
+\- VAULT\\vault.xml        → XML database (System.Xml.Linq, no SQLite). Root sections include <Files>/<Users>/<RevisionHistory>/<RevisionRequests>/<OpenSessions>/<ActiveOperations>/<Baselines> and <NumberingSchemes> (per-division auto-numbering — see DatabaseManager.GenerateNextPartNo)
 
 \- VAULT\\vault.xml.bak    → one-generation backup, refreshed by every successful atomic Save (File.Replace's backup argument); LoadOrCreate auto-restores from it when vault.xml is missing or corrupt
 
@@ -192,6 +192,8 @@ TWO MODES via two constructors: (1) ACTIVE-CONFIG mode — PropertyForm(doc, Lis
 
 \- DrawnBy (TextBox, editable) auto-defaults to the current user's initials via UserInitials() — first two letters of the Windows username, uppercased (bchougule → BC, rkramarz → RK), same rule as CheckedBy. Only pre-filled when empty; the engineer can overwrite it
 
+\- Part Number row carries a small "Gen" button (AddFieldRow shrinks the PartNo TextBox to make room). It opens PartNoSchemeDialog (GeneratePartNo) which atomically reserves the next number from the per-division scheme and fills the box — engineers stop hand-typing. The division defaults to the file's own WIP division (DatabaseManager.DivisionKeyFromPath(doc path); empty for a brand-new untitled doc, so the dialog opens on the first division for the user to pick). Non-fatal — any failure leaves the field for manual entry
+
 \- Revision uses ComboBox (full revision sequence A through Z, skipping I,O,Q,S,X)
 
 \- PartType uses ComboBox (Manufactured | Purchased) — NO "-- Select --" sentinel, so index 0 (Manufactured) is the valid default
@@ -237,6 +239,8 @@ Methods:
 \- SearchFilesAdvanced(mainTerm, drawnBy, material, finish, partType, statusFilter, fileType, out truncated) → the ADVANCED (property-wide) search backing AdvancedSearchForm. AND-combines whatever fields are filled and matches them PER CONFIGURATION: mainTerm = substring over the file name (a FILENAME hit widens to every config, like the quick search) PLUS each config's PN/Description/DrawingNo (so a part is findable by its drawing number too; file-level PN/Description are NOT folded in separately — they're the primary config's values, already covered per-config — so searching one config's Part No no longer surfaces sibling configs); drawnBy = substring over the config's DrawnBy; material/finish/partType = EXACT (case-insensitive) match on the config's Material1/FinishType/PartType; statusFilter = EXACT match on the FILE status (WIP/Released/Locked/Obsolete — file-level, all configs share one status); fileType = "Part" (.sldprt) / "Assembly" (.sldasm) / "" (either). At least one field must be non-empty (else empty). Returns PARTS/ASSEMBLIES only (the four indexed props live on the model, not on drawings — the result card's Open DRW still reaches the drawing via the DrawingIndex), each with its Configurations list TRIMMED to only the configs that passed every active filter, so the popup renders exactly the matching config cards (never "all configs of a file that matched") with a real per-config Part No. Capped at maxResults files (default MaxSearchResults; the CSV export passes int.MaxValue to dump the full matching set while the card list stays capped); READ-ONLY (orphans skipped when the share is reachable but NEVER purged — no write, so it's safe in degraded-lock mode; the quick SearchFiles owns orphan cleanup). The four matched fields are indexed per config in the <Config> block at save time (ConfigEntry gained Material/FinishType/DrawnBy/PartType; captured in OnFileSavePost AND in RollbackRevision's record-sync — which also rebuilds the block via UpsertFile, so it must re-capture them or a rollback blanks them; round-tripped by BuildConfigsElement/ReadConfigs); legacy records carry empties until re-saved (graceful, no migration)
 
 \- FindPartNumberConflict(partNo, excludeFilePath) → returns filename of another file using same PartNo (case-insensitive, trimmed), or null. Excludes the file being saved so it never conflicts with itself.
+
+\- Auto-numbering (per-division part-number schemes, stored under vault.xml <NumberingSchemes> as <Scheme Division Prefix Pad Next/>): GenerateNextPartNo(division) ATOMICALLY reserves+returns the next {Prefix}{Next zero-padded to Pad} value — the whole read→format→increment→Save runs under the cross-machine vault lock (the lock that serialises every write IS the reservation, so two engineers/machines never get the same number), skipping any candidate already used as a PartNo anywhere in the vault (file-level or per-config) so the result passes the duplicate check; auto-creates the scheme on first use (Prefix=division key, Pad=4, Next=1); returns "" on failure. GetNumberingSchemes() (admin editor) + SetNumberingScheme(division, prefix, pad, next) (upsert). DivisionKey(folderOrKey) maps "A - Aurora Shelving"→"A"; DivisionKeyFromPath(path) returns the WIP-subfolder division of a file path ("" if not under a known WIP division). Backs PartNoSchemeDialog (the "Gen" button on PropertyForm)
 
 \- FindFileNameConflict(fileName, excludeFilePath) → returns the FilePath of ANOTHER tracked vault file already using this file name (case-insensitive), or null. ValidateSave HARD-BLOCKS on a hit (Rule 2.6) — the vault keys on the file name everywhere (RELEASED/ARCHIVE/SCRAP are flat folders, search/dashboard dedupe by name, drawing↔model linkage is by basename, RemoveFileRecord/PurgeHistoryFor match by name), so a second same-named file in another division would overwrite the first one's released snapshot/archives and delete its history on first save. Only canonical records under WIP count as rivals: a same-name record OUTSIDE WIP is a legacy RELEASED-copy entry of the same file, and a WIP record whose file is gone from disk is an orphan awaiting purge — neither blocks a save.
 
@@ -791,6 +795,14 @@ Styled to house convention: brand title bar (cBrandDark), body 3.7f × \_scale, 
 
 \- Result enum: Scope { Cancel, Common, PerConfig }; accessed via Result property
 
+\### PartNoSchemeDialog.cs
+
+DPI-aware Form (S(v)=v\*\_scale, house styling — brand title bar, flat buttons; fonts are fields disposed in Dispose(bool)). The part-number GENERATOR + the small per-division-scheme ADMIN spot. Opened from the "Gen" button on PropertyForm's Part Number row.
+
+\- A "Division:" ComboBox (DatabaseManager.WipDivisions friendly names; pre-selected to the file's auto-detected division when known) + a "Current: prefix … · pad … · next …" line + a "Generate Next Number" button (cGreen). Generate calls DatabaseManager.GenerateNextPartNo(divisionKey) which ATOMICALLY reserves+returns the next {Prefix}{Next zero-padded} value under the cross-machine vault lock (so two engineers never collide) and skips any number already taken in the vault (so it passes the duplicate check); the result is returned via GeneratedPartNo and filled into the Part Number box.
+
+\- MASTER-ONLY edit block (the "admin spot", gated on GetUserRole=="Master"): Prefix / Pad (digits) / Next fields + "Save Scheme" → DatabaseManager.SetNumberingScheme. Engineers see only the read-only Current line. Public API: PartNoSchemeDialog(autoDivisionKey) + string GeneratedPartNo (null if cancelled)
+
 
 \### ReasonForChangeForm.cs
 
@@ -999,6 +1011,8 @@ GetNextRevision() in VaultManager.cs handles this. CONTINUES PAST Z the ASME way
 
 
 \## Completed Features
+
+\- Auto-numbering / serial generators + Auto file naming/numbering + Intelligent vs sequential numbering: a "Gen" button on PropertyForm's Part Number row opens PartNoSchemeDialog, which issues the next part number from a PER-DIVISION scheme ({Prefix}{Next zero-padded to Pad}) stored under vault.xml <NumberingSchemes>. DatabaseManager.GenerateNextPartNo reserves the number ATOMICALLY under the cross-machine vault lock (so two engineers — even on different machines — never collide) and skips any value already used in the vault (so the result passes the duplicate check). The division defaults to the file's own WIP subfolder (DivisionKeyFromPath); Masters edit the prefix/pad/next in the same dialog (the small admin spot, GetUserRole-gated → SetNumberingScheme). Non-fatal — a failure leaves the field for manual entry.
 
 \- Obsolete lifecycle state: a superseded-but-referenceable status (WIP/Released/Locked/**Obsolete**), DISTINCT from Remove-from-Vault (which scraps the file to SCRAP). VaultManager.MarkObsolete (Master, path-based, from the Vault Dashboard row right-click) freezes the file read-only, keeps its full history, requires a CATEGORISED reason (ReasonForChangeForm/ObsoleteReasonCodes), warns about parent assemblies, and runs under an operation claim (like UnlockFile); the file then can't be edited (ValidateSave Rule 2b), can't be bulk-released (GetReleasableFiles whitelists WIP/blank only), and blocks an assembly release as a non-Released child. ReinstateFromObsolete returns it to WIP (editable, clears the supersession link), refreshing SW's cached read-only via ReloadOrReplace like UnlockFile. SUPERSESSION: MarkObsolete optionally records the file that REPLACES this one (SupersededByPickerForm → <SupersededBy> Part No), surfaced as "→ superseded by X" in the save-block message, the dashboard Status tooltip (alongside the obsolete reason) and the search card (the obsolete card's description slot). DESIGN-TIME SPREAD GUARD: opening an assembly that still contains an Obsolete component warns once (GetObsoleteComponentsByPath, non-blocking), naming each obsolete child + its replacement — far earlier than the release gate. Status colour-coded grey across the task pane, dashboard and search; audit actions MarkObsolete (maroon in the Audit Report) / Reinstate (brand). The dashboard's Master-only menu items are role-gated (GetUserRole) so engineers never see them or a dangling separator. Closes the PART-2 "lifecycle states" gap.
 
