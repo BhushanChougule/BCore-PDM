@@ -83,6 +83,14 @@ namespace PDMLite
         private DateTime _loadedAt;      // snapshot time, shown as "as of HH:mm"
         // Whole-log counts — invariant under filtering, so cached once per load.
         private int _cntRelease, _cntRevision, _cntRemoval;
+        // Cycle-time strip: average WIP→Released duration over a selectable
+        // window, computed straight from the audit log (_all) — independent of
+        // the grid's column filters/search (it's a time-window metric, not a
+        // view metric). Reuses _summaryFont (no extra disposable).
+        private FlowLayoutPanel _cyclePanel;
+        private ComboBox _cycleWindow;   // Last 30 / 90 / 365 days / All time
+        private Label _lblCyclePrefix;   // static "Cycle time (WIP→Released):"
+        private Label _lblCycle;         // the computed result
 
         private const int VisibleRows = 20;       // fixed grid height = 20 rows
         private const int PageSize = VisibleRows;  // 20 rows per page (the "20 row rule")
@@ -288,7 +296,54 @@ namespace PDMLite
             });
             _topPanel.Controls.Add(_summaryPanel);
 
-            int hintY = summaryY + (int)_summaryFont.GetHeight() + S(4);
+            // Cycle-time strip — avg WIP→Released duration over a selectable
+            // window, read straight from the audit log. A second strip below the
+            // counts (like the dashboard's KPI tiles) so it doesn't crowd the
+            // already-full control row.
+            int cycleY = summaryY + (int)_summaryFont.GetHeight() + S(8);
+            _cyclePanel = new FlowLayoutPanel
+            {
+                AutoSize = true,
+                AutoSizeMode = AutoSizeMode.GrowAndShrink,
+                WrapContents = false,
+                FlowDirection = FlowDirection.LeftToRight,
+                BackColor = cBg,
+                Margin = Padding.Empty,
+                Padding = Padding.Empty,
+                Location = new Point(S(14), cycleY)
+            };
+            _lblCyclePrefix = new Label
+            {
+                Text = "Cycle time (WIP→Released):",
+                Font = _summaryFont,
+                ForeColor = cTextGray,
+                AutoSize = true,
+                Margin = new Padding(0, S(3), S(8), 0)
+            };
+            _cycleWindow = new ComboBox
+            {
+                DropDownStyle = ComboBoxStyle.DropDownList,
+                Font = _summaryFont,
+                Width = S(120),
+                Margin = new Padding(0, 0, S(10), 0)
+            };
+            _cycleWindow.Items.AddRange(new object[]
+            { "Last 30 days", "Last 90 days", "Last 365 days", "All time" });
+            _cycleWindow.SelectedIndex = 1; // default 90 days
+            _cycleWindow.SelectedIndexChanged += (s, e) =>
+            { ComputeCycleTime(); LayoutTopControls(); }; // re-centre: width changed
+            _lblCycle = new Label
+            {
+                Font = _summaryFont,
+                ForeColor = cTextDark,
+                AutoSize = true,
+                Margin = new Padding(0, S(3), 0, 0)
+            };
+            _cyclePanel.Controls.AddRange(new Control[]
+            { _lblCyclePrefix, _cycleWindow, _lblCycle });
+            _topPanel.Controls.Add(_cyclePanel);
+
+            int hintY = cycleY + _cyclePanel.PreferredSize.Height + S(6);
             _lblHint = new Label
             {
                 Text = "Click a column arrow to filter  ·  Click a header to sort  ·  "
@@ -441,6 +496,7 @@ namespace PDMLite
             }
             _loadedAt = DateTime.Now;
             ComputeCounts();
+            ComputeCycleTime();
             ApplyFilter();
             AutoSizeColumns();
             FitFormSize();
@@ -1164,8 +1220,102 @@ namespace PDMLite
                 _summaryPanel.Left = Math.Max(S(14),
                     (panelW - _summaryPanel.Width) / 2);
 
+            if (_cyclePanel != null)
+                _cyclePanel.Left = Math.Max(S(14),
+                    (panelW - _cyclePanel.Width) / 2);
+
             if (_lblHint != null)
                 _lblHint.Left = Math.Max(S(14), (panelW - _lblHint.Width) / 2);
+        }
+
+        // ── Cycle-time analytics (WIP → Released) ───────────────────────────
+        // Average duration from a file entering WIP (Create / NewRevision /
+        // Unlock / Reinstate) to its next Release, over the selected window
+        // (filtered on the RELEASE timestamp). Computed straight from the audit
+        // log (_all) — independent of the grid's column filters/search. A
+        // release with no preceding WIP-entry event in the log (history began
+        // mid-stream) is skipped: it cannot be measured. Hand-checkable — pick a
+        // file, find its Release, subtract the most recent preceding WIP-entry.
+        private void ComputeCycleTime()
+        {
+            if (_lblCycle == null) return;
+
+            int windowDays = CycleWindowDays();   // 0 = all time
+            DateTime cutoff = windowDays > 0
+                ? DateTime.Now.AddDays(-windowDays) : DateTime.MinValue;
+
+            // Group events by file, oldest-first.
+            var byFile = new Dictionary<string, List<AuditEntry>>(
+                StringComparer.OrdinalIgnoreCase);
+            foreach (var e in _all)
+            {
+                if (e.Timestamp == DateTime.MinValue) continue;
+                string key = e.FileName ?? "";
+                if (key.Length == 0) continue;
+                List<AuditEntry> lst;
+                if (!byFile.TryGetValue(key, out lst))
+                { lst = new List<AuditEntry>(); byFile[key] = lst; }
+                lst.Add(e);
+            }
+
+            var durations = new List<double>(); // in days
+            foreach (var kv in byFile)
+            {
+                var evs = kv.Value;
+                evs.Sort((a, b) => a.Timestamp.CompareTo(b.Timestamp));
+                DateTime? start = null;
+                foreach (var e in evs)
+                {
+                    if (IsWipEntry(e.Action))
+                        start = e.Timestamp;
+                    else if (Eq(e.Action, "Release"))
+                    {
+                        if (start.HasValue && e.Timestamp >= cutoff)
+                        {
+                            double days = (e.Timestamp - start.Value).TotalDays;
+                            if (days >= 0) durations.Add(days);
+                        }
+                        // A Release does not itself start a new WIP cycle — the
+                        // next NewRevision/Unlock does. Clear so a second Release
+                        // with no new WIP-entry between isn't measured twice.
+                        start = null;
+                    }
+                }
+            }
+
+            if (durations.Count == 0)
+            {
+                _lblCycle.Text = "no completed cycles in window";
+                return;
+            }
+
+            double avg = durations.Average();
+            durations.Sort();
+            int m = durations.Count;
+            double median = (m % 2 == 1)
+                ? durations[m / 2]
+                : (durations[m / 2 - 1] + durations[m / 2]) / 2.0;
+
+            _lblCycle.Text = string.Format(CultureInfo.InvariantCulture,
+                "{0:0.0} d avg · {1:0.0} d median · {2} release(s)",
+                avg, median, m);
+        }
+
+        // WIP-entry actions: events that (re)open a file for editing.
+        private static bool IsWipEntry(string action) =>
+            Eq(action, "Create") || Eq(action, "NewRevision") ||
+            Eq(action, "Unlock") || Eq(action, "Reinstate");
+
+        // Selected cycle-time window in days (0 = all time).
+        private int CycleWindowDays()
+        {
+            switch (_cycleWindow == null ? 1 : _cycleWindow.SelectedIndex)
+            {
+                case 0:  return 30;
+                case 1:  return 90;
+                case 2:  return 365;
+                default: return 0; // All time
+            }
         }
 
         // Whole-log counts are invariant under filtering, so compute them ONCE per
