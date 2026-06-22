@@ -437,8 +437,12 @@ namespace PDMLite
             }
 
             var from = At(_fromPicker); var to = At(_toPicker);
-            bool valid = from != null && to != null && !ReferenceEquals(from, to) &&
-                !(from.Revision == to.Revision && from.ReleasedDate == to.ReleasedDate);
+            // Valid whenever two DIFFERENT releases are picked. Comparing by the
+            // selected index is exact (each index is a distinct baseline entry) and
+            // avoids false-rejecting two real releases that share a rev+timestamp
+            // (e.g. same rev letter, different config).
+            bool valid = from != null && to != null &&
+                _fromPicker.SelectedIndex != _toPicker.SelectedIndex;
 
             if (_reasonFrom != null && _reasonTo != null)
             {
@@ -514,12 +518,16 @@ namespace PDMLite
             return Math.Abs(d) < 0.0005 ? "" : SignedF(d);
         }
 
-        // Sum of per-line quantities — matches the viewer's "Total Qty" footer.
+        // Total quantity = sum of the flattened EXTENDED per-key quantities — the
+        // same numbers the grid's Qty column shows, so the per-row Δ column always
+        // adds up to the headline delta (same contract as TotalWeight below). For a
+        // tree whose sub-assemblies are all qty 1 this equals the viewer's per-line
+        // footer; it only differs when a sub-assembly is used more than once, where
+        // the extended count is the figure that reconciles with the column.
         private static long TotalQty(AssemblyBaseline b)
         {
             long t = 0;
-            if (b?.Components != null)
-                foreach (var c in b.Components) t += c.Qty <= 0 ? 1 : c.Qty;
+            foreach (var r in Flatten(b).Values) t += r.Qty;
             return t;
         }
 
@@ -599,7 +607,12 @@ namespace PDMLite
                     bool qtyChanged = fc.Qty != tc.Qty;
                     bool descChanged = !string.Equals((fc.Description ?? "").Trim(),
                         (tc.Description ?? "").Trim(), StringComparison.OrdinalIgnoreCase);
-                    bool anyChange = revChanged || qtyChanged || descChanged;
+                    // A unit-weight (geometry) change at the same qty still shifts the
+                    // rolled-up weight — count it so a row is never shown "Unchanged"
+                    // while displaying a non-blank Wt Δ, and so a geometry edit with no
+                    // rev bump is flagged. Threshold matches WeightDeltaCell's blank cut.
+                    bool weightChanged = Math.Abs(fc.Weight - tc.Weight) > 0.0005;
+                    bool anyChange = revChanged || qtyChanged || descChanged || weightChanged;
                     rows.Add(new DiffRow
                     {
                         Change = anyChange ? "Changed" : "Unchanged",
