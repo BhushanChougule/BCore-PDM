@@ -408,16 +408,23 @@ namespace PDMLite
             // see the search-box note above). Advance past the search row.
             y += S(28);
 
-            this.Controls.Add(new Label
+            // Clickable hint that doubles as the entry point to the quick-access
+            // popup (Saved searches / Recent / Favorites). Kept a popup because
+            // this pane's layout is fixed-position — an inline list would overlap
+            // the Active File section below.
+            var hintLink = new Label
             {
-                Text = "Search by part number or description",
+                Text = "Search part no / description   ·   ★ Saved & Recent",
                 Font = new Font("Segoe UI", 3.2f * _scale),
-                ForeColor = cTextLight,
+                ForeColor = cBrand,
                 Location = new Point(x, y),
                 AutoSize = false,
                 Width = w,
-                Height = S(14)
-            });
+                Height = S(14),
+                Cursor = Cursors.Hand
+            };
+            hintLink.Click += (s, e) => OpenQuickAccess();
+            this.Controls.Add(hintLink);
             y += S(16);
 
             _resultsPanel = new Panel
@@ -1646,6 +1653,35 @@ namespace PDMLite
             finally { SuspendThumbLoads(false); }
         }
 
+        // Quick-access popup: Saved searches / Recent files / Favorites. Opened
+        // from the search hint link. Acts AFTER the modal closes (deferred, like
+        // the Advanced Search / dashboard popups): a saved search re-runs the
+        // quick search; a recent/favorite file opens.
+        private void OpenQuickAccess()
+        {
+            try
+            {
+                string term = (_searchBox.Text ?? "").Trim();
+                using (var f = new QuickAccessPopup(term))
+                {
+                    if (f.ShowDialog(this) != DialogResult.OK) return;
+                    if (!string.IsNullOrEmpty(f.FileToOpen))
+                        OpenFile(f.FileToOpen);
+                    else if (!string.IsNullOrEmpty(f.TermToRun))
+                    {
+                        _searchBox.Text = f.TermToRun;
+                        _searchTimer.Stop();   // setting Text armed the debounce —
+                        RunSearch();           // run once, now, instead
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show("Quick access could not open:\n" + ex.Message,
+                    "BCore PDM", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            }
+        }
+
         private void OpenFile(string filePath)
         {
             // If a thumbnail preview read is on the stack (its COM call pumped the
@@ -1669,6 +1705,9 @@ namespace PDMLite
                     "BCore PDM", MessageBoxButtons.OK, MessageBoxIcon.Warning);
                 return;
             }
+
+            // Record in the per-user Recent list (local prefs, non-fatal).
+            try { UserPrefs.AddRecent(filePath); } catch { }
 
             try
             {

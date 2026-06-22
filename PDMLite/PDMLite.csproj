@@ -117,6 +117,10 @@
       <SubType>UserControl</SubType>
     </Compile>
     <Compile Include="TaskPaneHost.cs" />
+    <Compile Include="QuickAccessPopup.cs">
+      <SubType>Form</SubType>
+    </Compile>
+    <Compile Include="UserPrefs.cs" />
     <Compile Include="VaultDashboardForm.cs">
       <SubType>Form</SubType>
     </Compile>
