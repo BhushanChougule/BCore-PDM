@@ -65,6 +65,17 @@ namespace PDMLite
         // shared like the fonts (was allocated on every WM_PAINT).
         private StringFormat _sfBarCenter;
 
+        // Card thumbnails: extracted SOLIDWORKS preview bitmaps, keyed by
+        // "filePath|config". Loaded LAZILY (only when a card first paints — see
+        // ThumbPanel) so a 50-card search never fires 50 network preview reads
+        // up front, and CACHED so repeated searches reuse them. The cached
+        // Images are SHARED (a ThumbPanel never owns its image), capped to bound
+        // GDI handles, and disposed in Dispose(bool). A null value means "tried,
+        // no preview" — so a missing-preview file isn't re-read every search.
+        private readonly Dictionary<string, Image> _thumbCache =
+            new Dictionary<string, Image>(StringComparer.OrdinalIgnoreCase);
+        private const int ThumbCacheCap = 400;
+
         public TaskPaneControl()
         {
             this.AutoScaleMode = AutoScaleMode.Dpi;
@@ -108,6 +119,80 @@ namespace PDMLite
                 _fReg33?.Dispose();
                 _fItalic33?.Dispose();
                 _sfBarCenter?.Dispose();
+                foreach (var img in _thumbCache.Values)
+                    try { img?.Dispose(); } catch { }
+                _thumbCache.Clear();
+            }
+        }
+
+        // Converts an OLE IPictureDisp (what ISldWorks.GetPreviewBitmap returns)
+        // to a System.Drawing.Image. AxHost.GetPictureFromIPicture is protected
+        // static, so we expose it via a tiny derived class (the standard interop
+        // pattern). Never instantiated — only the inherited static is called.
+        private sealed class PictureConverter : System.Windows.Forms.AxHost
+        {
+            private PictureConverter() : base(
+                "59EE46BA-677D-4d20-BF10-8D8067CB8B33") { }
+            public static Image ToImage(object iPictureDisp)
+            {
+                try
+                {
+                    return iPictureDisp == null
+                        ? null : GetPictureFromIPicture(iPictureDisp);
+                }
+                catch { return null; }
+            }
+        }
+
+        // A small thumbnail tile that paints a SHARED cached preview Image (never
+        // owned — disposed only by the cache), or a light page-glyph placeholder
+        // when none exists. The image is fetched LAZILY on the first paint via
+        // the supplied loader, with the _loaded flag set BEFORE the call so a
+        // re-entrant paint (a COM read can pump messages) can't recurse into it.
+        private sealed class ThumbPanel : Panel
+        {
+            private readonly Func<Image> _loader;
+            private Image _img;     // shared cached image — NOT owned here
+            private bool _loaded;
+            public ThumbPanel(Func<Image> loader)
+            {
+                _loader = loader;
+                DoubleBuffered = true;
+                Cursor = Cursors.Hand;
+            }
+            protected override void OnPaint(PaintEventArgs e)
+            {
+                if (!_loaded)
+                {
+                    _loaded = true; // set FIRST — guards re-entrant paint
+                    try { _img = _loader == null ? null : _loader(); }
+                    catch { _img = null; }
+                }
+                var g = e.Graphics;
+                g.Clear(Color.White);
+                if (_img != null)
+                {
+                    g.InterpolationMode = System.Drawing.Drawing2D
+                        .InterpolationMode.HighQualityBicubic;
+                    double s = Math.Min((double)Width / _img.Width,
+                                        (double)Height / _img.Height);
+                    int w = Math.Max(1, (int)(_img.Width * s));
+                    int h = Math.Max(1, (int)(_img.Height * s));
+                    try
+                    {
+                        g.DrawImage(_img, (Width - w) / 2, (Height - h) / 2, w, h);
+                    }
+                    catch { }
+                }
+                else
+                {
+                    // Placeholder: a simple centred "page" glyph.
+                    int mx = Width / 5, my = Height / 6;
+                    var page = new Rectangle(mx, my, Width - 2 * mx, Height - 2 * my);
+                    g.FillRectangle(Brushes.WhiteSmoke, page);
+                    g.DrawRectangle(Pens.Silver, page);
+                }
+                g.DrawRectangle(Pens.Gainsboro, 0, 0, Width - 1, Height - 1);
             }
         }
 
@@ -754,7 +839,10 @@ namespace PDMLite
 
             int barW = S(15);
             int cardH = S(74);
-            int contentLeft = barW + S(6);
+            // Thumbnail tile sits between the status bar and the text content.
+            int thumbW = S(52);
+            int thumbX = barW + S(4);
+            int contentLeft = thumbX + thumbW + S(6);
             int contentW = rw - contentLeft - S(3);
 
             foreach (SearchGroup g in cards)
@@ -805,6 +893,20 @@ namespace PDMLite
                         0, 0, _sfBarCenter);
                 };
                 card.Controls.Add(bar);
+
+                // ── Thumbnail (lazy SOLIDWORKS preview; click = enlarge) ──
+                // Use the model's preview when there is one, else the drawing's.
+                string thumbPath = hasModel ? modelPath : drawingPath;
+                string thumbCfg = configName;
+                var thumb = new ThumbPanel(() => GetThumbnail(thumbPath, thumbCfg))
+                {
+                    Location = new Point(thumbX, S(8)),
+                    Width = thumbW,
+                    Height = cardH - S(16),
+                    BackColor = cCard
+                };
+                thumb.Click += (s, e) => ShowLargePreview(thumbPath, thumbCfg);
+                card.Controls.Add(thumb);
 
                 // ── File name (no extension) ──────────────────────────────
                 card.Controls.Add(new Label
@@ -936,6 +1038,105 @@ namespace PDMLite
             }
 
             _resultsPanel.Height = ry;
+        }
+
+        // Get a small cached thumbnail for a file's SOLIDWORKS preview (null on
+        // failure → the card draws a placeholder). MUST run on the UI thread
+        // (the SOLIDWORKS API is not thread-safe — ThumbPanel only calls this
+        // from its paint, which is the UI thread). Caches the result (INCLUDING
+        // null, so a preview-less file is read at most once); caps the cache to
+        // bound GDI handles.
+        private Image GetThumbnail(string filePath, string config)
+        {
+            if (string.IsNullOrEmpty(filePath)) return null;
+            string key = filePath + "|" + (config ?? "");
+            Image cached;
+            if (_thumbCache.TryGetValue(key, out cached)) return cached;
+
+            Image thumb = null;
+            try
+            {
+                if (PDMLiteAddin.SwApp != null && File.Exists(filePath))
+                {
+                    object pic = PDMLiteAddin.SwApp.GetPreviewBitmap(
+                        filePath, config ?? "");
+                    using (Image full = PictureConverter.ToImage(pic))
+                        if (full != null) thumb = ResizeToThumb(full, S(96));
+                }
+            }
+            catch { thumb = null; }
+
+            // Crude bound: when full, dispose + clear (previews re-load on
+            // demand) — simpler than an LRU and fine for a task-pane session.
+            if (_thumbCache.Count >= ThumbCacheCap)
+            {
+                foreach (var img in _thumbCache.Values)
+                    try { img?.Dispose(); } catch { }
+                _thumbCache.Clear();
+            }
+            _thumbCache[key] = thumb;
+            return thumb;
+        }
+
+        // Resize to fit within maxPx (preserve aspect, never upscale) into a NEW
+        // bitmap; the source is disposed by the caller.
+        private static Image ResizeToThumb(Image src, int maxPx)
+        {
+            if (src == null) return null;
+            double s = Math.Min((double)maxPx / src.Width,
+                                (double)maxPx / src.Height);
+            if (s > 1) s = 1;
+            int w = Math.Max(1, (int)(src.Width * s));
+            int h = Math.Max(1, (int)(src.Height * s));
+            var bmp = new Bitmap(w, h);
+            using (var g = Graphics.FromImage(bmp))
+            {
+                g.InterpolationMode = System.Drawing.Drawing2D
+                    .InterpolationMode.HighQualityBicubic;
+                g.DrawImage(src, 0, 0, w, h);
+            }
+            return bmp;
+        }
+
+        // Click a card thumbnail → show the full preview bitmap larger in a
+        // modal. Re-extracts the un-resized preview; null → friendly info.
+        private void ShowLargePreview(string filePath, string config)
+        {
+            Image full = null;
+            try
+            {
+                if (PDMLiteAddin.SwApp != null && File.Exists(filePath))
+                    full = PictureConverter.ToImage(
+                        PDMLiteAddin.SwApp.GetPreviewBitmap(filePath, config ?? ""));
+            }
+            catch { full = null; }
+
+            if (full == null)
+            {
+                MessageBox.Show("No preview available for this file.",
+                    "BCore PDM", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                return;
+            }
+            try
+            {
+                using (var f = new Form())
+                using (var pb = new PictureBox())
+                {
+                    f.Text = "Preview — " +
+                        Path.GetFileNameWithoutExtension(filePath);
+                    f.StartPosition = FormStartPosition.CenterScreen;
+                    f.BackColor = Color.White;
+                    int w = Math.Min(Math.Max(full.Width, S(320)), S(900));
+                    int h = Math.Min(Math.Max(full.Height, S(320)), S(700));
+                    f.ClientSize = new Size(w, h);
+                    pb.Dock = DockStyle.Fill;
+                    pb.SizeMode = PictureBoxSizeMode.Zoom;
+                    pb.Image = full; // PictureBox does not own/dispose its Image
+                    f.Controls.Add(pb);
+                    f.ShowDialog(this);
+                }
+            }
+            finally { full.Dispose(); }
         }
 
         private void OpenFile(string filePath)
