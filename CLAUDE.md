@@ -926,7 +926,7 @@ prompt for REASON-FOR-CHANGE (required, interactive only — stored on the histo
 
 (assembly) check child parts Released → (assembly) drawing-release gate →
 
-confirm dialog: single-config shows PartNo/Rev; multi-config lists all configs with PartNo + Rev →
+confirm dialog: single-config shows PartNo/Rev; multi-config lists all configs with PartNo + Rev; BOTH append an AFFECTED TOP-LEVEL PRODUCTS list (VaultManager.BuildAffectedProductsText → GetWhereUsedTopLevel, file-level since releasing freezes the whole file; "none (standalone)" when nothing references it; capped at 15; non-fatal — drawings skip it) →
 
 auto-fill CheckedBy, CheckedDate, PartWeight on EVERY configuration →
 
@@ -1039,6 +1039,8 @@ GetNextRevision() in VaultManager.cs handles this. CONTINUES PAST Z the ASME way
 
 
 \## Completed Features
+
+\- Affected-items list (release impact): the interactive release confirm dialog (parts/assemblies, single + multi-config) appends an "Affected top-level products" list — the final assemblies that ultimately contain the file being released (VaultManager.BuildAffectedProductsText → GetWhereUsedTopLevel, file-level), so the Master sees the impact before confirming. "none (standalone)" when nothing references it; capped at 15 with "…and N more"; non-fatal (a failed where-used walk shows "(could not determine)", never blocks). Drawings skip it (a drawing isn't a component).
 
 \- Cycle-time analytics: the Audit Report carries a cycle-time strip (\_cyclePanel) — average WIP→Released duration over a selectable window (30/90/365 days / All), computed from audit.csv (ComputeCycleTime) by pairing each Release with the most recent preceding WIP-entry event (Create/NewRevision/Unlock/Reinstate) for the same file and averaging releases within the window. DRAWINGS excluded (they follow the model — avoids double-counting one cycle). Shows "Avg · Median · p90 · Releases" (p90 = 90th-percentile, nearest-rank); independent of the grid's filters; recomputes on window change. Hand-checkable per file. The Releases count is ≤ the Releases quick-filter (which counts every Release event, drawings + unmeasurable ones included). A "Details…" link opens CycleTimeDetailForm — a DRILL-IN analytics popup for the selected window: a per-release table (File · Division · Released By · WIP Start · Released · Days · Bounces, sortable), a ROLL-UP grid grouped By Division or By Releaser (the releaser is the Master who released, not the engineer) (count · avg · p90), a bounce-back summary (Master rejections, total + top engineers), and CSV export. Division comes from a filename→WIP-path→division join over GetAllFiles; bounce-backs from RejectRequest events.
 

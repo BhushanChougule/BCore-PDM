@@ -1628,6 +1628,11 @@ namespace PDMLite
                             "  • Lock file as Released\n" +
                             "  • Log the revision";
                     }
+
+                    // Affected-items: list the top-level products that ultimately
+                    // contain this file so the Master sees the release impact up
+                    // front. Non-fatal (a failed where-used walk never blocks).
+                    confirmBody += "\n\n" + BuildAffectedProductsText(filePath);
                 }
                 else
                 {
@@ -3241,6 +3246,48 @@ namespace PDMLite
                 if (expanded.Add(pf))
                     WalkUp(parent.Path, pf, level + 1, maxDepth, map, expanded,
                         qtyCache, result);
+            }
+        }
+
+        // Build the "Affected top-level products" block shown on the release
+        // confirm: the final assemblies that ultimately contain this file
+        // (GetWhereUsedTopLevel — file-level, all configs, since releasing
+        // freezes the whole file). "none (standalone)" when nothing references
+        // it. Capped so the confirm dialog stays readable. NON-FATAL — any
+        // where-used failure returns a "(could not determine)" note rather than
+        // throwing out of the release flow.
+        private static string BuildAffectedProductsText(string filePath)
+        {
+            try
+            {
+                var tops = GetWhereUsedTopLevel(filePath, null);
+                if (tops == null || tops.Count == 0)
+                    return "Affected top-level products: none (standalone)";
+
+                const int max = 15;
+                var sb = new StringBuilder();
+                sb.Append("Affected top-level products (")
+                  .Append(tops.Count).Append("):");
+                int shown = 0;
+                foreach (var t in tops)
+                {
+                    if (shown >= max) break;
+                    string pn = string.IsNullOrEmpty(t.PartNo)
+                        ? Path.GetFileNameWithoutExtension(t.Path ?? "")
+                        : t.PartNo;
+                    if (string.IsNullOrEmpty(pn)) pn = t.Name ?? "(unknown)";
+                    string rev = string.IsNullOrEmpty(t.Revision)
+                        ? "" : "   REV " + t.Revision;
+                    sb.Append("\n  • ").Append(pn).Append(rev);
+                    shown++;
+                }
+                if (tops.Count > max)
+                    sb.Append("\n  • …and ").Append(tops.Count - max).Append(" more");
+                return sb.ToString();
+            }
+            catch
+            {
+                return "Affected top-level products: (could not determine)";
             }
         }
 
