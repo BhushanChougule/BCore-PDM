@@ -76,6 +76,19 @@ namespace PDMLite
         private bool _brokenRefsOnly = false;
         private Label _lblHint;       // faint discoverability footer in the top panel
         private DateTime _loadedAt;   // snapshot time, shown in the summary as "as of HH:mm"
+        // KPI tiles (read-only, boxed) below the clickable quick-filter strip.
+        // The three VIEW-based tiles (avg WIP age, released-7d, broken refs)
+        // recompute over the FILTERED view on every filter/search change; Open
+        // Requests is a whole-vault metric fetched once per load (it has no per-
+        // file dimension to filter on). Distinct from the quick-filter counts:
+        // not clickable, boxed, dark text.
+        private FlowLayoutPanel _kpiPanel;
+        private Label _kpiAvgAge, _kpiReleased7d, _kpiOpenReq, _kpiBroken;
+        private Font _kpiFont;
+        private double _kpiAvgWipAge;     // avg WipDays over WIP files in _view
+        private int _kpiReleased7dCount;  // files in _view released within 7 days
+        private int _kpiBrokenInView;     // broken-ref files in _view
+        private int _kpiOpenReqCount;     // pending requests (whole vault, per load)
         // Whole-vault counts — invariant under filtering, so cached once per load
         // (UpdateSummary used to re-scan _all 4× on every keystroke / page click).
         private int _cntWip, _cntRel, _cntLck, _cntBrk;
@@ -331,9 +344,33 @@ namespace PDMLite
             });
             _topPanel.Controls.Add(_summaryPanel);
 
-            // Faint discoverability footer below the counts — new users won't
-            // guess the right-click menu / column-resize / clickable counts.
-            int hintY = summaryY + (int)_summaryFont.GetHeight() + S(4);
+            // KPI tiles — at-a-glance metrics, read-only and boxed so they read
+            // as a distinct strip from the clickable count quick-filters above.
+            int kpiY = summaryY + (int)_summaryFont.GetHeight() + S(8);
+            _kpiFont = new Font("Segoe UI", 3.7f * _scale, FontStyle.Bold);
+            _kpiPanel = new FlowLayoutPanel
+            {
+                AutoSize = true,
+                AutoSizeMode = AutoSizeMode.GrowAndShrink,
+                WrapContents = false,
+                FlowDirection = FlowDirection.LeftToRight,
+                BackColor = cBg,
+                Margin = Padding.Empty,
+                Padding = Padding.Empty,
+                Location = new Point(S(14), kpiY)
+            };
+            _kpiAvgAge     = MakeKpiTile("Average age (days since last save) of WIP files in the current view");
+            _kpiReleased7d = MakeKpiTile("Files whose latest release was within the last 7 days (current view)");
+            _kpiOpenReq    = MakeKpiTile("Pending engineer requests across the whole vault (Unlock / Revision / Release)");
+            _kpiBroken     = MakeKpiTile("Files with broken references in the current view");
+            _kpiPanel.Controls.AddRange(new Control[]
+            { _kpiAvgAge, _kpiReleased7d, _kpiOpenReq, _kpiBroken });
+            _topPanel.Controls.Add(_kpiPanel);
+
+            // Faint discoverability footer below the KPI tiles — new users won't
+            // guess the right-click menu / column-resize / clickable counts. The
+            // KPI tile height ≈ font height + padding (S(3)×2) + border (2px).
+            int hintY = kpiY + (int)_kpiFont.GetHeight() + S(10);
             _lblHint = new Label
             {
                 Text = "Double-click or right-click a row to open  ·  Drag a column edge to "
@@ -502,6 +539,7 @@ namespace PDMLite
                 _pagerFont = null;
                 _summaryFont?.Dispose();
                 _summaryFontActive?.Dispose();
+                _kpiFont?.Dispose();
                 _summaryTip?.Dispose();
                 _rowMenu?.Dispose();
             };
@@ -561,6 +599,10 @@ namespace PDMLite
             }
             _loadedAt = DateTime.Now;   // shown in the summary as "as of HH:mm"
             ComputeVaultCounts();       // cache whole-vault counts for the summary
+            // Open-requests KPI is a WHOLE-VAULT metric (no per-file dimension to
+            // filter on) — read it once per load. Network blip → 0, never throws.
+            try { _kpiOpenReqCount = DatabaseManager.GetPendingRequests().Count; }
+            catch { _kpiOpenReqCount = 0; }
             // Populate the grid, then size columns to the full data ONCE and fit
             // the form to them — so columns/width stay stable while the user
             // types in the search box (no per-keystroke resizing).
@@ -722,8 +764,32 @@ namespace PDMLite
             // No per-row objects are created, so this stays instant at 50–100k rows.
             _view = view;
             _page = 0;
+            ComputeKpis();           // recompute the view-based KPI tiles ONCE per
+                                     // filter change (UpdateSummary just reads them,
+                                     // so paging doesn't rescan — matches the cached
+                                     // whole-vault counts' performance discipline)
             ShowGridPage();          // also refreshes the summary (page indicator)
-            LayoutTopControls();     // re-centre: the summary width changed
+            LayoutTopControls();     // re-centre: the summary/KPI width changed
+        }
+
+        // Recompute the VIEW-based KPI tiles over the current filtered _view:
+        //   avg WIP age (days) · releases in the last 7 days · broken refs.
+        // (Open Requests is whole-vault, fetched once per load in LoadData.)
+        private void ComputeKpis()
+        {
+            long ageSum = 0; int wipCount = 0, rel7 = 0, brk = 0;
+            DateTime cutoff = DateTime.Now.AddDays(-7);
+            foreach (var f in _view)
+            {
+                int age = WipDays(f);          // -1 for non-WIP / no modified date
+                if (age >= 0) { ageSum += age; wipCount++; }
+                if (f.ReleasedDate != DateTime.MinValue && f.ReleasedDate >= cutoff)
+                    rel7++;
+                if (f.HasBrokenRefs) brk++;
+            }
+            _kpiAvgWipAge = wipCount > 0 ? (double)ageSum / wipCount : 0;
+            _kpiReleased7dCount = rel7;
+            _kpiBrokenInView = brk;
         }
 
         // Render the current page: clamp _page, set the grid's RowCount to just
@@ -1255,6 +1321,10 @@ namespace PDMLite
                 _summaryPanel.Left = Math.Max(S(14),
                     (panelW - _summaryPanel.Width) / 2);
 
+            if (_kpiPanel != null)
+                _kpiPanel.Left = Math.Max(S(14),
+                    (panelW - _kpiPanel.Width) / 2);
+
             if (_lblHint != null)
                 _lblHint.Left = Math.Max(S(14), (panelW - _lblHint.Width) / 2);
         }
@@ -1293,6 +1363,16 @@ namespace PDMLite
             SetActive(_lblReleased, IsStatusFilter("Released"));
             SetActive(_lblLocked,   IsStatusFilter("Locked"));
             SetActive(_lblBroken,   _brokenRefsOnly);
+
+            // KPI tiles (values cached by ComputeKpis / LoadData).
+            if (_kpiAvgAge != null)
+            {
+                _kpiAvgAge.Text = "Avg WIP age: " +
+                    _kpiAvgWipAge.ToString("0.0", CultureInfo.InvariantCulture) + " d";
+                _kpiReleased7d.Text = "Released (7d): " + _kpiReleased7dCount;
+                _kpiOpenReq.Text    = "Open requests: " + _kpiOpenReqCount;
+                _kpiBroken.Text     = "Broken refs: " + _kpiBrokenInView;
+            }
         }
 
         private void SetActive(Label l, bool active) =>
@@ -1314,6 +1394,28 @@ namespace PDMLite
             if (_summaryTip == null) _summaryTip = new ToolTip();
             _summaryTip.SetToolTip(l, tip);
             if (onClick != null) l.Click += (s, e) => onClick();
+            return l;
+        }
+
+        // A read-only KPI "tile": boxed, dark bold text, NOT clickable. Text is
+        // set in UpdateSummary; the tip explains the metric. Reuses the shared
+        // _summaryTip (already created by the count labels above, disposed on
+        // FormClosed) so no extra disposable is introduced.
+        private Label MakeKpiTile(string tip)
+        {
+            var l = new Label
+            {
+                Font = _kpiFont,
+                ForeColor = cTextDark,
+                BackColor = Color.White,
+                BorderStyle = BorderStyle.FixedSingle,
+                AutoSize = true,
+                Padding = new Padding(S(8), S(3), S(8), S(3)),
+                Margin = new Padding(0, 0, S(10), 0),
+                TextAlign = ContentAlignment.MiddleLeft
+            };
+            if (_summaryTip == null) _summaryTip = new ToolTip();
+            _summaryTip.SetToolTip(l, tip);
             return l;
         }
 
