@@ -59,7 +59,10 @@ namespace PDMLite
         private Button _btnRefresh;
         private Button _btnExport;
         private Button _btnClear;
+        private Button _btnPrint;   // batch-print released drawing PDFs
         private Button _btnAudit;   // switch to the Audit Report (single-window nav)
+        // Current released drawing PDFs live here ({DrawingNo} REV {Rev}.pdf).
+        private const string PdfExportFolder = @"N:\PDM-SolidWorks\EXPORTS\PDF";
         private Panel _topPanel;
         private Panel _bottomPanel;
         private System.Windows.Forms.Timer _searchTimer;
@@ -230,6 +233,143 @@ namespace PDMLite
             OpenDeferred(_view[idx].FilePath);
         }
 
+        // ── Batch print released drawings ───────────────────────────────────
+        // Print the current released drawing PDF (EXPORTS\PDF\{DrawingNo} REV
+        // {Rev}.pdf) for the files in scope: the SELECTED rows (current page) if
+        // any are selected, else the whole FILTERED view. Only RELEASED files
+        // have a current released PDF. Missing PDFs are reported, never fatal.
+        private void PrintDrawings()
+        {
+            // Scope: explicit selection (current page) wins; else the filtered view.
+            var scope = new List<VaultFile>();
+            if (_grid.SelectedRows.Count > 0)
+            {
+                foreach (DataGridViewRow row in _grid.SelectedRows)
+                {
+                    int idx = PageStart + row.Index;
+                    if (idx >= 0 && idx < _view.Count) scope.Add(_view[idx]);
+                }
+            }
+            else scope.AddRange(_view);
+
+            var releasedPaths = scope
+                .Where(f => Eq(f.Status, "Released") &&
+                            !string.IsNullOrEmpty(f.FilePath))
+                .Select(f => f.FilePath)
+                .ToList();
+
+            if (releasedPaths.Count == 0)
+            {
+                MessageBox.Show(
+                    "No RELEASED files in the current selection/view.\n\n" +
+                    "Select rows (Ctrl/Shift-click) or filter to a set that " +
+                    "includes released files, then try again.",
+                    "BCore PDM — Print Drawings",
+                    MessageBoxButtons.OK, MessageBoxIcon.Information);
+                return;
+            }
+
+            // Resolve each released file's drawing identity (DrawingNo + Rev) in
+            // ONE vault.xml load, then locate the current PDF in EXPORTS\PDF.
+            List<DrawingExportRef> refs;
+            try { refs = DatabaseManager.GetDrawingExportRefs(releasedPaths); }
+            catch (Exception ex)
+            {
+                MessageBox.Show("Could not read drawing numbers.\n\n" + ex.Message,
+                    "BCore PDM — Print Drawings",
+                    MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                return;
+            }
+
+            // Index the PDFs currently in EXPORTS\PDF (filename → full path).
+            var pdfByName = new Dictionary<string, string>(
+                StringComparer.OrdinalIgnoreCase);
+            try
+            {
+                if (Directory.Exists(PdfExportFolder))
+                    foreach (string p in Directory.GetFiles(PdfExportFolder, "*.pdf"))
+                        pdfByName[Path.GetFileName(p)] = p;
+            }
+            catch { /* share unreachable → everything reports as missing */ }
+
+            var toPrint = new List<string>();                 // full paths, deduped
+            var seenPdf = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            var missing = new List<string>();                 // no current PDF
+            foreach (var r in refs)
+            {
+                string found = ResolvePdf(r, pdfByName);
+                if (found == null)
+                {
+                    missing.Add(r.DrawingNo + (string.IsNullOrEmpty(r.Revision)
+                        ? "" : " REV " + r.Revision));
+                    continue;
+                }
+                if (seenPdf.Add(found)) toPrint.Add(found);
+            }
+
+            if (toPrint.Count == 0)
+            {
+                MessageBox.Show(
+                    "No released drawing PDFs were found for the selected files." +
+                    (missing.Count > 0
+                        ? "\n\nNo current PDF for:\n  • " +
+                          string.Join("\n  • ", missing.Take(20))
+                        : ""),
+                    "BCore PDM — Print Drawings",
+                    MessageBoxButtons.OK, MessageBoxIcon.Information);
+                return;
+            }
+
+            if (MessageBox.Show(
+                    "Print " + toPrint.Count +
+                    " released drawing PDF(s) to the default printer?" +
+                    (missing.Count > 0
+                        ? "\n\n(" + missing.Count +
+                          " drawing(s) had no current PDF and will be skipped.)"
+                        : ""),
+                    "BCore PDM — Print Drawings",
+                    MessageBoxButtons.YesNo, MessageBoxIcon.Question)
+                != DialogResult.Yes)
+                return;
+
+            int ok = 0;
+            var failed = new List<string>();
+            foreach (string pdf in toPrint)
+            {
+                if (ExportManager.PrintPdf(pdf)) ok++;
+                else failed.Add(Path.GetFileName(pdf));
+            }
+
+            var sb = new StringBuilder();
+            sb.Append("Sent ").Append(ok).Append(" of ").Append(toPrint.Count)
+              .Append(" drawing PDF(s) to the default printer.");
+            if (failed.Count > 0)
+                sb.Append("\n\nFailed to print:\n  • ")
+                  .Append(string.Join("\n  • ", failed.Take(20)));
+            if (missing.Count > 0)
+                sb.Append("\n\nNo current PDF (skipped):\n  • ")
+                  .Append(string.Join("\n  • ", missing.Take(20)));
+            MessageBox.Show(sb.ToString(), "BCore PDM — Print Drawings",
+                MessageBoxButtons.OK, MessageBoxIcon.Information);
+        }
+
+        // Find the current released PDF for a drawing ref. Exact name first
+        // ("{DrawingNo} REV {Rev}.pdf"), then any current PDF for that drawing
+        // number (the rev may differ from the stored config rev). null = none.
+        private static string ResolvePdf(DrawingExportRef r,
+            Dictionary<string, string> pdfByName)
+        {
+            if (r == null || string.IsNullOrEmpty(r.DrawingNo)) return null;
+            string exact = r.DrawingNo + " REV " + (r.Revision ?? "") + ".pdf";
+            string full;
+            if (pdfByName.TryGetValue(exact, out full)) return full;
+            string prefix = r.DrawingNo + " REV ";
+            foreach (var kv in pdfByName)
+                if (kv.Key.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
+                    return kv.Value;
+            return null;
+        }
+
         // ── Win32 cue banner (placeholder text — not available on .NET 4.8) ──
         [System.Runtime.InteropServices.DllImport("user32.dll",
             CharSet = System.Runtime.InteropServices.CharSet.Unicode)]
@@ -322,6 +462,14 @@ namespace PDMLite
             _btnClear.Height = ctrlH;
             _btnClear.Click += (s, e) => ClearAllFilters();
             _topPanel.Controls.Add(_btnClear);
+
+            // Batch-print released drawing PDFs for the selected rows (or the
+            // whole filtered view when nothing is selected).
+            _btnPrint = MakeButton("Print Drawings", cBrand, fBtn,
+                new Point(S(758), rowY), S(140));
+            _btnPrint.Height = ctrlH;
+            _btnPrint.Click += (s, e) => PrintDrawings();
+            _topPanel.Controls.Add(_btnPrint);
 
             // Switch to the Audit Report (single-window nav): signal the caller and
             // close — the task pane reopens the Audit Report in this window's place.
@@ -463,7 +611,7 @@ namespace PDMLite
                 AllowUserToResizeRows = false,
                 ReadOnly = true,
                 RowHeadersVisible = false,
-                MultiSelect = false,
+                MultiSelect = true,   // batch-print: select several rows at once
                 SelectionMode = DataGridViewSelectionMode.FullRowSelect,
                 // Widths are set per-column to fit content (+20%) in AutoSizeColumns.
                 AutoSizeColumnsMode = DataGridViewAutoSizeColumnsMode.None,
@@ -1402,7 +1550,7 @@ namespace PDMLite
 
             int rowW = _search.Width + gap + _btnRefresh.Width + gap
                      + _btnExport.Width + gap + _btnClear.Width
-                     + gap + _btnAudit.Width;
+                     + gap + _btnPrint.Width + gap + _btnAudit.Width;
 
             // Natural minimum width of the count strip (sum of the 8 labels + the
             // tightest S(6) gaps). Folded into 'widest' below so the chart hides /
@@ -1445,7 +1593,8 @@ namespace PDMLite
             _btnRefresh.Left = _search.Right + gap;
             _btnExport.Left  = _btnRefresh.Right + gap;
             _btnClear.Left   = _btnExport.Right + gap;
-            _btnAudit.Left   = _btnClear.Right + gap;
+            _btnPrint.Left   = _btnClear.Right + gap;
+            _btnAudit.Left   = _btnPrint.Right + gap;
 
             // JUSTIFY the count quick-filters across the SAME span as the control
             // row above (search.Left → btnAudit.Right), space-between: first flush
