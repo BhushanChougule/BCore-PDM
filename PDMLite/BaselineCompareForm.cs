@@ -103,7 +103,7 @@ namespace PDMLite
 
             // Top block — all positions are set (and re-centered on resize) by
             // LayoutTop, so the header content centres like the other BCore popups.
-            _topPanel = new Panel { Dock = DockStyle.Top, Height = S(132), BackColor = cBg };
+            _topPanel = new Panel { Dock = DockStyle.Top, Height = S(146), BackColor = cBg };
             var top = _topPanel;
             var cReason = Color.FromArgb(110, 116, 126);
 
@@ -227,7 +227,9 @@ namespace PDMLite
             _grid.ColumnHeadersDefaultCellStyle.Font = _fGridHead;
             _grid.ColumnHeadersDefaultCellStyle.Alignment =
                 DataGridViewContentAlignment.MiddleCenter;
-            // Tall enough that a two-line header ("Rev" / "(from)") shows fully.
+            // Wrap + a taller header row so a two-line header ("Rev" / "(from)")
+            // shows fully instead of ellipsis-truncating when the column is narrow.
+            _grid.ColumnHeadersDefaultCellStyle.WrapMode = DataGridViewTriState.True;
             _grid.ColumnHeadersHeight = S(40);
             _grid.AlternatingRowsDefaultCellStyle.BackColor = Color.FromArgb(245, 248, 251);
             _grid.RowTemplate.Height = S(22);
@@ -305,7 +307,7 @@ namespace PDMLite
             int total = leftColW + cg + rightColW;
             int sx = Math.Max(pad, cx - total / 2);
             int rx = sx + leftColW + cg;
-            int dY = S(86), eY = S(108);
+            int dY = S(86), eY = S(116);
             _lblShow.Location = new Point(sx, dY + S(3));
             _typeFilter.Location = new Point(sx + _lblShow.Width + S(6), dY);
             _summary.Location = new Point(rx, dY + S(3));
@@ -368,8 +370,12 @@ namespace PDMLite
                 var c = comps[i];
                 int lvl = c.Level < 0 ? 0 : c.Level;
                 long qty = c.Qty <= 0 ? 1 : c.Qty;
-                long parent = lvl == 0 ? 1
-                    : (lvl - 1 < ext.Count ? ext[lvl - 1] : 1);
+                // Parent multiplier = nearest known ancestor's extended qty. A
+                // well-formed depth-first list only ever steps in by one level;
+                // if malformed data jumps deeper, fall back to the nearest
+                // ancestor rather than 1 (which would silently undercount).
+                long parent = lvl == 0 || ext.Count == 0
+                    ? 1 : ext[Math.Min(lvl - 1, ext.Count - 1)];
                 long e = parent * qty;
                 while (ext.Count <= lvl) ext.Add(1);
                 ext[lvl] = e;
