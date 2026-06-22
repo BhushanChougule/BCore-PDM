@@ -168,6 +168,34 @@ namespace PDMLite
             return parent.Length > 0 ? parent : configName;
         }
 
+        // Sheet-metal detection — the SINGLE source of truth, shared by the
+        // flat-pattern DXF export (ExportManager.ExportFlatPattern) and the
+        // sheet-metal calculated-fields fill (AutoFillSheetMetalFields), so the
+        // two can never disagree about whether a part is sheet metal.
+        // GetFeatures(FALSE) walks the WHOLE feature list INCLUDING sub-features:
+        // a top-level-only scan misses multibody sheet metal, where each body's
+        // SheetMetal feature nests inside its body folder (those parts silently
+        // skipped the flat-pattern export — found in PR-52 testing). Parts only;
+        // never throws.
+        public static bool IsSheetMetal(ModelDoc2 doc)
+        {
+            try
+            {
+                if (doc == null) return false;
+                if (doc.GetType() != (int)swDocumentTypes_e.swDocPART) return false;
+                object[] features = doc.FeatureManager.GetFeatures(false) as object[];
+                if (features == null) return false;
+                foreach (object o in features)
+                {
+                    string ft = "";
+                    try { ft = ((Feature)o).GetTypeName2(); } catch { }
+                    if (ft == "SheetMetal") return true;
+                }
+                return false;
+            }
+            catch { return false; }
+        }
+
         // Read a single property from a specific named configuration.
         // Useful when the caller knows which config to target (e.g. during
         // multi-config save or per-config revision bump).
@@ -299,6 +327,99 @@ namespace PDMLite
                 // Non-fatal — skip if mass properties unavailable
             }
         }
+
+        // Auto-fill the sheet-metal calculated fields on the ACTIVE
+        // configuration:
+        //   FlatLength / FlatWidth → flat-pattern bounding box
+        //   CutLength             → flat-pattern cut (perimeter) length
+        //
+        // Source: the cut-list properties SOLIDWORKS auto-maintains for a sheet-
+        // metal body — "Bounding Box Length", "Bounding Box Width", "Cut Length"
+        // — read from the Cut-List folder feature's CustomPropertyManager. These
+        // are the numbers a sheet-metal shop wants on every flat part; reading
+        // SW's own maintained values (rather than re-deriving geometry) keeps the
+        // figures identical to the cut-list table and avoids unsuppressing the
+        // flat-pattern feature inside a save event.
+        //
+        // ACTIVE-CONFIG scoped (like AutoFillWeight) — no config switching inside
+        // the save event; multi-config parts get each config filled as it is
+        // saved active. NON-FATAL: a part that isn't sheet metal, an up-to-date
+        // cut list that's missing, or any unreadable value is simply skipped and
+        // NEVER blocks the save. (Values follow the document's units, like the
+        // cut-list table; the cut list must be up to date — SW's default
+        // "automatically update" — for the values to be present.)
+        public static void AutoFillSheetMetalFields(ModelDoc2 doc)
+        {
+            try
+            {
+                if (!IsSheetMetal(doc)) return;
+
+                string length, width, cut;
+                if (!TryReadCutListDimensions(doc, out length, out width, out cut))
+                    return;
+
+                // Only write a value we actually read — never blank an existing
+                // figure because one cut-list property happened to be missing.
+                if (!string.IsNullOrWhiteSpace(length))
+                    SetProperty(doc, "FlatLength", length);
+                if (!string.IsNullOrWhiteSpace(width))
+                    SetProperty(doc, "FlatWidth", width);
+                if (!string.IsNullOrWhiteSpace(cut))
+                    SetProperty(doc, "CutLength", cut);
+            }
+            catch
+            {
+                // Non-fatal — skip if the flat-pattern dimensions are unavailable
+            }
+        }
+
+        // Read the flat-pattern bounding box + cut length from the first Cut-List
+        // folder that carries them. A single-body sheet-metal part has exactly
+        // one cut-list item (the common shop case); for a multibody part the
+        // first item with readable dimensions wins. Returns false when no
+        // cut-list folder yields any dimension (cut list not updated, not sheet
+        // metal after all, etc.). Never throws.
+        private static bool TryReadCutListDimensions(ModelDoc2 doc,
+            out string length, out string width, out string cut)
+        {
+            length = ""; width = ""; cut = "";
+            try
+            {
+                object[] feats = doc.FeatureManager.GetFeatures(false) as object[];
+                if (feats == null) return false;
+                foreach (object o in feats)
+                {
+                    var f = o as Feature;
+                    if (f == null) continue;
+                    string tn = "";
+                    try { tn = f.GetTypeName2(); } catch { }
+                    if (tn != "CutListFolder") continue;
+
+                    // Read the RESOLVED (evaluated) values straight off the
+                    // cut-list feature's property manager (var, like every other
+                    // get_CustomPropertyManager call in this file — the interop's
+                    // property-manager type is never named explicitly).
+                    var cpm = f.CustomPropertyManager;
+                    if (cpm == null) continue;
+
+                    string l = "", w = "", c = "";
+                    try { string v, r; cpm.Get4("Bounding Box Length", false, out v, out r); l = r ?? ""; } catch { }
+                    try { string v, r; cpm.Get4("Bounding Box Width", false, out v, out r); w = r ?? ""; } catch { }
+                    try { string v, r; cpm.Get4("Cut Length", false, out v, out r); c = r ?? ""; } catch { }
+
+                    if (!string.IsNullOrWhiteSpace(l) ||
+                        !string.IsNullOrWhiteSpace(w) ||
+                        !string.IsNullOrWhiteSpace(c))
+                    {
+                        length = l; width = w; cut = c;
+                        return true;
+                    }
+                }
+            }
+            catch { }
+            return false;
+        }
+
         // Convert date properties from yyyy-MM-dd to MM/dd/yyyy format
         public static void FixDateFormats(ModelDoc2 doc)
         {
