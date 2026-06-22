@@ -815,6 +815,7 @@ namespace PDMLite
                 return;
             }
             MoveToScrap(Path.Combine(RelFolder, fileName));
+            ScrapArchivedFile(filePath);                   // old-rev SW archives
             if (isDrawing)
             {
                 ScrapExports(null, drawingNo);             // drawing → PDF only
@@ -822,7 +823,9 @@ namespace PDMLite
             else
             {
                 // Model: STEP + BOM per config PartNo, PDF per config
-                // DrawingNo — covers the associated drawings' PDFs too.
+                // DrawingNo — covers the associated drawings' PDFs too. Each
+                // ScrapExports now sweeps EXPORTS and ARCHIVE, so old-rev
+                // exports go to SCRAP alongside the current ones.
                 foreach (string pn in scrapPartNos) ScrapExports(pn, null);
                 foreach (string dn in scrapDrawingNos) ScrapExports(null, dn);
             }
@@ -848,6 +851,7 @@ namespace PDMLite
                     continue;
                 }
                 MoveToScrap(Path.Combine(RelFolder, drwName));
+                ScrapArchivedFile(dp);                     // old-rev drawing archives
                 DatabaseManager.RemoveFileRecord(dp);
                 AuditLogger.Log("RemoveFromVault", user, drwName, partNo, rev,
                     "drawing of " + fileName + ", moved to SCRAP — " + reason);
@@ -914,19 +918,30 @@ namespace PDMLite
             catch { return null; }
         }
 
-        // Move a file's current exports to SCRAP. STEP files are named
+        // Move a file's CURRENT exports (EXPORTS\…) AND its archived old-revision
+        // exports (ARCHIVE\…) to SCRAP. Both folder trees use the IDENTICAL export
+        // naming, so one routine scraps each root — without the ARCHIVE pass a
+        // retired file's old-revision STEP/DXF/PDF/BOM were left behind forever.
+        private static void ScrapExports(string partNo, string drawingNo)
+        {
+            ScrapExportsFrom(ExportRoot, partNo, drawingNo); // current deliverables
+            ScrapExportsFrom(ObsFolder, partNo, drawingNo);  // archived old revisions
+        }
+
+        // Scrap one export root's matches. STEP files are named
         // {partNoClean}-R{rev}.step, PDFs {drawingNo} REV {rev}.pdf, BOMs
         // {rawPartNo}-R{rev}_BOM.csv — globs are anchored to those exact
         // conventions and ExportNameFilter'd so retiring TEST02 can never
         // scrap TEST021's deliverables (same C3 fix as ArchiveOldExports).
-        private static void ScrapExports(string partNo, string drawingNo)
+        // root is EXPORTS for current files, ARCHIVE for old-rev copies.
+        private static void ScrapExportsFrom(string root, string partNo, string drawingNo)
         {
             try
             {
-                string stepExport = Path.Combine(ExportRoot, "STEP");
-                string pdfExport = Path.Combine(ExportRoot, "PDF");
-                string bomExport = Path.Combine(ExportRoot, "BOM");
-                string dxfExport = Path.Combine(ExportRoot, "DXF");
+                string stepExport = Path.Combine(root, "STEP");
+                string pdfExport = Path.Combine(root, "PDF");
+                string bomExport = Path.Combine(root, "BOM");
+                string dxfExport = Path.Combine(root, "DXF");
 
                 string partNoClean = (partNo ?? "").Replace(".", "");
                 if (!string.IsNullOrEmpty(partNoClean) &&
@@ -977,6 +992,52 @@ namespace PDMLite
                         if (bomFilter.IsMatch(Path.GetFileName(f)))
                             MoveToScrap(f);
                 }
+            }
+            catch { }
+        }
+
+        // Move a file's archived old-revision SW copies to SCRAP. New Revision /
+        // Rollback archive the prior file to ARCHIVE\{PARTS|ASSEMBLIES|DRAWINGS}
+        // as "{basename} REV {rev}{ext}" (plus the collision-stamped
+        // "{basename}_{yyyyMMdd_HHmmss} REV {rev}{ext}"). Remove from Vault used
+        // to leave every one of those behind — only WIP/RELEASED/EXPORTS were
+        // scrapped — so a retired file's whole revision history stayed in ARCHIVE.
+        // Both name forms are matched with the SAME anchored glob + regex the
+        // rollback archive scan uses, so a sibling "BracketX" never leaks into
+        // "Bracket"'s archives.
+        private static void ScrapArchivedFile(string filePath)
+        {
+            try
+            {
+                string ext = Path.GetExtension(filePath);
+                string sub =
+                    ext.Equals(".sldprt", StringComparison.OrdinalIgnoreCase) ? "PARTS"
+                  : ext.Equals(".sldasm", StringComparison.OrdinalIgnoreCase) ? "ASSEMBLIES"
+                  : ext.Equals(".slddrw", StringComparison.OrdinalIgnoreCase) ? "DRAWINGS"
+                  : null;
+                if (sub == null) return;
+                string dir = Path.Combine(ObsFolder, sub);
+                if (!Directory.Exists(dir)) return;
+
+                string baseName = Path.GetFileNameWithoutExtension(filePath);
+
+                // Primary "{baseName} REV {rev}{ext}".
+                var primary = ExportNameFilter(baseName, " REV ", ext);
+                foreach (string f in Directory.GetFiles(
+                    dir, baseName + " REV *" + ext))
+                    if (primary.IsMatch(Path.GetFileName(f)))
+                        MoveToScrap(f);
+
+                // Collision-stamped "{baseName}_{8digits}_{6digits} REV {rev}{ext}"
+                // (the stamp regex is pinned so "{baseName}_…" siblings can't leak).
+                var stamped = new Regex(
+                    "^" + Regex.Escape(baseName) +
+                    @"_\d{8}_\d{6} REV [A-Za-z0-9]+" + Regex.Escape(ext) + "$",
+                    RegexOptions.IgnoreCase);
+                foreach (string f in Directory.GetFiles(
+                    dir, baseName + "_* REV *" + ext))
+                    if (stamped.IsMatch(Path.GetFileName(f)))
+                        MoveToScrap(f);
             }
             catch { }
         }
@@ -1807,15 +1868,26 @@ namespace PDMLite
                             if (!ExportManager.ExportStepOnly(doc, ExportRoot,
                                     cfgStamp))
                                 failedExports.Add(cfgStamp + ".step");
+
+                            // Flat-pattern DXF for THIS config too (sheet metal
+                            // only; best-effort, never fails a release). The DXF
+                            // is read from the ACTIVE config's flat pattern, so it
+                            // MUST run here inside the loop — one DXF per config,
+                            // same stamp as the STEP. Previously a single
+                            // post-loop call exported only the original active
+                            // config's flat pattern, so a multi-config sheet-metal
+                            // part shipped just ONE DXF.
+                            ExportManager.ExportFlatPatternOnly(doc, ExportRoot,
+                                cfgStamp);
                         }
                     }
                     finally
                     {
-                        // Restore original config; export flat DXF once (sheet metal)
+                        // Restore the original active config (an export may have
+                        // switched it).
                         if (!string.IsNullOrEmpty(origCfgEx))
                             doc.ShowConfiguration2(origCfgEx);
                     }
-                    ExportManager.ExportFlatPatternOnly(doc, ExportRoot, stamp);
 
                     if (collidedStamps.Count > 0)
                         MessageBox.Show(

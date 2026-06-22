@@ -116,6 +116,23 @@ namespace PDMLite
             }
         }
 
+        // Esc closes the popup. ProcessCmdKey fires before any child control
+        // handles the key, so it works regardless of focus (the cards/buttons
+        // would otherwise swallow it — the form had no keyboard escape at all).
+        // Ignored while a batch is running (_busy): RunExclusive greys the form
+        // during a pumping batch, and closing mid-batch would tear down the
+        // cards it is still iterating.
+        protected override bool ProcessCmdKey(ref Message msg, Keys keyData)
+        {
+            if (keyData == Keys.Escape && !_busy)
+            {
+                this.DialogResult = DialogResult.Cancel;
+                Close();
+                return true;
+            }
+            return base.ProcessCmdKey(ref msg, keyData);
+        }
+
         // Controls.Clear() does NOT dispose the removed controls — they get
         // re-parented to the hidden WinForms parking window and keep their
         // USER/GDI handles until the process dies. The columns rebuild after

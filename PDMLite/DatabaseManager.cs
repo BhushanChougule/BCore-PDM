@@ -914,6 +914,25 @@ namespace PDMLite
             }
         }
 
+        // Cheap read of a record's broken-ref flag (one load, no disk walk).
+        // The open-time stale-flag recheck (SwAddin.ClearStaleBrokenRefFlag)
+        // calls this FIRST so the expensive ReferenceChecker walk runs only for
+        // files that are actually flagged (the rare case). Untracked → false.
+        public static bool GetBrokenRefFlag(string filePath)
+        {
+            if (string.IsNullOrEmpty(filePath)) return false;
+            lock (_lock) using (AcquireProcessLock())
+            {
+                var doc = LoadOrCreate();
+                foreach (var el in doc.Root.Element("Files").Elements("File"))
+                    if (string.Equals((string)el.Element("FilePath"), filePath,
+                            StringComparison.OrdinalIgnoreCase))
+                        return string.Equals((string)el.Element("HasBrokenRefs"),
+                            "true", StringComparison.OrdinalIgnoreCase);
+                return false;
+            }
+        }
+
         // Update a file record's top-level Revision (matched by FilePath, case-
         // insensitively). Used by rollback to sync a rolled-back DRAWING's record to
         // the target rev: the model's identity is synced via the full reopen +

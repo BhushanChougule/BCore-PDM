@@ -90,7 +90,7 @@ namespace PDMLite
         // On every active-doc change, re-scan ALL open documents.
         // This catches new files and any document that lost its handler
         // (e.g. due to a spurious DestroyNotify from the Custom Properties tab).
-        private int OnActiveDocChange() { HookAllOpenDocs(); UpdateActivePresence(); WarnObsoleteOnOpen(); return 0; }
+        private int OnActiveDocChange() { HookAllOpenDocs(); UpdateActivePresence(); WarnObsoleteOnOpen(); ClearStaleBrokenRefFlag(); return 0; }
 
         // File→New / File→Open into an EMPTY session never fires
         // ActiveDocChangeNotify — these cover that gap (see ConnectToSW).
@@ -101,7 +101,7 @@ namespace PDMLite
         { TryHookDoc(newDoc as ModelDoc2); HookAllOpenDocs(); return 0; }
 
         private int OnFileOpenPost(string fileName)
-        { HookAllOpenDocs(); UpdateActivePresence(); WarnObsoleteOnOpen(); return 0; }
+        { HookAllOpenDocs(); UpdateActivePresence(); WarnObsoleteOnOpen(); ClearStaleBrokenRefFlag(); return 0; }
 
         internal void HookAllOpenDocs()
         {
@@ -212,6 +212,12 @@ namespace PDMLite
         private readonly HashSet<string> _presenceChecked =
             new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
+        // Tracks paths whose stale broken-ref flag was already rechecked this
+        // open (ClearStaleBrokenRefFlag), so the recheck runs once per open, not
+        // on every window switch. Cleared on close like _presenceChecked.
+        private readonly HashSet<string> _brokenRefChecked =
+            new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
         // Tracks assemblies already WARNED about obsolete components this open.
         // Distinct from _presenceChecked: a path is added here ONLY once we
         // actually warn — so if the FIRST activation's dependency read came back
@@ -311,6 +317,40 @@ namespace PDMLite
             catch { }
         }
 
+        // Clear a STALE broken-reference flag when a file is opened/activated and
+        // its references now resolve. The flag is SET at save time (ValidateSave
+        // Rule 5) and only re-evaluated on the next tracked SAVE — but a RELEASED
+        // file can't be saved, so once a broken ref is fixed on disk (e.g. a
+        // renamed-away part is renamed back) the dashboard's red flag would never
+        // clear (found in shop testing on a Released drawing). On open/activate,
+        // if the file is currently flagged AND ReferenceChecker now finds no
+        // broken refs, clear it. The expensive ref-walk runs ONLY for files that
+        // are actually flagged (gated behind the cheap GetBrokenRefFlag read);
+        // guarded once-per-open like presence so it isn't re-run on every window
+        // switch. CLEAR-ONLY — broken refs are still SET at save time, so this
+        // can never introduce a false "healthy". Note: ReferenceChecker reads a
+        // part/drawing's references from the SAVED file on disk, so an in-memory-
+        // only relink of a still-Released file isn't seen here (re-save via New
+        // Revision); the common rename-back-on-disk case IS.
+        private void ClearStaleBrokenRefFlag()
+        {
+            try
+            {
+                var doc = SwApp?.ActiveDoc as ModelDoc2;
+                if (doc == null) return;
+                string path = doc.GetPathName();
+                if (string.IsNullOrEmpty(path)) return;     // unsaved — not tracked
+                if (!_brokenRefChecked.Add(path)) return;   // already rechecked this open
+                if (!DatabaseManager.GetBrokenRefFlag(path)) return; // not flagged — nothing to do
+                if (ReferenceChecker.GetBrokenReferences(doc).Count == 0)
+                {
+                    DatabaseManager.SetBrokenRefFlag(path, false);
+                    try { _taskPane?.RefreshPanel(); } catch { }
+                }
+            }
+            catch { }
+        }
+
         // Called from DocEventHandler when the user switches the active
         // configuration of a part/assembly. Config name = Part No by convention,
         // so each config carries its own PartNo / Description / Revision; the
@@ -333,6 +373,7 @@ namespace PDMLite
             // which were never registered — a harmless no-op). Also forget the
             // in-memory check so reopening the file warns/registers afresh.
             _presenceChecked.Remove(id);
+            _brokenRefChecked.Remove(id); // recheck the broken-ref flag on reopen
             _obsoleteWarned.Remove(id);   // re-warn about obsolete children on reopen
             try { DatabaseManager.ClearOpenSession(id, CurrentUser,
                 System.Environment.MachineName); } catch { }
