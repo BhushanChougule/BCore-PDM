@@ -896,9 +896,21 @@ namespace PDMLite
         }
 
         public static void SetBrokenRefFlag(string filePath, bool hasBroken)
+            => SetBrokenRefFlag(filePath, hasBroken, false);
+
+        // suppressInDegraded: the open-triggered cosmetic CLEAR
+        // (SwAddin.ClearStaleBrokenRefFlag) passes true so it is SKIPPED in
+        // degraded-lock mode — a file OPEN is a read path and must never write a
+        // stale whole-vault snapshot back over other machines' committed changes
+        // (the same rule presence bookkeeping / orphan purge / restore follow).
+        // The save-time SET/CLEAR (ValidateSave Rule 5) passes false: it is part
+        // of a user SAVE and mutates regardless, alongside UpsertFile/SetFileStatus.
+        public static void SetBrokenRefFlag(string filePath, bool hasBroken,
+            bool suppressInDegraded)
         {
             lock (_lock) using (AcquireProcessLock())
             {
+                if (suppressInDegraded && LockDegraded) return;
                 var doc = LoadOrCreate();
                 foreach (var el in doc.Root.Element("Files").Elements("File"))
                 {
@@ -911,6 +923,25 @@ namespace PDMLite
                     }
                 }
                 Save(doc);
+            }
+        }
+
+        // Cheap read of a record's broken-ref flag (one load, no disk walk).
+        // The open-time stale-flag recheck (SwAddin.ClearStaleBrokenRefFlag)
+        // calls this FIRST so the expensive ReferenceChecker walk runs only for
+        // files that are actually flagged (the rare case). Untracked → false.
+        public static bool GetBrokenRefFlag(string filePath)
+        {
+            if (string.IsNullOrEmpty(filePath)) return false;
+            lock (_lock) using (AcquireProcessLock())
+            {
+                var doc = LoadOrCreate();
+                foreach (var el in doc.Root.Element("Files").Elements("File"))
+                    if (string.Equals((string)el.Element("FilePath"), filePath,
+                            StringComparison.OrdinalIgnoreCase))
+                        return string.Equals((string)el.Element("HasBrokenRefs"),
+                            "true", StringComparison.OrdinalIgnoreCase);
+                return false;
             }
         }
 

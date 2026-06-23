@@ -20,6 +20,22 @@ namespace PDMLite
     {
         public static List<string> GetBrokenReferences(ModelDoc2 doc)
         {
+            bool walkCompleted;
+            return GetBrokenReferences(doc, out walkCompleted);
+        }
+
+        // walkCompleted = true ONLY when the reference walk ran to the end without
+        // throwing. A caller that CLEARS a broken-ref flag on an empty result MUST
+        // gate on this: the catch below swallows a transient COM/network failure
+        // (e.g. GetDocumentDependencies2 throwing) and returns an EMPTY list, which
+        // otherwise looks like "no broken refs" and would wrongly clear a genuine
+        // flag — and on a Released file (which can't be re-saved) the flag would
+        // then stay hidden until its next revision. The save-gate caller ignores
+        // it (its fail-closed behaviour is unchanged).
+        public static List<string> GetBrokenReferences(ModelDoc2 doc,
+            out bool walkCompleted)
+        {
+            walkCompleted = false;
             var errors = new List<string>();
             if (doc == null) return errors;
 
@@ -53,6 +69,7 @@ namespace PDMLite
                                 errors.Add("Missing file: " +
                                     Path.GetFileName(compPath));
                         }
+                        walkCompleted = true; // got the live component list
                     }
                 }
                 else
@@ -92,15 +109,22 @@ namespace PDMLite
                                     errors.Add("Missing reference: " +
                                         Path.GetFileName(refPath));
                             }
+                            walkCompleted = true; // got the dependency list
                         }
                     }
                 }
+                // walkCompleted is set inside each branch ONLY after the
+                // enumeration source (GetComponents / GetDocumentDependencies2)
+                // came back non-null — a SILENT null result (not just a thrown
+                // exception) therefore leaves it false, so a clear-on-empty caller
+                // never mistakes "couldn't read the refs" for "no broken refs".
             }
             catch
             {
                 // Best-effort warning — never throw out of the save/release
                 // gate. A failure here returns "no broken refs" (same as the
-                // old assembly-only path on any error).
+                // old assembly-only path on any error). walkCompleted stays
+                // false so a clear-on-empty caller knows the walk didn't finish.
             }
 
             return errors;
