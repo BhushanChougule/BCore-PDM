@@ -1309,9 +1309,17 @@ namespace PDMLite
                 ? durations[m / 2]
                 : (durations[m / 2 - 1] + durations[m / 2]) / 2.0;
 
+            // p90 (nearest-rank, hand-checkable): the duration at/below which at
+            // least 90% of releases fall — the figure managers plan to, since a
+            // few slow outliers make the average misleading.
+            int rank = (int)Math.Ceiling(0.90 * m);
+            if (rank < 1) rank = 1;
+            if (rank > m) rank = m;
+            double p90 = durations[rank - 1];
+
             _lblCycle.Text = string.Format(CultureInfo.InvariantCulture,
-                "{0:0.0} d Avg · {1:0.0} d Median · {2} Releases",
-                avg, median, m);
+                "{0:0.0} d Avg · {1:0.0} d Median · {2:0.0} d p90 · {3} Releases",
+                avg, median, p90, m);
         }
 
         // WIP-entry actions: events that (re)open a file for editing.
