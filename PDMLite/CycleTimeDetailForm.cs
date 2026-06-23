@@ -154,7 +154,10 @@ namespace PDMLite
                 DropDownStyle = ComboBoxStyle.DropDownList, Font = _fLabel,
                 Location = new Point(S(116), S(51)), Width = S(160)
             };
-            _groupBy.Items.AddRange(new object[] { "By Division", "By Released By" });
+            // "By Releaser" (not "By User"): the releaser is the Master who ran
+            // Release, NOT the engineer who did the design work — labelled
+            // honestly so the roll-up isn't misread as per-engineer cycle time.
+            _groupBy.Items.AddRange(new object[] { "By Division", "By Releaser" });
             _groupBy.SelectedIndex = 0;
             _groupBy.SelectedIndexChanged += (s, e) => RebuildRollup();
             _header.Controls.Add(_groupBy);

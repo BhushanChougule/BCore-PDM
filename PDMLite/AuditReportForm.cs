@@ -1313,7 +1313,18 @@ namespace PDMLite
             foreach (var kv in byFile)
             {
                 var evs = kv.Value;
-                evs.Sort((a, b) => a.Timestamp.CompareTo(b.Timestamp));
+                // Chronological, with a same-timestamp tiebreak: a Release sorts
+                // AFTER a same-second WIP-entry so the cycle is measured (~0 d)
+                // rather than dropped — List.Sort is NOT stable, and audit
+                // timestamps are 1-second granularity.
+                evs.Sort((a, b) =>
+                {
+                    int c = a.Timestamp.CompareTo(b.Timestamp);
+                    if (c != 0) return c;
+                    bool ar = Eq(a.Action, "Release"), br = Eq(b.Action, "Release");
+                    if (ar != br) return ar ? 1 : -1;
+                    return 0;
+                });
                 DateTime? start = null;
                 foreach (var e in evs)
                 {
@@ -1442,7 +1453,11 @@ namespace PDMLite
                 if (i < 0) return "";
                 string rest = path.Substring(i + marker.Length);
                 int slash = rest.IndexOf('\\');
-                string sub = slash >= 0 ? rest.Substring(0, slash) : rest;
+                // No backslash after "WIP\" means a file sitting DIRECTLY in WIP
+                // (no division subfolder) — there's no division, so don't return
+                // the file name as one.
+                if (slash < 0) return "";
+                string sub = rest.Substring(0, slash);
                 int dash = sub.IndexOf(" - ", StringComparison.Ordinal);
                 if (dash > 0) sub = sub.Substring(0, dash);
                 return sub.Trim().ToUpperInvariant();
