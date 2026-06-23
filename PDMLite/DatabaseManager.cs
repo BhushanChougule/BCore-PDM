@@ -896,9 +896,21 @@ namespace PDMLite
         }
 
         public static void SetBrokenRefFlag(string filePath, bool hasBroken)
+            => SetBrokenRefFlag(filePath, hasBroken, false);
+
+        // suppressInDegraded: the open-triggered cosmetic CLEAR
+        // (SwAddin.ClearStaleBrokenRefFlag) passes true so it is SKIPPED in
+        // degraded-lock mode — a file OPEN is a read path and must never write a
+        // stale whole-vault snapshot back over other machines' committed changes
+        // (the same rule presence bookkeeping / orphan purge / restore follow).
+        // The save-time SET/CLEAR (ValidateSave Rule 5) passes false: it is part
+        // of a user SAVE and mutates regardless, alongside UpsertFile/SetFileStatus.
+        public static void SetBrokenRefFlag(string filePath, bool hasBroken,
+            bool suppressInDegraded)
         {
             lock (_lock) using (AcquireProcessLock())
             {
+                if (suppressInDegraded && LockDegraded) return;
                 var doc = LoadOrCreate();
                 foreach (var el in doc.Root.Element("Files").Elements("File"))
                 {

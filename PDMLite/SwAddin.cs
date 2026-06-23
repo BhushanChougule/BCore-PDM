@@ -342,9 +342,18 @@ namespace PDMLite
                 if (string.IsNullOrEmpty(path)) return;     // unsaved — not tracked
                 if (!_brokenRefChecked.Add(path)) return;   // already rechecked this open
                 if (!DatabaseManager.GetBrokenRefFlag(path)) return; // not flagged — nothing to do
-                if (ReferenceChecker.GetBrokenReferences(doc).Count == 0)
+
+                // Clear ONLY when the ref-walk actually FINISHED and found nothing
+                // broken. walkCompleted guards against a swallowed transient COM/
+                // network failure returning an empty list (which would otherwise
+                // wrongly clear a genuine flag on a Released file that can't be
+                // re-saved to re-set it). suppressInDegraded:true skips the write
+                // in degraded-lock mode — an open is a read path (see SetBrokenRefFlag).
+                bool walkCompleted;
+                if (ReferenceChecker.GetBrokenReferences(doc, out walkCompleted).Count == 0
+                    && walkCompleted)
                 {
-                    DatabaseManager.SetBrokenRefFlag(path, false);
+                    DatabaseManager.SetBrokenRefFlag(path, false, suppressInDegraded: true);
                     try { _taskPane?.RefreshPanel(); } catch { }
                 }
             }
