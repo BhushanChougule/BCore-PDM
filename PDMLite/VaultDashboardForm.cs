@@ -1269,12 +1269,22 @@ namespace PDMLite
 
             var area = Screen.FromControl(this).WorkingArea;
 
+            int borderW = this.Width - this.ClientSize.Width;   // 0 before shown
+            int maxClientW = (int)(area.Width * MaxScreenFraction) - borderW;
+
+            // A HORIZONTAL scrollbar appears when the columns are wider than the
+            // (capped) client width — it sits along the grid's bottom and would
+            // otherwise eat the 20th row. Reserve its height so all 20 rows stay
+            // fully visible above it (the "20 row rule").
+            bool needsHScroll = totalCols + S(4) > maxClientW;
+
             // Height = a CONSTANT 20 grid rows + panels, capped at 80% of the
             // screen. On a small screen / high DPI the cap can bite, which forces
             // the grid to show a vertical scrollbar — detect that so the width can
             // reserve room for it (otherwise the last column clips under it).
             int gridH = _grid.ColumnHeadersHeight
-                      + _grid.RowTemplate.Height * VisibleRows + S(2);
+                      + _grid.RowTemplate.Height * VisibleRows + S(2)
+                      + (needsHScroll ? SystemInformation.HorizontalScrollBarHeight : 0);
             int desiredH = _topPanel.Height + gridH + _bottomPanel.Height;
             int borderH = this.Height - this.ClientSize.Height;
             int maxClientH = (int)(area.Height * MaxScreenFraction) - borderH;
@@ -1285,9 +1295,6 @@ namespace PDMLite
             // scrollbar — reserve its width ONLY when the height clamp forced one.
             int chrome = S(4) + (needsVScroll ? SystemInformation.VerticalScrollBarWidth : 0);
             int clientW = totalCols + chrome;
-
-            int borderW = this.Width - this.ClientSize.Width;   // 0 before shown
-            int maxClientW = (int)(area.Width * MaxScreenFraction) - borderW;
             if (clientW > maxClientW) clientW = maxClientW;
             int minClientW = S(800);                            // keep top row visible
             if (clientW < minClientW) clientW = minClientW;
