@@ -1391,8 +1391,10 @@ namespace PDMLite
                 foreach (var e in _all)
                 {
                     if (!Eq(e.Action, "RejectRequest")) continue;
-                    if (e.Timestamp != DateTime.MinValue && e.Timestamp < cutoff)
-                        continue;
+                    // Skip unparseable timestamps (can't be placed in a window) —
+                    // consistent with ComputeCycleRecords' MinValue handling.
+                    if (e.Timestamp == DateTime.MinValue) continue;
+                    if (e.Timestamp < cutoff) continue;
                     string fn = e.FileName ?? "";
                     if (fn.Length > 0)
                     {
