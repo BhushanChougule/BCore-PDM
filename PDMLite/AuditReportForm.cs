@@ -1176,8 +1176,18 @@ namespace PDMLite
 
             var area = Screen.FromControl(this).WorkingArea;
 
+            int borderW = this.Width - this.ClientSize.Width;   // 0 before shown
+            int maxClientW = (int)(area.Width * MaxScreenFraction) - borderW;
+
+            // A HORIZONTAL scrollbar appears when the columns are wider than the
+            // (capped) client width — it sits along the grid's bottom and would
+            // otherwise eat the 20th row. Reserve its height so all 20 rows stay
+            // fully visible above it (the "20 row rule").
+            bool needsHScroll = totalCols + S(4) > maxClientW;
+
             int gridH = _grid.ColumnHeadersHeight
-                      + _grid.RowTemplate.Height * VisibleRows + S(2);
+                      + _grid.RowTemplate.Height * VisibleRows + S(2)
+                      + (needsHScroll ? SystemInformation.HorizontalScrollBarHeight : 0);
             int desiredH = _topPanel.Height + gridH + _bottomPanel.Height;
             int borderH = this.Height - this.ClientSize.Height;
             int maxClientH = (int)(area.Height * MaxScreenFraction) - borderH;
@@ -1186,9 +1196,6 @@ namespace PDMLite
 
             int chrome = S(4) + (needsVScroll ? SystemInformation.VerticalScrollBarWidth : 0);
             int clientW = totalCols + chrome;
-
-            int borderW = this.Width - this.ClientSize.Width;   // 0 before shown
-            int maxClientW = (int)(area.Width * MaxScreenFraction) - borderW;
             if (clientW > maxClientW) clientW = maxClientW;
             int minClientW = S(800);
             if (clientW < minClientW) clientW = minClientW;
@@ -1244,7 +1251,11 @@ namespace PDMLite
             DateTime cutoff = windowDays > 0
                 ? DateTime.Now.AddDays(-windowDays) : DateTime.MinValue;
 
-            // Group events by file, oldest-first.
+            // Group events by file, oldest-first. DRAWINGS are excluded: a
+            // drawing follows its model (a part+drawing release logs TWO Release
+            // events for ONE engineering cycle), so counting drawings would
+            // double-count the cycle and skew the average. Cycle time is a
+            // part/assembly metric.
             var byFile = new Dictionary<string, List<AuditEntry>>(
                 StringComparer.OrdinalIgnoreCase);
             foreach (var e in _all)
@@ -1252,6 +1263,8 @@ namespace PDMLite
                 if (e.Timestamp == DateTime.MinValue) continue;
                 string key = e.FileName ?? "";
                 if (key.Length == 0) continue;
+                if (key.EndsWith(".slddrw", StringComparison.OrdinalIgnoreCase))
+                    continue; // drawings follow the model — don't double-count
                 List<AuditEntry> lst;
                 if (!byFile.TryGetValue(key, out lst))
                 { lst = new List<AuditEntry>(); byFile[key] = lst; }
@@ -1297,7 +1310,7 @@ namespace PDMLite
                 : (durations[m / 2 - 1] + durations[m / 2]) / 2.0;
 
             _lblCycle.Text = string.Format(CultureInfo.InvariantCulture,
-                "{0:0.0} d avg · {1:0.0} d median · {2} release(s)",
+                "{0:0.0} d Avg · {1:0.0} d Median · {2} Releases",
                 avg, median, m);
         }
 
