@@ -69,6 +69,7 @@ namespace PDMLite
                                 errors.Add("Missing file: " +
                                     Path.GetFileName(compPath));
                         }
+                        walkCompleted = true; // got the live component list
                     }
                 }
                 else
@@ -108,11 +109,15 @@ namespace PDMLite
                                     errors.Add("Missing reference: " +
                                         Path.GetFileName(refPath));
                             }
+                            walkCompleted = true; // got the dependency list
                         }
                     }
                 }
-
-                walkCompleted = true; // reached only if nothing above threw
+                // walkCompleted is set inside each branch ONLY after the
+                // enumeration source (GetComponents / GetDocumentDependencies2)
+                // came back non-null — a SILENT null result (not just a thrown
+                // exception) therefore leaves it false, so a clear-on-empty caller
+                // never mistakes "couldn't read the refs" for "no broken refs".
             }
             catch
             {

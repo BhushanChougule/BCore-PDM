@@ -350,11 +350,22 @@ namespace PDMLite
                 // re-saved to re-set it). suppressInDegraded:true skips the write
                 // in degraded-lock mode — an open is a read path (see SetBrokenRefFlag).
                 bool walkCompleted;
-                if (ReferenceChecker.GetBrokenReferences(doc, out walkCompleted).Count == 0
-                    && walkCompleted)
+                bool noBroken = ReferenceChecker.GetBrokenReferences(doc,
+                    out walkCompleted).Count == 0;
+                if (walkCompleted && noBroken)
                 {
                     DatabaseManager.SetBrokenRefFlag(path, false, suppressInDegraded: true);
                     try { _taskPane?.RefreshPanel(); } catch { }
+                }
+                else if (!walkCompleted)
+                {
+                    // The walk couldn't complete (transient COM/network failure or
+                    // a null dependency list). Release the once-per-open guard so a
+                    // later activation this session retries, instead of leaving a
+                    // legitimately-fixed ref flagged until the file is reopened.
+                    // Mirrors the retry-friendly _obsoleteWarned pattern; the cheap
+                    // GetBrokenRefFlag pre-check still bounds the cost to flagged files.
+                    _brokenRefChecked.Remove(path);
                 }
             }
             catch { }
