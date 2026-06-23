@@ -1277,7 +1277,7 @@ namespace PDMLite
             double p90 = Percentile(durations, 0.90); // sorted ascending already
 
             _lblCycle.Text = string.Format(CultureInfo.InvariantCulture,
-                "{0:0.0} d Avg · {1:0.0} d Median · {2:0.0} d p90 · {3} Releases",
+                "{0:0.0} d Avg · {1:0.0} d Median · {2:0.0} d P90 · {3} Releases",
                 avg, median, p90, m);
         }
 

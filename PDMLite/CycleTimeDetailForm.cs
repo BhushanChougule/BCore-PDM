@@ -61,7 +61,9 @@ namespace PDMLite
         private readonly List<CycleRecord> _records;
         private readonly List<ReworkRow> _bounces;
 
+        private Panel _header;
         private Label _summary;
+        private Label _groupByLbl;
         private ComboBox _groupBy;
         private DataGridView _gridMain, _gridRollup;
 
@@ -128,22 +130,25 @@ namespace PDMLite
 
             contentRoot.Controls.Add(centre);          // Fill first
 
-            // Header strip (summary + roll-up group selector).
-            var header = new Panel { BackColor = cBg, Dock = DockStyle.Top,
+            // Header strip (summary + roll-up group selector) — CENTRED like the
+            // other BCore popups (BaselineViewerForm / WhereUsedForm).
+            _header = new Panel { BackColor = cBg, Dock = DockStyle.Top,
                 Height = S(80) };
             _summary = new Label
             {
                 Font = _fLabel, ForeColor = cTextDark, AutoSize = false,
+                TextAlign = ContentAlignment.TopCenter,
                 Location = new Point(S(12), S(6)),
                 Size = new Size(ClientSize.Width - S(24), S(42)),
                 Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right
             };
-            header.Controls.Add(_summary);
-            header.Controls.Add(new Label
+            _header.Controls.Add(_summary);
+            _groupByLbl = new Label
             {
                 Text = "Roll-up group:", Font = _fLabel, ForeColor = cTextDark,
                 Location = new Point(S(12), S(54)), AutoSize = true
-            });
+            };
+            _header.Controls.Add(_groupByLbl);
             _groupBy = new ComboBox
             {
                 DropDownStyle = ComboBoxStyle.DropDownList, Font = _fLabel,
@@ -152,8 +157,9 @@ namespace PDMLite
             _groupBy.Items.AddRange(new object[] { "By Division", "By Released By" });
             _groupBy.SelectedIndex = 0;
             _groupBy.SelectedIndexChanged += (s, e) => RebuildRollup();
-            header.Controls.Add(_groupBy);
-            contentRoot.Controls.Add(header);          // edge after the Fill centre
+            _header.Controls.Add(_groupBy);
+            _header.Resize += (s, e) => CenterGroupBy();
+            contentRoot.Controls.Add(_header);         // edge after the Fill centre
 
             Controls.Add(contentRoot);                 // Fill first (form level)
 
@@ -210,8 +216,48 @@ namespace PDMLite
                 DataGridViewContentAlignment.MiddleCenter);
             AddCol(_gridRollup, "Avg d", "Avg", S(110), typeof(double), "0.0",
                 DataGridViewContentAlignment.MiddleCenter);
-            AddCol(_gridRollup, "p90 d", "p90", S(110), typeof(double), "0.0",
+            AddCol(_gridRollup, "P90 d", "p90", S(110), typeof(double), "0.0",
                 DataGridViewContentAlignment.MiddleCenter);
+
+            // Fit the FORM to the main grid's columns (capped at 70% screen, the
+            // dashboard pattern) so there's no dead space on the right; let the
+            // narrower roll-up grid fill that width proportionally.
+            FitWidth();
+            _gridRollup.AutoSizeColumnsMode = DataGridViewAutoSizeColumnsMode.Fill;
+            _gridRollup.Columns[0].FillWeight = 40; // Group (wider)
+            _gridRollup.Columns[1].FillWeight = 20;
+            _gridRollup.Columns[2].FillWeight = 20;
+            _gridRollup.Columns[3].FillWeight = 20;
+
+            CenterGroupBy(); // centre the roll-up selector now the width is final
+        }
+
+        // Size the form WIDTH to the main grid's columns + chrome, capped at 70%
+        // of the screen (the dashboard's FitFormSize pattern) — so there's no
+        // dead space to the right of the grids. Height is left as set.
+        private void FitWidth()
+        {
+            int totalCols = 0;
+            foreach (DataGridViewColumn c in _gridMain.Columns) totalCols += c.Width;
+            var area = Screen.FromControl(this).WorkingArea;
+            int chrome = S(24) + SystemInformation.VerticalScrollBarWidth + S(4);
+            int w = totalCols + chrome;
+            int maxW = (int)(area.Width * 0.70);
+            if (w > maxW) w = maxW;
+            int minW = S(560);
+            if (w < minW) w = minW;
+            ClientSize = new Size(w, ClientSize.Height);
+        }
+
+        // Centre the "Roll-up group:" label + combo as a unit (re-run on resize),
+        // matching the centred top block of the other BCore popups.
+        private void CenterGroupBy()
+        {
+            if (_header == null || _groupByLbl == null || _groupBy == null) return;
+            int rowW = _groupByLbl.Width + S(6) + _groupBy.Width;
+            int startX = Math.Max(S(12), (_header.ClientSize.Width - rowW) / 2);
+            _groupByLbl.Left = startX;
+            _groupBy.Left = _groupByLbl.Right + S(6);
         }
 
         private void FillMain()
@@ -263,7 +309,7 @@ namespace PDMLite
                     : (days[days.Count / 2 - 1] + days[days.Count / 2]) / 2.0;
                 double p90 = AuditReportForm.Percentile(days, 0.90);
                 line1 = string.Format(CultureInfo.InvariantCulture,
-                    "{0}:  {1} releases  ·  Avg {2:0.0} d  ·  Median {3:0.0} d  ·  p90 {4:0.0} d",
+                    "{0}:  {1} Releases  ·  Avg {2:0.0} d  ·  Median {3:0.0} d  ·  P90 {4:0.0} d",
                     _windowLabel, n, avg, med, p90);
             }
 
@@ -279,7 +325,7 @@ namespace PDMLite
                     .Select(g => g.Key + " ×" + g.Count()));
             }
             line2 = "Bounce-backs (Master rejections): " + b +
-                    (top.Length > 0 ? "   ·   top: " + top : "");
+                    (top.Length > 0 ? "   ·   Top: " + top : "");
 
             _summary.Text = line1 + Environment.NewLine + line2;
         }
