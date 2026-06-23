@@ -140,7 +140,7 @@ namespace PDMLite
                 TextAlign = ContentAlignment.TopCenter,
                 Location = new Point(S(12), S(6)),
                 Size = new Size(ClientSize.Width - S(24), S(42)),
-                Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right
+                Anchor = AnchorStyles.Top | AnchorStyles.Left
             };
             _header.Controls.Add(_summary);
             _groupByLbl = new Label
@@ -158,7 +158,7 @@ namespace PDMLite
             _groupBy.SelectedIndex = 0;
             _groupBy.SelectedIndexChanged += (s, e) => RebuildRollup();
             _header.Controls.Add(_groupBy);
-            _header.Resize += (s, e) => CenterGroupBy();
+            _header.Resize += (s, e) => LayoutHeader();
             contentRoot.Controls.Add(_header);         // edge after the Fill centre
 
             Controls.Add(contentRoot);                 // Fill first (form level)
@@ -229,7 +229,7 @@ namespace PDMLite
             _gridRollup.Columns[2].FillWeight = 20;
             _gridRollup.Columns[3].FillWeight = 20;
 
-            CenterGroupBy(); // centre the roll-up selector now the width is final
+            LayoutHeader(); // size+centre the top texts now the width is final
         }
 
         // Size the form WIDTH to the main grid's columns + chrome, capped at 70%
@@ -249,15 +249,27 @@ namespace PDMLite
             ClientSize = new Size(w, ClientSize.Height);
         }
 
-        // Centre the "Roll-up group:" label + combo as a unit (re-run on resize),
-        // matching the centred top block of the other BCore popups.
-        private void CenterGroupBy()
+        // Lay out the centred top block (re-run on resize): the summary label
+        // spans the header width (TextAlign centres the text) and the "Roll-up
+        // group:" label + combo are centred as a unit. Done here rather than via
+        // anchors because the anchor offset would be captured against the
+        // header's pre-parented default width and stretch the label off-screen.
+        private void LayoutHeader()
         {
-            if (_header == null || _groupByLbl == null || _groupBy == null) return;
-            int rowW = _groupByLbl.Width + S(6) + _groupBy.Width;
-            int startX = Math.Max(S(12), (_header.ClientSize.Width - rowW) / 2);
-            _groupByLbl.Left = startX;
-            _groupBy.Left = _groupByLbl.Right + S(6);
+            if (_header == null) return;
+            int w = _header.ClientSize.Width;
+            if (_summary != null)
+            {
+                _summary.Location = new Point(S(12), S(6));
+                _summary.Size = new Size(Math.Max(S(100), w - S(24)), S(42));
+            }
+            if (_groupByLbl != null && _groupBy != null)
+            {
+                int rowW = _groupByLbl.Width + S(6) + _groupBy.Width;
+                int startX = Math.Max(S(12), (w - rowW) / 2);
+                _groupByLbl.Left = startX;
+                _groupBy.Left = _groupByLbl.Right + S(6);
+            }
         }
 
         private void FillMain()
