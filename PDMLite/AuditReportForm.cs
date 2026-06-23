@@ -83,6 +83,15 @@ namespace PDMLite
         private DateTime _loadedAt;      // snapshot time, shown as "as of HH:mm"
         // Whole-log counts — invariant under filtering, so cached once per load.
         private int _cntRelease, _cntRevision, _cntRemoval;
+        // Cycle-time strip: average WIP→Released duration over a selectable
+        // window, computed straight from the audit log (_all) — independent of
+        // the grid's column filters/search (it's a time-window metric, not a
+        // view metric). Reuses _summaryFont (no extra disposable).
+        private FlowLayoutPanel _cyclePanel;
+        private ComboBox _cycleWindow;   // Last 30 / 90 / 365 days / All time
+        private Label _lblCyclePrefix;   // static "Cycle time (WIP→Released):"
+        private Label _lblCycle;         // the computed result
+        private Label _lblCycleDetails;  // "Details…" link → analytics popup
 
         private const int VisibleRows = 20;       // fixed grid height = 20 rows
         private const int PageSize = VisibleRows;  // 20 rows per page (the "20 row rule")
@@ -288,7 +297,66 @@ namespace PDMLite
             });
             _topPanel.Controls.Add(_summaryPanel);
 
-            int hintY = summaryY + (int)_summaryFont.GetHeight() + S(4);
+            // Cycle-time strip — avg WIP→Released duration over a selectable
+            // window, read straight from the audit log. A second strip below the
+            // counts (like the dashboard's KPI tiles) so it doesn't crowd the
+            // already-full control row.
+            int cycleY = summaryY + (int)_summaryFont.GetHeight() + S(8);
+            _cyclePanel = new FlowLayoutPanel
+            {
+                AutoSize = true,
+                AutoSizeMode = AutoSizeMode.GrowAndShrink,
+                WrapContents = false,
+                FlowDirection = FlowDirection.LeftToRight,
+                BackColor = cBg,
+                Margin = Padding.Empty,
+                Padding = Padding.Empty,
+                Location = new Point(S(14), cycleY)
+            };
+            _lblCyclePrefix = new Label
+            {
+                Text = "Cycle time (WIP→Released):",
+                Font = _summaryFont,
+                ForeColor = cTextGray,
+                AutoSize = true,
+                Margin = new Padding(0, S(3), S(8), 0)
+            };
+            _cycleWindow = new ComboBox
+            {
+                DropDownStyle = ComboBoxStyle.DropDownList,
+                Font = _summaryFont,
+                Width = S(120),
+                Margin = new Padding(0, 0, S(10), 0)
+            };
+            _cycleWindow.Items.AddRange(new object[]
+            { "Last 30 days", "Last 90 days", "Last 365 days", "All time" });
+            _cycleWindow.SelectedIndex = 1; // default 90 days
+            _cycleWindow.SelectedIndexChanged += (s, e) =>
+            { ComputeCycleTime(); LayoutTopControls(); }; // re-centre: width changed
+            _lblCycle = new Label
+            {
+                Font = _summaryFont,
+                ForeColor = cTextDark,
+                AutoSize = true,
+                Margin = new Padding(0, S(3), 0, 0)
+            };
+            // Clickable "Details…" link → the Cycle-Time Analytics popup
+            // (drill-in breakdown, by-division/by-user roll-ups, bounce-backs).
+            _lblCycleDetails = new Label
+            {
+                Text = "  Details…",
+                Font = _summaryFont,
+                ForeColor = cBrand,
+                AutoSize = true,
+                Cursor = Cursors.Hand,
+                Margin = new Padding(S(8), S(3), 0, 0)
+            };
+            _lblCycleDetails.Click += (s, e) => OpenCycleDetails();
+            _cyclePanel.Controls.AddRange(new Control[]
+            { _lblCyclePrefix, _cycleWindow, _lblCycle, _lblCycleDetails });
+            _topPanel.Controls.Add(_cyclePanel);
+
+            int hintY = cycleY + _cyclePanel.PreferredSize.Height + S(6);
             _lblHint = new Label
             {
                 Text = "Click a column arrow to filter  ·  Click a header to sort  ·  "
@@ -441,6 +509,7 @@ namespace PDMLite
             }
             _loadedAt = DateTime.Now;
             ComputeCounts();
+            ComputeCycleTime();
             ApplyFilter();
             AutoSizeColumns();
             FitFormSize();
@@ -1120,8 +1189,18 @@ namespace PDMLite
 
             var area = Screen.FromControl(this).WorkingArea;
 
+            int borderW = this.Width - this.ClientSize.Width;   // 0 before shown
+            int maxClientW = (int)(area.Width * MaxScreenFraction) - borderW;
+
+            // A HORIZONTAL scrollbar appears when the columns are wider than the
+            // (capped) client width — it sits along the grid's bottom and would
+            // otherwise eat the 20th row. Reserve its height so all 20 rows stay
+            // fully visible above it (the "20 row rule").
+            bool needsHScroll = totalCols + S(4) > maxClientW;
+
             int gridH = _grid.ColumnHeadersHeight
-                      + _grid.RowTemplate.Height * VisibleRows + S(2);
+                      + _grid.RowTemplate.Height * VisibleRows + S(2)
+                      + (needsHScroll ? SystemInformation.HorizontalScrollBarHeight : 0);
             int desiredH = _topPanel.Height + gridH + _bottomPanel.Height;
             int borderH = this.Height - this.ClientSize.Height;
             int maxClientH = (int)(area.Height * MaxScreenFraction) - borderH;
@@ -1130,9 +1209,6 @@ namespace PDMLite
 
             int chrome = S(4) + (needsVScroll ? SystemInformation.VerticalScrollBarWidth : 0);
             int clientW = totalCols + chrome;
-
-            int borderW = this.Width - this.ClientSize.Width;   // 0 before shown
-            int maxClientW = (int)(area.Width * MaxScreenFraction) - borderW;
             if (clientW > maxClientW) clientW = maxClientW;
             int minClientW = S(800);
             if (clientW < minClientW) clientW = minClientW;
@@ -1164,8 +1240,260 @@ namespace PDMLite
                 _summaryPanel.Left = Math.Max(S(14),
                     (panelW - _summaryPanel.Width) / 2);
 
+            if (_cyclePanel != null)
+                _cyclePanel.Left = Math.Max(S(14),
+                    (panelW - _cyclePanel.Width) / 2);
+
             if (_lblHint != null)
                 _lblHint.Left = Math.Max(S(14), (panelW - _lblHint.Width) / 2);
+        }
+
+        // ── Cycle-time analytics (WIP → Released) ───────────────────────────
+        // Average duration from a file entering WIP (Create / NewRevision /
+        // Unlock / Reinstate) to its next Release, over the selected window
+        // (filtered on the RELEASE timestamp). Computed straight from the audit
+        // log (_all) — independent of the grid's column filters/search. A
+        // release with no preceding WIP-entry event in the log (history began
+        // mid-stream) is skipped: it cannot be measured. Hand-checkable — pick a
+        // file, find its Release, subtract the most recent preceding WIP-entry.
+        private void ComputeCycleTime()
+        {
+            if (_lblCycle == null) return;
+
+            var recs = ComputeCycleRecords(CycleWindowDays());
+            if (recs.Count == 0)
+            {
+                _lblCycle.Text = "no completed cycles in window";
+                return;
+            }
+
+            var durations = recs.Select(r => r.Days).ToList();
+            double avg = durations.Average();
+            durations.Sort();
+            int m = durations.Count;
+            double median = (m % 2 == 1)
+                ? durations[m / 2]
+                : (durations[m / 2 - 1] + durations[m / 2]) / 2.0;
+            double p90 = Percentile(durations, 0.90); // sorted ascending already
+
+            _lblCycle.Text = string.Format(CultureInfo.InvariantCulture,
+                "{0:0.0} d Avg · {1:0.0} d Median · {2:0.0} d P90 · {3} Releases",
+                avg, median, p90, m);
+        }
+
+        // Build the per-cycle records for the window — the SINGLE source of
+        // truth shared by the strip aggregate (above) and the Cycle-Time
+        // Analytics detail popup. Groups events by file (DRAWINGS excluded — a
+        // drawing follows its model, so counting it double-counts one cycle and
+        // skews the average; cycle time is a part/assembly metric), pairs each
+        // Release with the most recent preceding WIP-entry, and emits one record
+        // per measured release. Division/Bounces are left blank here — the
+        // caller enriches them (needs GetAllFiles + the RejectRequest scan).
+        private List<CycleRecord> ComputeCycleRecords(int windowDays)
+        {
+            DateTime cutoff = windowDays > 0
+                ? DateTime.Now.AddDays(-windowDays) : DateTime.MinValue;
+
+            var byFile = new Dictionary<string, List<AuditEntry>>(
+                StringComparer.OrdinalIgnoreCase);
+            foreach (var e in _all)
+            {
+                if (e.Timestamp == DateTime.MinValue) continue;
+                string key = e.FileName ?? "";
+                if (key.Length == 0) continue;
+                if (key.EndsWith(".slddrw", StringComparison.OrdinalIgnoreCase))
+                    continue; // drawings follow the model — don't double-count
+                List<AuditEntry> lst;
+                if (!byFile.TryGetValue(key, out lst))
+                { lst = new List<AuditEntry>(); byFile[key] = lst; }
+                lst.Add(e);
+            }
+
+            var recs = new List<CycleRecord>();
+            foreach (var kv in byFile)
+            {
+                var evs = kv.Value;
+                // Chronological, with a same-timestamp tiebreak: a Release sorts
+                // AFTER a same-second WIP-entry so the cycle is measured (~0 d)
+                // rather than dropped — List.Sort is NOT stable, and audit
+                // timestamps are 1-second granularity.
+                evs.Sort((a, b) =>
+                {
+                    int c = a.Timestamp.CompareTo(b.Timestamp);
+                    if (c != 0) return c;
+                    bool ar = Eq(a.Action, "Release"), br = Eq(b.Action, "Release");
+                    if (ar != br) return ar ? 1 : -1;
+                    return 0;
+                });
+                DateTime? start = null;
+                foreach (var e in evs)
+                {
+                    if (IsWipEntry(e.Action))
+                        start = e.Timestamp;
+                    else if (Eq(e.Action, "Release"))
+                    {
+                        if (start.HasValue && e.Timestamp >= cutoff)
+                        {
+                            double days = (e.Timestamp - start.Value).TotalDays;
+                            if (days >= 0)
+                                recs.Add(new CycleRecord
+                                {
+                                    FileName    = kv.Key,
+                                    ReleasedBy  = e.User ?? "",
+                                    StartTime   = start.Value,
+                                    ReleaseTime = e.Timestamp,
+                                    Days        = days
+                                });
+                        }
+                        // A Release does not itself start a new WIP cycle — the
+                        // next NewRevision/Unlock does. Clear so a second Release
+                        // with no new WIP-entry between isn't measured twice.
+                        start = null;
+                    }
+                }
+            }
+            return recs;
+        }
+
+        // Nearest-rank percentile (0..1) over an ASCENDING-sorted list.
+        internal static double Percentile(List<double> sortedAsc, double p)
+        {
+            int n = sortedAsc.Count;
+            if (n == 0) return 0;
+            int rank = (int)Math.Ceiling(p * n);
+            if (rank < 1) rank = 1;
+            if (rank > n) rank = n;
+            return sortedAsc[rank - 1];
+        }
+
+        // Open the Cycle-Time Analytics detail popup for the window currently
+        // selected on the strip. Enriches the cycle records with Division
+        // (filename → WIP path → division key via GetAllFiles) and per-file
+        // bounce-backs (RejectRequest = a Master sending a request back), and
+        // gathers the bounce-back rows (engineer parsed from the audit note).
+        private void OpenCycleDetails()
+        {
+            try
+            {
+                int windowDays = CycleWindowDays();
+                var recs = ComputeCycleRecords(windowDays);
+                DateTime cutoff = windowDays > 0
+                    ? DateTime.Now.AddDays(-windowDays) : DateTime.MinValue;
+
+                // filename → division (one GetAllFiles read; non-fatal).
+                var divByName = new Dictionary<string, string>(
+                    StringComparer.OrdinalIgnoreCase);
+                try
+                {
+                    foreach (var f in DatabaseManager.GetAllFiles())
+                    {
+                        if (string.IsNullOrEmpty(f.FileName) ||
+                            divByName.ContainsKey(f.FileName)) continue;
+                        divByName[f.FileName] = DivisionFromPath(f.FilePath);
+                    }
+                }
+                catch { }
+
+                // Bounce-backs (RejectRequest) within the window: per-file count
+                // + the individual rows (engineer from "requested by X" note).
+                var bounceByFile = new Dictionary<string, int>(
+                    StringComparer.OrdinalIgnoreCase);
+                var bounces = new List<ReworkRow>();
+                foreach (var e in _all)
+                {
+                    if (!Eq(e.Action, "RejectRequest")) continue;
+                    // Skip unparseable timestamps (can't be placed in a window) —
+                    // consistent with ComputeCycleRecords' MinValue handling.
+                    if (e.Timestamp == DateTime.MinValue) continue;
+                    if (e.Timestamp < cutoff) continue;
+                    string fn = e.FileName ?? "";
+                    if (fn.Length > 0)
+                    {
+                        int c; bounceByFile.TryGetValue(fn, out c);
+                        bounceByFile[fn] = c + 1;
+                    }
+                    bounces.Add(new ReworkRow
+                    {
+                        FileName = fn,
+                        Engineer = ParseRequester(e.Note),
+                        Time     = e.Timestamp
+                    });
+                }
+
+                foreach (var r in recs)
+                {
+                    string d; r.Division =
+                        divByName.TryGetValue(r.FileName, out d) ? d : "";
+                    int b; r.Bounces =
+                        bounceByFile.TryGetValue(r.FileName, out b) ? b : 0;
+                }
+
+                string label = _cycleWindow == null ? "All time"
+                    : (_cycleWindow.SelectedItem?.ToString() ?? "All time");
+                using (var f = new CycleTimeDetailForm(_scale, label, recs, bounces))
+                    f.ShowDialog(this);
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show("Could not open cycle-time details:\n" + ex.Message,
+                    "BCore PDM", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            }
+        }
+
+        // Division key from a file's WIP path ("…\WIP\A - Aurora Shelving\x.sldprt"
+        // → "A"); "" when not under a recognizable WIP division. Self-contained
+        // so this PR doesn't depend on another in-flight PR's helper.
+        private static string DivisionFromPath(string path)
+        {
+            try
+            {
+                if (string.IsNullOrEmpty(path)) return "";
+                const string marker = "\\WIP\\";
+                int i = path.IndexOf(marker, StringComparison.OrdinalIgnoreCase);
+                if (i < 0) return "";
+                string rest = path.Substring(i + marker.Length);
+                int slash = rest.IndexOf('\\');
+                // No backslash after "WIP\" means a file sitting DIRECTLY in WIP
+                // (no division subfolder) — there's no division, so don't return
+                // the file name as one.
+                if (slash < 0) return "";
+                string sub = rest.Substring(0, slash);
+                int dash = sub.IndexOf(" - ", StringComparison.Ordinal);
+                if (dash > 0) sub = sub.Substring(0, dash);
+                return sub.Trim().ToUpperInvariant();
+            }
+            catch { return ""; }
+        }
+
+        // Parse the requesting engineer from a RejectRequest note, written as
+        // "requested by {engineer}; reason: {…}". "(unknown)" when absent.
+        private static string ParseRequester(string note)
+        {
+            if (string.IsNullOrEmpty(note)) return "(unknown)";
+            const string p = "requested by ";
+            int i = note.IndexOf(p, StringComparison.OrdinalIgnoreCase);
+            if (i < 0) return "(unknown)";
+            string rest = note.Substring(i + p.Length);
+            int semi = rest.IndexOf(';');
+            string who = (semi >= 0 ? rest.Substring(0, semi) : rest).Trim();
+            return who.Length > 0 ? who : "(unknown)";
+        }
+
+        // WIP-entry actions: events that (re)open a file for editing.
+        private static bool IsWipEntry(string action) =>
+            Eq(action, "Create") || Eq(action, "NewRevision") ||
+            Eq(action, "Unlock") || Eq(action, "Reinstate");
+
+        // Selected cycle-time window in days (0 = all time).
+        private int CycleWindowDays()
+        {
+            switch (_cycleWindow == null ? 1 : _cycleWindow.SelectedIndex)
+            {
+                case 0:  return 30;
+                case 1:  return 90;
+                case 2:  return 365;
+                default: return 0; // All time
+            }
         }
 
         // Whole-log counts are invariant under filtering, so compute them ONCE per
