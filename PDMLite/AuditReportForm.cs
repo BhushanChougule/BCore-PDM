@@ -91,6 +91,7 @@ namespace PDMLite
         private ComboBox _cycleWindow;   // Last 30 / 90 / 365 days / All time
         private Label _lblCyclePrefix;   // static "Cycle time (WIP→Released):"
         private Label _lblCycle;         // the computed result
+        private Label _lblCycleDetails;  // "Details…" link → analytics popup
 
         private const int VisibleRows = 20;       // fixed grid height = 20 rows
         private const int PageSize = VisibleRows;  // 20 rows per page (the "20 row rule")
@@ -339,8 +340,20 @@ namespace PDMLite
                 AutoSize = true,
                 Margin = new Padding(0, S(3), 0, 0)
             };
+            // Clickable "Details…" link → the Cycle-Time Analytics popup
+            // (drill-in breakdown, by-division/by-user roll-ups, bounce-backs).
+            _lblCycleDetails = new Label
+            {
+                Text = "  Details…",
+                Font = _summaryFont,
+                ForeColor = cBrand,
+                AutoSize = true,
+                Cursor = Cursors.Hand,
+                Margin = new Padding(S(8), S(3), 0, 0)
+            };
+            _lblCycleDetails.Click += (s, e) => OpenCycleDetails();
             _cyclePanel.Controls.AddRange(new Control[]
-            { _lblCyclePrefix, _cycleWindow, _lblCycle });
+            { _lblCyclePrefix, _cycleWindow, _lblCycle, _lblCycleDetails });
             _topPanel.Controls.Add(_cyclePanel);
 
             int hintY = cycleY + _cyclePanel.PreferredSize.Height + S(6);
@@ -1247,15 +1260,40 @@ namespace PDMLite
         {
             if (_lblCycle == null) return;
 
-            int windowDays = CycleWindowDays();   // 0 = all time
+            var recs = ComputeCycleRecords(CycleWindowDays());
+            if (recs.Count == 0)
+            {
+                _lblCycle.Text = "no completed cycles in window";
+                return;
+            }
+
+            var durations = recs.Select(r => r.Days).ToList();
+            double avg = durations.Average();
+            durations.Sort();
+            int m = durations.Count;
+            double median = (m % 2 == 1)
+                ? durations[m / 2]
+                : (durations[m / 2 - 1] + durations[m / 2]) / 2.0;
+            double p90 = Percentile(durations, 0.90); // sorted ascending already
+
+            _lblCycle.Text = string.Format(CultureInfo.InvariantCulture,
+                "{0:0.0} d Avg · {1:0.0} d Median · {2:0.0} d p90 · {3} Releases",
+                avg, median, p90, m);
+        }
+
+        // Build the per-cycle records for the window — the SINGLE source of
+        // truth shared by the strip aggregate (above) and the Cycle-Time
+        // Analytics detail popup. Groups events by file (DRAWINGS excluded — a
+        // drawing follows its model, so counting it double-counts one cycle and
+        // skews the average; cycle time is a part/assembly metric), pairs each
+        // Release with the most recent preceding WIP-entry, and emits one record
+        // per measured release. Division/Bounces are left blank here — the
+        // caller enriches them (needs GetAllFiles + the RejectRequest scan).
+        private List<CycleRecord> ComputeCycleRecords(int windowDays)
+        {
             DateTime cutoff = windowDays > 0
                 ? DateTime.Now.AddDays(-windowDays) : DateTime.MinValue;
 
-            // Group events by file, oldest-first. DRAWINGS are excluded: a
-            // drawing follows its model (a part+drawing release logs TWO Release
-            // events for ONE engineering cycle), so counting drawings would
-            // double-count the cycle and skew the average. Cycle time is a
-            // part/assembly metric.
             var byFile = new Dictionary<string, List<AuditEntry>>(
                 StringComparer.OrdinalIgnoreCase);
             foreach (var e in _all)
@@ -1271,7 +1309,7 @@ namespace PDMLite
                 lst.Add(e);
             }
 
-            var durations = new List<double>(); // in days
+            var recs = new List<CycleRecord>();
             foreach (var kv in byFile)
             {
                 var evs = kv.Value;
@@ -1286,7 +1324,15 @@ namespace PDMLite
                         if (start.HasValue && e.Timestamp >= cutoff)
                         {
                             double days = (e.Timestamp - start.Value).TotalDays;
-                            if (days >= 0) durations.Add(days);
+                            if (days >= 0)
+                                recs.Add(new CycleRecord
+                                {
+                                    FileName    = kv.Key,
+                                    ReleasedBy  = e.User ?? "",
+                                    StartTime   = start.Value,
+                                    ReleaseTime = e.Timestamp,
+                                    Days        = days
+                                });
                         }
                         // A Release does not itself start a new WIP cycle — the
                         // next NewRevision/Unlock does. Clear so a second Release
@@ -1295,31 +1341,125 @@ namespace PDMLite
                     }
                 }
             }
+            return recs;
+        }
 
-            if (durations.Count == 0)
-            {
-                _lblCycle.Text = "no completed cycles in window";
-                return;
-            }
-
-            double avg = durations.Average();
-            durations.Sort();
-            int m = durations.Count;
-            double median = (m % 2 == 1)
-                ? durations[m / 2]
-                : (durations[m / 2 - 1] + durations[m / 2]) / 2.0;
-
-            // p90 (nearest-rank, hand-checkable): the duration at/below which at
-            // least 90% of releases fall — the figure managers plan to, since a
-            // few slow outliers make the average misleading.
-            int rank = (int)Math.Ceiling(0.90 * m);
+        // Nearest-rank percentile (0..1) over an ASCENDING-sorted list.
+        internal static double Percentile(List<double> sortedAsc, double p)
+        {
+            int n = sortedAsc.Count;
+            if (n == 0) return 0;
+            int rank = (int)Math.Ceiling(p * n);
             if (rank < 1) rank = 1;
-            if (rank > m) rank = m;
-            double p90 = durations[rank - 1];
+            if (rank > n) rank = n;
+            return sortedAsc[rank - 1];
+        }
 
-            _lblCycle.Text = string.Format(CultureInfo.InvariantCulture,
-                "{0:0.0} d Avg · {1:0.0} d Median · {2:0.0} d p90 · {3} Releases",
-                avg, median, p90, m);
+        // Open the Cycle-Time Analytics detail popup for the window currently
+        // selected on the strip. Enriches the cycle records with Division
+        // (filename → WIP path → division key via GetAllFiles) and per-file
+        // bounce-backs (RejectRequest = a Master sending a request back), and
+        // gathers the bounce-back rows (engineer parsed from the audit note).
+        private void OpenCycleDetails()
+        {
+            try
+            {
+                int windowDays = CycleWindowDays();
+                var recs = ComputeCycleRecords(windowDays);
+                DateTime cutoff = windowDays > 0
+                    ? DateTime.Now.AddDays(-windowDays) : DateTime.MinValue;
+
+                // filename → division (one GetAllFiles read; non-fatal).
+                var divByName = new Dictionary<string, string>(
+                    StringComparer.OrdinalIgnoreCase);
+                try
+                {
+                    foreach (var f in DatabaseManager.GetAllFiles())
+                    {
+                        if (string.IsNullOrEmpty(f.FileName) ||
+                            divByName.ContainsKey(f.FileName)) continue;
+                        divByName[f.FileName] = DivisionFromPath(f.FilePath);
+                    }
+                }
+                catch { }
+
+                // Bounce-backs (RejectRequest) within the window: per-file count
+                // + the individual rows (engineer from "requested by X" note).
+                var bounceByFile = new Dictionary<string, int>(
+                    StringComparer.OrdinalIgnoreCase);
+                var bounces = new List<ReworkRow>();
+                foreach (var e in _all)
+                {
+                    if (!Eq(e.Action, "RejectRequest")) continue;
+                    if (e.Timestamp != DateTime.MinValue && e.Timestamp < cutoff)
+                        continue;
+                    string fn = e.FileName ?? "";
+                    if (fn.Length > 0)
+                    {
+                        int c; bounceByFile.TryGetValue(fn, out c);
+                        bounceByFile[fn] = c + 1;
+                    }
+                    bounces.Add(new ReworkRow
+                    {
+                        FileName = fn,
+                        Engineer = ParseRequester(e.Note),
+                        Time     = e.Timestamp
+                    });
+                }
+
+                foreach (var r in recs)
+                {
+                    string d; r.Division =
+                        divByName.TryGetValue(r.FileName, out d) ? d : "";
+                    int b; r.Bounces =
+                        bounceByFile.TryGetValue(r.FileName, out b) ? b : 0;
+                }
+
+                string label = _cycleWindow == null ? "All time"
+                    : (_cycleWindow.SelectedItem?.ToString() ?? "All time");
+                using (var f = new CycleTimeDetailForm(_scale, label, recs, bounces))
+                    f.ShowDialog(this);
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show("Could not open cycle-time details:\n" + ex.Message,
+                    "BCore PDM", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            }
+        }
+
+        // Division key from a file's WIP path ("…\WIP\A - Aurora Shelving\x.sldprt"
+        // → "A"); "" when not under a recognizable WIP division. Self-contained
+        // so this PR doesn't depend on another in-flight PR's helper.
+        private static string DivisionFromPath(string path)
+        {
+            try
+            {
+                if (string.IsNullOrEmpty(path)) return "";
+                const string marker = "\\WIP\\";
+                int i = path.IndexOf(marker, StringComparison.OrdinalIgnoreCase);
+                if (i < 0) return "";
+                string rest = path.Substring(i + marker.Length);
+                int slash = rest.IndexOf('\\');
+                string sub = slash >= 0 ? rest.Substring(0, slash) : rest;
+                int dash = sub.IndexOf(" - ", StringComparison.Ordinal);
+                if (dash > 0) sub = sub.Substring(0, dash);
+                return sub.Trim().ToUpperInvariant();
+            }
+            catch { return ""; }
+        }
+
+        // Parse the requesting engineer from a RejectRequest note, written as
+        // "requested by {engineer}; reason: {…}". "(unknown)" when absent.
+        private static string ParseRequester(string note)
+        {
+            if (string.IsNullOrEmpty(note)) return "(unknown)";
+            const string p = "requested by ";
+            int i = note.IndexOf(p, StringComparison.OrdinalIgnoreCase);
+            if (i < 0) return "(unknown)";
+            string rest = note.Substring(i + p.Length);
+            int semi = rest.IndexOf(';');
+            string who = (semi >= 0 ? rest.Substring(0, semi) : rest).Trim();
+            return who.Length > 0 ? who : "(unknown)";
         }
 
         // WIP-entry actions: events that (re)open a file for editing.

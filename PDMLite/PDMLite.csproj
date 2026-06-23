@@ -84,6 +84,9 @@
     <Compile Include="ConfigRevisionPickerForm.cs">
       <SubType>Form</SubType>
     </Compile>
+    <Compile Include="CycleTimeDetailForm.cs">
+      <SubType>Form</SubType>
+    </Compile>
     <Compile Include="DatabaseManager.cs" />
     <Compile Include="DrawingScopeDialog.cs">
       <SubType>Form</SubType>
