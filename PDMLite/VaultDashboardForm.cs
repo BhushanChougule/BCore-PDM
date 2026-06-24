@@ -100,6 +100,7 @@ namespace PDMLite
         private int _kpiReleased7dPrev;   // whole-vault files released 7–14 days ago (trend baseline)
         private int _kpiBrokenInView;     // broken-ref files in _view
         private int _kpiOpenReqCount;     // pending requests (whole vault, per load)
+        private int _oldestReqDays = -1;  // age (days) of the oldest pending request, -1 = none
         // Whole-vault counts — invariant under filtering, so cached once per load
         // (UpdateSummary used to re-scan _all 4× on every keystroke / page click).
         private int _cntWip, _cntRel, _cntLck, _cntObs, _cntBrk, _cntStale, _cntMine;
@@ -133,6 +134,7 @@ namespace PDMLite
         private const int PageSize = VisibleRows; // 20 rows per page (the "20 row rule")
         private const double MaxScreenFraction = 0.80; // popup ≤ 80% of screen
         private const int StaleWipDays = 30; // WIP older than this = "stale" (aging surfacing)
+        private const int RequestSlaDays = 3; // pending request older than this = SLA breach
         private int GlyphZone => S(20);         // right-edge hit area for the arrow
 
         // Current page (0-based) into _view, and the pager controls rebuilt for it.
@@ -377,7 +379,7 @@ namespace PDMLite
             };
             _kpiAvgAge     = MakeKpiTile("Average age (days since last save) of WIP files in the current view");
             _kpiReleased7d = MakeKpiTile("Files released within the last 7 days across the whole vault (release throughput; not affected by filters). ▲/▼ shows the change vs the prior 7 days.");
-            _kpiOpenReq    = MakeKpiTile("Pending engineer requests across the whole vault (Unlock / Revision / Release)");
+            _kpiOpenReq    = MakeKpiTile("Pending engineer requests across the whole vault (Unlock / Revision / Release). Shows the oldest request's age; turns maroon when the oldest is over " + RequestSlaDays + " days (responsiveness SLA — open Pending Requests to act).");
             _kpiBroken     = MakeKpiTile("Files with broken references in the current view");
             _kpiPanel.Controls.AddRange(new Control[]
             { _kpiAvgAge, _kpiReleased7d, _kpiOpenReq, _kpiBroken });
@@ -616,9 +618,27 @@ namespace PDMLite
             _loadedAt = DateTime.Now;   // shown in the summary as "as of HH:mm"
             ComputeVaultCounts();       // cache whole-vault counts for the summary
             // Open-requests KPI is a WHOLE-VAULT metric (no per-file dimension to
-            // filter on) — read it once per load. Network blip → 0, never throws.
-            try { _kpiOpenReqCount = DatabaseManager.GetPendingRequests().Count; }
-            catch { _kpiOpenReqCount = 0; }
+            // filter on) — read it once per load. Also derive the OLDEST pending
+            // request's age (the responsiveness SLA: there are no due dates in the
+            // model, so "time in queue" is the honest SLA signal). Network blip →
+            // 0 / no age, never throws.
+            try
+            {
+                var pending = DatabaseManager.GetPendingRequests();
+                _kpiOpenReqCount = pending.Count;
+                _oldestReqDays = -1;
+                foreach (var r in pending)
+                {
+                    DateTime d;
+                    if (DateTime.TryParse(r.RequestDate, null,
+                            DateTimeStyles.RoundtripKind, out d))
+                    {
+                        int age = (int)(DateTime.Now.Date - d.Date).TotalDays;
+                        if (age > _oldestReqDays) _oldestReqDays = age;
+                    }
+                }
+            }
+            catch { _kpiOpenReqCount = 0; _oldestReqDays = -1; }
             // Populate the grid, then size columns to the full data ONCE and fit
             // the form to them — so columns/width stay stable while the user
             // types in the search box (no per-keystroke resizing).
@@ -1426,7 +1446,16 @@ namespace PDMLite
                 int d = _kpiReleased7dCount - _kpiReleased7dPrev;
                 string trend = d > 0 ? "  ▲" + d : d < 0 ? "  ▼" + (-d) : "  ▬";
                 _kpiReleased7d.Text = "Released (7d): " + _kpiReleased7dCount + trend;
-                _kpiOpenReq.Text    = "Open requests: " + _kpiOpenReqCount;
+                // Open requests + the responsiveness SLA: append the oldest pending
+                // request's age, and turn the tile maroon when it breaches the SLA
+                // (older than RequestSlaDays) — a queue going stale is a Master's
+                // cue to act. No due dates exist, so "oldest in queue" IS the SLA.
+                string reqAge = (_kpiOpenReqCount > 0 && _oldestReqDays >= 0)
+                    ? "  ·  oldest " + _oldestReqDays + "d" : "";
+                _kpiOpenReq.Text = "Open requests: " + _kpiOpenReqCount + reqAge;
+                _kpiOpenReq.ForeColor =
+                    (_kpiOpenReqCount > 0 && _oldestReqDays > RequestSlaDays)
+                        ? cMaroon : cTextDark;
                 _kpiBroken.Text     = "Broken refs: " + _kpiBrokenInView;
             }
         }
