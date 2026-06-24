@@ -132,3 +132,23 @@ single-share, 10-seat deployment. Reporting/analytics is already best-covered
   `ModifiedBy == me` (the honest proxy in a last-save-wins model). A richer
   My-Work lens (files I currently have open via OpenSessions, or files reserved
   to me) lands naturally with the check-out feature (Phase 4, #8).
+
+### Deferred from the sheet-metal calculated-fields work (PR1)
+
+PR1 auto-fills the full set of sheet-metal cost/quote drivers on save
+(`FlatLength`/`FlatWidth`/`CutLength`/`Thickness`/`BlankArea`/`BendCount`/
+`CutoutCount`, unit-labelled). The DATA now exists on every sheet-metal part;
+the follow-ups SURFACE it where industry PDM/ERP does:
+
+- **Sheet-metal columns on the assembly BOM export (next).** Add Thickness /
+  Flat L×W / Cut length / Bends to `ExportManager.ExportBom`'s CSV for
+  sheet-metal component rows, so the numbers flow straight into quoting/ERP —
+  the way SOLIDWORKS PDM Pro and every nesting/ERP package put them on the BOM.
+  Reads each component's cut-list/custom props through the existing
+  `GetReadableModel` path (the resolve the BOM already does), so it's additive
+  columns, not a new walk. A focused PR of its own (kept out of PR1 so its
+  on-machine test stays valid).
+- **Advanced Search by Thickness (later).** Index Thickness per config in the
+  `<Config>` block (like Material/Finish/DrawnBy/PartType) and add it to
+  `AdvancedSearchForm` so "find all 16-ga parts" works. Smaller value than the
+  BOM, larger touch (DatabaseManager + the search form), so it trails the BOM.
