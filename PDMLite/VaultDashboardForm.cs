@@ -65,10 +65,11 @@ namespace PDMLite
         private System.Windows.Forms.Timer _searchTimer;
         private Font _cellBold; // shared bold font: Status cell + header text
 
-        // Summary strip: clickable count "links" (Total/WIP/Released/Locked/
-        // Obsolete/Broken Refs/Stale WIP act as quick filters) + a plain
-        // showing/page label.
-        private FlowLayoutPanel _summaryPanel;
+        // Summary strip: clickable count "links" (Total/Mine/WIP/Released/Locked/
+        // Obsolete/Broken Refs/Stale WIP act as quick filters), justified across the
+        // control-row width. _lblShowing (the "Showing… · Page…" status) lives in the
+        // BOTTOM panel on the pager line, not here.
+        private Label[] _countLabels;   // the 8 clickable count quick-filters, justified across the control-row width
         private Label _lblTotal, _lblMine, _lblWip, _lblReleased, _lblLocked, _lblObsolete, _lblBroken, _lblStale, _lblShowing;
         private Font _summaryFont;       // base (bold)
         private Font _summaryFontActive; // active quick-filter (bold + underline)
@@ -332,21 +333,11 @@ namespace PDMLite
             _topPanel.Controls.Add(_btnAudit);
 
             int summaryY = rowY + ctrlH + S(10);
-            // Summary strip = a row of count "links". Total/WIP/Released/Locked/
-            // Broken Refs are clickable quick filters; the trailing label shows the
-            // page range. A FlowLayoutPanel lays them out left-to-right and is
-            // centred as one unit by LayoutTopControls.
-            _summaryPanel = new FlowLayoutPanel
-            {
-                AutoSize = true,
-                AutoSizeMode = AutoSizeMode.GrowAndShrink,
-                WrapContents = false,
-                FlowDirection = FlowDirection.LeftToRight,
-                BackColor = cBg,
-                Margin = Padding.Empty,
-                Padding = Padding.Empty,
-                Location = new Point(S(14), summaryY)
-            };
+            // Summary strip = a row of clickable count "links" (Total/Mine/WIP/
+            // Released/Locked/Obsolete/Broken Refs/Stale WIP — quick filters). They
+            // are direct _topPanel children JUSTIFIED across the control-row width
+            // (search → Audit Report) by LayoutTopControls, so the strip lines up
+            // with the row above it (a FlowLayoutPanel can't space-between).
             _lblTotal    = MakeCountLabel("All files (clear filters)", () => ClearAllFilters());
             _lblMine     = MakeCountLabel("My Work — files I last saved (" + _me + ")", () => ToggleMineFilter());
             _lblWip      = MakeCountLabel("Filter to WIP",      () => ToggleStatusFilter("WIP"));
@@ -355,12 +346,16 @@ namespace PDMLite
             _lblObsolete = MakeCountLabel("Filter to Obsolete", () => ToggleStatusFilter("Obsolete"));
             _lblBroken   = MakeCountLabel("Show only broken references", () => ToggleBrokenFilter());
             _lblStale    = MakeCountLabel("Show only WIP files not saved in over " + StaleWipDays + " days (stuck/neglected work)", () => ToggleStaleFilter());
-            _summaryPanel.Controls.AddRange(new Control[]
+            _countLabels = new[]
             {
                 _lblTotal, _lblMine, _lblWip, _lblReleased, _lblLocked, _lblObsolete,
                 _lblBroken, _lblStale
-            });
-            _topPanel.Controls.Add(_summaryPanel);
+            };
+            foreach (var l in _countLabels)
+            {
+                l.Top = summaryY;                 // Left is justified in LayoutTopControls
+                _topPanel.Controls.Add(l);
+            }
 
             // KPI tiles — at-a-glance metrics, read-only and boxed so they read
             // as a distinct strip from the clickable count quick-filters above.
@@ -387,19 +382,10 @@ namespace PDMLite
 
             // Faint discoverability footer below the KPI tiles — new users won't
             // guess the right-click menu / column-resize / clickable counts. The
-            // "Showing… · Page… · as of…" status SHARES this line (it used to live
-            // in the count strip, but that made the strip too wide to leave room
-            // for the status chart's reserved column; its own line cut the 20th
-            // row). Both are centred as a pair in LayoutTopControls.
+            // "Showing… · Page… · as of…" status lives in the BOTTOM panel now,
+            // right-aligned on the pager line (built below), so the hint owns this
+            // line alone (centred in LayoutTopControls).
             int hintY = kpiY + (int)_kpiFont.GetHeight() + S(10);
-            _lblShowing = new Label
-            {
-                Font = _summaryFont,
-                ForeColor = cTextGray,
-                AutoSize = true,
-                Location = new Point(S(14), hintY)
-            };
-            _topPanel.Controls.Add(_lblShowing);
             _lblHint = new Label
             {
                 Text = "Double-click or right-click a row to open  ·  Drag a column edge to "
@@ -450,6 +436,17 @@ namespace PDMLite
             _btnClose.Location = new Point(this.ClientSize.Width - S(124), S(8));
             _btnClose.Click += (s, e) => { this.DialogResult = DialogResult.Cancel; Close(); };
             _bottomPanel.Controls.Add(_btnClose);
+            // "Showing N–M of … · Page … · as of …" sits in the BOTTOM-RIGHT, on the
+            // pager line, just left of the Close button. BuildPager owns its position
+            // on every resize (no Anchor — AutoSize + Anchor=Right is a WinForms
+            // quirk). Text set in UpdateSummary, which runs before BuildPager.
+            _lblShowing = new Label
+            {
+                Font = _summaryFont,
+                ForeColor = cTextGray,
+                AutoSize = true
+            };
+            _bottomPanel.Controls.Add(_lblShowing);
             // Re-centre the pager when the form (and so the bottom panel) resizes.
             _bottomPanel.Resize += (s, e) => BuildPager();
 
@@ -876,11 +873,12 @@ namespace PDMLite
             _grid.CurrentCell = null;
             _grid.RowCount = Math.Max(0, Math.Min(PageSize, _view.Count - PageStart));
             _grid.Invalidate();
-            BuildPager();
-            // Refresh the summary HERE so the "Showing X–Y · Page N of M" indicator
-            // can never desync from the rendered page — any future direct
-            // ShowGridPage() caller stays correct without remembering to follow up.
+            // UpdateSummary FIRST so the "Showing X–Y · Page N of M" label's text
+            // (and width) is current — BuildPager positions that label at the bottom
+            // right and reserves the pager's space to its LEFT, so it must run after.
+            // (Also keeps the indicator from ever desyncing from the rendered page.)
             UpdateSummary(_view.Count);
+            BuildPager();
         }
 
         private void GoToPage(int page)
@@ -937,8 +935,25 @@ namespace PDMLite
             int totalW = -gap;
             foreach (var c in items) totalW += c.Width + gap;
 
-            int closeZone = S(140); // keep the pager clear of the Close button
-            int avail = Math.Max(totalW, _bottomPanel.ClientSize.Width - closeZone);
+            // Position the "Showing… · Page… · as of…" label at the BOTTOM-RIGHT,
+            // vertically centred on the pager line, just left of the Close button
+            // (its Text/Width are set by UpdateSummary, which runs before BuildPager
+            // in ShowGridPage). The pager then centres in the area to its LEFT.
+            int rightLimit = _bottomPanel.ClientSize.Width - S(140); // Close-button zone
+            if (_lblShowing != null)
+            {
+                // Close button is anchored Right at panelW - S(124); derive its left
+                // from the panel width (deterministic — doesn't depend on the anchor
+                // having repositioned _btnClose yet during this resize pass).
+                int closeLeft = _bottomPanel.ClientSize.Width - S(124);
+                int sLeft = Math.Max(S(8), closeLeft - S(16) - _lblShowing.Width);
+                _lblShowing.Left = sLeft;
+                _lblShowing.Top = Math.Max(S(2),
+                    (_bottomPanel.ClientSize.Height - _lblShowing.Height) / 2);
+                rightLimit = sLeft - S(12);   // keep the pager clear of Showing
+            }
+
+            int avail = Math.Max(totalW, rightLimit);
             int x = Math.Max(S(8), (avail - totalW) / 2);
             int y = Math.Max(S(4), (_bottomPanel.ClientSize.Height - S(26)) / 2);
             foreach (var c in items)
@@ -1391,11 +1406,10 @@ namespace PDMLite
 
             // The status doughnut takes a RESERVED right-hand COLUMN; the control
             // row / counts / KPI / hint are centred in the REMAINING width (centerW).
-            // Show the chart only when that column fits without cramping the content
-            // (the count strip carries the long "Showing…" label, so it's wide) —
-            // else hide it and centre across the full width.
+            // The counts are JUSTIFIED across the control-row width (= rowW), so they
+            // never extend past it — rowW already bounds the content. Show the chart
+            // only when its column fits without cramping the content.
             int widest = rowW;
-            if (_summaryPanel != null) widest = Math.Max(widest, _summaryPanel.Width);
             if (_kpiPanel != null)     widest = Math.Max(widest, _kpiPanel.Width);
 
             int centerW = panelW;
@@ -1423,29 +1437,33 @@ namespace PDMLite
             _btnClear.Left   = _btnExport.Right + gap;
             _btnAudit.Left   = _btnClear.Right + gap;
 
-            if (_summaryPanel != null)
-                _summaryPanel.Left = Math.Max(S(14),
-                    (centerW - _summaryPanel.Width) / 2);
+            // JUSTIFY the count quick-filters across the SAME span as the control
+            // row above (search.Left → btnAudit.Right), space-between: the first
+            // sits at the left edge, the last's right edge at the right edge, with
+            // equal gaps. So the strip lines up with the row above it at any width.
+            if (_countLabels != null && _countLabels.Length > 0)
+            {
+                int left = _search.Left;
+                int right = _btnAudit.Right;
+                int sumW = 0;
+                foreach (var l in _countLabels) sumW += l.Width;
+                int n = _countLabels.Length;
+                int gapC = n > 1 ? Math.Max(S(6), (right - left - sumW) / (n - 1)) : 0;
+                int cx = left;
+                foreach (var l in _countLabels)
+                {
+                    l.Left = cx;
+                    cx += l.Width + gapC;
+                }
+            }
 
             if (_kpiPanel != null)
                 _kpiPanel.Left = Math.Max(S(14),
                     (centerW - _kpiPanel.Width) / 2);
 
-            // Showing + hint share one line, centred together as a pair in centerW;
-            // the smaller hint is vertically centred against the taller Showing.
-            // Only the hint's Top is adjusted — _lblShowing.Top is left at its build
-            // position (hintY) so there's no read-then-write of the same field (and
-            // hence no drift if the labels' heights were ever to invert).
-            if (_lblShowing != null && _lblHint != null)
-            {
-                int gapSH = S(20);
-                int lineH = Math.Max(_lblShowing.Height, _lblHint.Height);
-                int pairW = _lblShowing.Width + gapSH + _lblHint.Width;
-                int pairLeft = Math.Max(S(14), (centerW - pairW) / 2);
-                _lblShowing.Left = pairLeft;
-                _lblHint.Left    = _lblShowing.Right + gapSH;
-                _lblHint.Top     = _lblShowing.Top + (lineH - _lblHint.Height) / 2;
-            }
+            // The hint owns its line alone now (Showing moved to the bottom pager).
+            if (_lblHint != null)
+                _lblHint.Left = Math.Max(S(14), (centerW - _lblHint.Width) / 2);
         }
 
         // Build the status-distribution doughnut (MS Chart, built into .NET 4.8 —
@@ -1563,9 +1581,9 @@ namespace PDMLite
             int from = showing == 0 ? 0 : PageStart + 1;
             int to = Math.Min(showing, PageStart + PageSize);
             _lblShowing.Text =
-                $"     (Showing {from}–{to} of {showing}" +
-                $" · Page {_page + 1} of {PageCount}" +
-                $" · as of {_loadedAt:HH:mm})";
+                $"Showing {from}–{to} of {showing}" +
+                $"  ·  Page {_page + 1} of {PageCount}" +
+                $"  ·  as of {_loadedAt:HH:mm}";
 
             // Underline the active quick-filter so it's obvious what's applied.
             SetActive(_lblMine,     IsMineFilter());
