@@ -355,17 +355,10 @@ namespace PDMLite
             _lblObsolete = MakeCountLabel("Filter to Obsolete", () => ToggleStatusFilter("Obsolete"));
             _lblBroken   = MakeCountLabel("Show only broken references", () => ToggleBrokenFilter());
             _lblStale    = MakeCountLabel("Show only WIP files not saved in over " + StaleWipDays + " days (stuck/neglected work)", () => ToggleStaleFilter());
-            _lblShowing  = new Label
-            {
-                Font = _summaryFont,
-                ForeColor = cTextGray,
-                AutoSize = true,
-                Margin = new Padding(S(6), 0, 0, 0)
-            };
             _summaryPanel.Controls.AddRange(new Control[]
             {
                 _lblTotal, _lblMine, _lblWip, _lblReleased, _lblLocked, _lblObsolete,
-                _lblBroken, _lblStale, _lblShowing
+                _lblBroken, _lblStale
             });
             _topPanel.Controls.Add(_summaryPanel);
 
@@ -393,8 +386,20 @@ namespace PDMLite
             _topPanel.Controls.Add(_kpiPanel);
 
             // Faint discoverability footer below the KPI tiles — new users won't
-            // guess the right-click menu / column-resize / clickable counts.
+            // guess the right-click menu / column-resize / clickable counts. The
+            // "Showing… · Page… · as of…" status SHARES this line (it used to live
+            // in the count strip, but that made the strip too wide to leave room
+            // for the status chart's reserved column; its own line cut the 20th
+            // row). Both are centred as a pair in LayoutTopControls.
             int hintY = kpiY + (int)_kpiFont.GetHeight() + S(10);
+            _lblShowing = new Label
+            {
+                Font = _summaryFont,
+                ForeColor = cTextGray,
+                AutoSize = true,
+                Location = new Point(S(14), hintY)
+            };
+            _topPanel.Controls.Add(_lblShowing);
             _lblHint = new Label
             {
                 Text = "Double-click or right-click a row to open  ·  Drag a column edge to "
@@ -1413,8 +1418,20 @@ namespace PDMLite
                 _kpiPanel.Left = Math.Max(S(14),
                     (centerW - _kpiPanel.Width) / 2);
 
-            if (_lblHint != null)
-                _lblHint.Left = Math.Max(S(14), (centerW - _lblHint.Width) / 2);
+            // Showing + hint share one line, centred together as a pair in centerW;
+            // the smaller hint is vertically centred against the taller Showing.
+            if (_lblShowing != null && _lblHint != null)
+            {
+                int gapSH = S(20);
+                int baseY = _lblShowing.Top;   // = hintY from Build
+                int lineH = Math.Max(_lblShowing.Height, _lblHint.Height);
+                int pairW = _lblShowing.Width + gapSH + _lblHint.Width;
+                int pairLeft = Math.Max(S(14), (centerW - pairW) / 2);
+                _lblShowing.Left = pairLeft;
+                _lblShowing.Top  = baseY + (lineH - _lblShowing.Height) / 2;
+                _lblHint.Left    = _lblShowing.Right + gapSH;
+                _lblHint.Top     = baseY + (lineH - _lblHint.Height) / 2;
+            }
         }
 
         // Build the status-distribution doughnut (MS Chart, built into .NET 4.8 —
