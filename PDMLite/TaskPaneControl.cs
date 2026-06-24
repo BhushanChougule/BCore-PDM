@@ -350,6 +350,7 @@ namespace PDMLite
                 else if (_searchBox.Text.Length == 0)
                 {
                     ClearAndDispose(_resultsPanel);
+                    _cardTip.RemoveAll(); // clearing the box is a rebuild too
                     _resultsPanel.Height = 0;
                 }
             };
@@ -777,6 +778,12 @@ namespace PDMLite
         {
             string term = _searchBox.Text.Trim();
             ClearAndDispose(_resultsPanel);
+            // Drop the previous render's tooltip registrations on EVERY rebuild
+            // (audit-C4): a WinForms ToolTip keeps every SetToolTip'd control in
+            // its internal table until RemoveAll/Dispose — disposing the control
+            // does NOT remove it. Done here (not in RenderCards) so the empty /
+            // no-results / DB-error paths reset it too, not just populated renders.
+            _cardTip.RemoveAll();
 
             if (string.IsNullOrEmpty(term))
             {
@@ -842,13 +849,6 @@ namespace PDMLite
         private void RenderCards(List<SearchGroup> cards, bool truncated,
             string headerText)
         {
-            // Drop the previous render's tooltip registrations BEFORE re-registering
-            // (audit-C4): a WinForms ToolTip keeps every SetToolTip'd control in its
-            // internal table until RemoveAll/Dispose — disposing the control (next
-            // ClearAndDispose) does NOT remove it, so without this the disposed
-            // cards accumulate in _cardTip on every keystroke / doc switch.
-            _cardTip.RemoveAll();
-
             int ry = 0;
             int rw = S(188);
 
@@ -2369,11 +2369,14 @@ namespace PDMLite
     {
         private const int Cap = 12;
         private static readonly object _gate = new object();
-        // recent.txt is per-user but shared by EVERY SOLIDWORKS instance that user
-        // runs on the machine, so the in-process _gate alone can't stop two
-        // instances clobbering each other's read-modify-write. A machine-local
-        // named Mutex serialises the Add across processes (best-effort — if it
-        // can't be taken in time we proceed, never block the UI).
+        // recent.txt is per-user but shared by every SOLIDWORKS instance that user
+        // runs in their interactive session, so the in-process _gate alone can't
+        // stop two instances clobbering each other's read-modify-write. A
+        // session-local named Mutex serialises the Add across those processes.
+        // Add runs on the SW UI thread (from Refresh), so the wait is SHORT
+        // (50ms): under no contention it acquires instantly; if a peer is stuck
+        // we proceed unsynchronised rather than stall a doc switch — the write is
+        // best-effort and skipping it is harmless.
         private const string MutexName = "BCorePDM.RecentFiles";
 
         private static string FilePathOf()
@@ -2413,7 +2416,7 @@ namespace PDMLite
                 using (var mtx = new System.Threading.Mutex(false, MutexName))
                 {
                     bool held = false;
-                    try { held = mtx.WaitOne(500); }
+                    try { held = mtx.WaitOne(50); }
                     catch (System.Threading.AbandonedMutexException) { held = true; }
                     try
                     {
