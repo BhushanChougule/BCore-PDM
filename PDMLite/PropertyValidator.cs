@@ -334,8 +334,11 @@ namespace PDMLite
         //   CutLength             → flat-pattern cut (perimeter) length
         //
         // Source: the cut-list properties SOLIDWORKS auto-maintains for a sheet-
-        // metal body — "Bounding Box Length", "Bounding Box Width", "Cut Length"
-        // — read from the Cut-List folder feature's CustomPropertyManager. These
+        // metal body — "Bounding Box Length", "Bounding Box Width", and the cut
+        // length (a single "Cut Length" on older seats, else the sum of
+        // "Cutting Length-Outer" + "Cutting Length-Inner" on 2020+ seats; see
+        // TryReadCutListDimensions) — read from the Cut-List folder feature's
+        // CustomPropertyManager. These
         // are the numbers a sheet-metal shop wants on every flat part; reading
         // SW's own maintained values (rather than re-deriving geometry) keeps the
         // figures identical to the cut-list table and avoids unsuppressing the
@@ -405,7 +408,39 @@ namespace PDMLite
                     string l = "", w = "", c = "";
                     try { string v, r; cpm.Get4("Bounding Box Length", false, out v, out r); l = r ?? ""; } catch { }
                     try { string v, r; cpm.Get4("Bounding Box Width", false, out v, out r); w = r ?? ""; } catch { }
+
+                    // Total flat-pattern cut length. SOLIDWORKS names this
+                    // DIFFERENTLY across versions/templates:
+                    //   - older seats: a single "Cut Length";
+                    //   - 2020+ seats: "Cutting Length-Outer" (the outer profile)
+                    //     + "Cutting Length-Inner" (internal cut-outs), whose SUM
+                    //     is the real total the laser/plasma travels — equal to
+                    //     what the legacy single "Cut Length" reported.
+                    // (The shop's seat had NO "Cut Length", only the Outer/Inner
+                    // pair — found in PR-71 on-machine testing.) Prefer the single
+                    // property; otherwise sum Outer + Inner (Inner absent/blank =>
+                    // 0, so a hole-free part's outer perimeter is the whole figure).
                     try { string v, r; cpm.Get4("Cut Length", false, out v, out r); c = r ?? ""; } catch { }
+                    if (string.IsNullOrWhiteSpace(c))
+                    {
+                        string outerStr = "", innerStr = "";
+                        try { string v, r; cpm.Get4("Cutting Length-Outer", false, out v, out r); outerStr = r ?? ""; } catch { }
+                        try { string v, r; cpm.Get4("Cutting Length-Inner", false, out v, out r); innerStr = r ?? ""; } catch { }
+                        double outer, inner;
+                        if (double.TryParse(outerStr,
+                                System.Globalization.NumberStyles.Any,
+                                System.Globalization.CultureInfo.InvariantCulture,
+                                out outer))
+                        {
+                            if (!double.TryParse(innerStr,
+                                    System.Globalization.NumberStyles.Any,
+                                    System.Globalization.CultureInfo.InvariantCulture,
+                                    out inner))
+                                inner = 0;
+                            c = (outer + inner).ToString("0.###",
+                                System.Globalization.CultureInfo.InvariantCulture);
+                        }
+                    }
 
                     if (!string.IsNullOrWhiteSpace(l) ||
                         !string.IsNullOrWhiteSpace(w) ||
