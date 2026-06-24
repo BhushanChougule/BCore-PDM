@@ -426,6 +426,12 @@ namespace PDMLite
         // so a thousands separator is never silently accepted ("16,964" must not
         // become 16964). decimal (not double) avoids binary round-off so the
         // value re-emits with the same digits SW showed. Never throws.
+        // ASSUMPTION (pre-merge review): SW emits a resolved cut-list dimension
+        // WITHOUT thousands grouping, so the Invariant-first order is safe — a
+        // grouping-dot string like de-DE "1.234" (meaning 1234) cannot occur here
+        // (and Float would reject the grouping under either culture anyway, so no
+        // attempt order resolves that ambiguity — the no-grouping assumption is
+        // what makes it moot). Holds for these physical quantities on real seats.
         private static bool TryNum(string s, out decimal d)
         {
             d = 0m;
