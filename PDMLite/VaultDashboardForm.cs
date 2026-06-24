@@ -77,16 +77,20 @@ namespace PDMLite
         private Label _lblHint;       // faint discoverability footer in the top panel
         private DateTime _loadedAt;   // snapshot time, shown in the summary as "as of HH:mm"
         // KPI tiles (read-only, boxed) below the clickable quick-filter strip.
-        // The three VIEW-based tiles (avg WIP age, released-7d, broken refs)
-        // recompute over the FILTERED view on every filter/search change; Open
-        // Requests is a whole-vault metric fetched once per load (it has no per-
-        // file dimension to filter on). Distinct from the quick-filter counts:
-        // not clickable, boxed, dark text.
+        // Two kinds: STATE-OF-VIEW tiles (avg WIP age, broken refs) recompute over
+        // the FILTERED view on every filter/search change (ComputeKpis); ACTIVITY
+        // tiles (Released-7d, Open Requests) are WHOLE-VAULT throughput/queue
+        // metrics computed once per load and stable under filtering — Released-7d
+        // in ComputeVaultCounts' _all scan, Open Requests via GetPendingRequests.
+        // (A file released in the 7d window counts even if a New Revision has since
+        // returned it to WIP — it WAS released this week; making it filter-based
+        // wrongly dropped those when you clicked the Released quick-filter.)
+        // Distinct from the quick-filter counts: not clickable, boxed, dark text.
         private FlowLayoutPanel _kpiPanel;
         private Label _kpiAvgAge, _kpiReleased7d, _kpiOpenReq, _kpiBroken;
         private Font _kpiFont;
         private double _kpiAvgWipAge;     // avg WipDays over WIP files in _view
-        private int _kpiReleased7dCount;  // files in _view released within 7 days
+        private int _kpiReleased7dCount;  // whole-vault files released within 7 days (throughput)
         private int _kpiBrokenInView;     // broken-ref files in _view
         private int _kpiOpenReqCount;     // pending requests (whole vault, per load)
         // Whole-vault counts — invariant under filtering, so cached once per load
@@ -360,7 +364,7 @@ namespace PDMLite
                 Location = new Point(S(14), kpiY)
             };
             _kpiAvgAge     = MakeKpiTile("Average age (days since last save) of WIP files in the current view");
-            _kpiReleased7d = MakeKpiTile("Files whose latest release was within the last 7 days (current view)");
+            _kpiReleased7d = MakeKpiTile("Files released within the last 7 days across the whole vault (release throughput; not affected by filters)");
             _kpiOpenReq    = MakeKpiTile("Pending engineer requests across the whole vault (Unlock / Revision / Release)");
             _kpiBroken     = MakeKpiTile("Files with broken references in the current view");
             _kpiPanel.Controls.AddRange(new Control[]
@@ -777,19 +781,17 @@ namespace PDMLite
         // (Open Requests is whole-vault, fetched once per load in LoadData.)
         private void ComputeKpis()
         {
-            long ageSum = 0; int wipCount = 0, rel7 = 0, brk = 0;
-            DateTime cutoff = DateTime.Now.AddDays(-7);
+            long ageSum = 0; int wipCount = 0, brk = 0;
             foreach (var f in _view)
             {
                 int age = WipDays(f);          // -1 for non-WIP / no modified date
                 if (age >= 0) { ageSum += age; wipCount++; }
-                if (f.ReleasedDate != DateTime.MinValue && f.ReleasedDate >= cutoff)
-                    rel7++;
                 if (f.HasBrokenRefs) brk++;
             }
             _kpiAvgWipAge = wipCount > 0 ? (double)ageSum / wipCount : 0;
-            _kpiReleased7dCount = rel7;
             _kpiBrokenInView = brk;
+            // _kpiReleased7dCount is whole-vault (release throughput), computed
+            // once per load in ComputeVaultCounts — NOT recomputed per filter.
         }
 
         // Render the current page: clamp _page, set the grid's RowCount to just
@@ -1341,13 +1343,23 @@ namespace PDMLite
         private void ComputeVaultCounts()
         {
             _cntWip = _cntRel = _cntLck = _cntBrk = 0;
+            // Released (7d) is a WHOLE-VAULT throughput metric (release velocity),
+            // so it is counted here in the once-per-load _all scan — NOT over the
+            // filtered _view. A file released in the window still counts even if a
+            // New Revision / Unlock has since put it back to WIP (it WAS released
+            // this week), and the number stays stable as the user filters/searches.
+            int rel7 = 0;
+            DateTime cutoff = DateTime.Now.AddDays(-7);
             foreach (var f in _all)
             {
                 if (Eq(f.Status, "WIP"))           _cntWip++;
                 else if (Eq(f.Status, "Released")) _cntRel++;
                 else if (Eq(f.Status, "Locked"))   _cntLck++;
                 if (f.HasBrokenRefs)               _cntBrk++;
+                if (f.ReleasedDate != DateTime.MinValue && f.ReleasedDate >= cutoff)
+                    rel7++;
             }
+            _kpiReleased7dCount = rel7;
         }
 
         private void UpdateSummary(int showing)
