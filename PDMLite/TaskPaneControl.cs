@@ -1102,20 +1102,19 @@ namespace PDMLite
 
                 // ── Right-click menu (Copy Part No / Copy File Path / Open
                 // Containing Folder / Where Used) — parity with the Advanced
-                // Search cards and every industry PDM. ONE shared menu + the
-                // _menuCard captured on open (no per-card menu = no leak). ──
-                MouseEventHandler showMenu = (s, e) =>
-                {
-                    if (e.Button != MouseButtons.Right) return;
-                    _searchTimer.Stop(); // a queued tick would dispose this card
-                    _menuCard = g;
-                    _cardMenu.Show(Cursor.Position);
-                };
-                card.MouseUp += showMenu;
+                // Search cards and every industry PDM. ONE shared menu assigned
+                // via the ContextMenuStrip PROPERTY on the card AND every child
+                // (so a right-click anywhere on the tile works AND consumes
+                // WM_CONTEXTMENU — a MouseUp+Show let SOLIDWORKS' own menu still
+                // fire). Tag = this card's SearchGroup; the menu's Opening reads
+                // SourceControl.Tag → _menuCard. ──
+                card.Tag = g;
+                card.ContextMenuStrip = _cardMenu;
                 foreach (Control ch in card.Controls)
                 {
                     _cardTip.SetToolTip(ch, tip);
-                    ch.MouseUp += showMenu;
+                    ch.Tag = g;
+                    ch.ContextMenuStrip = _cardMenu;
                 }
 
                 _resultsPanel.Controls.Add(card);
@@ -1199,7 +1198,11 @@ namespace PDMLite
             return sb.ToString();
         }
 
-        // Shared right-click menu for result/recent cards (acts on _menuCard).
+        // Shared right-click menu for result/recent cards. The menu is assigned
+        // to each card control via the ContextMenuStrip PROPERTY (not a MouseUp
+        // handler) — only that consumes Windows' WM_CONTEXTMENU, so SOLIDWORKS'
+        // own task-pane menu ("Enable CommandManager / Toolbars / Customize")
+        // never shows. _menuCard is resolved from the right-clicked control's Tag.
         private ContextMenuStrip BuildCardMenu()
         {
             var m = new ContextMenuStrip();
@@ -1208,6 +1211,12 @@ namespace PDMLite
             m.Items.Add("Open Containing Folder", null, (s, e) => CardOpenFolder());
             m.Items.Add(new ToolStripSeparator());
             m.Items.Add("Where Used…", null, (s, e) => CardWhereUsed());
+            m.Opening += (s, e) =>
+            {
+                _menuCard = m.SourceControl?.Tag as SearchGroup;
+                if (_menuCard == null) { e.Cancel = true; return; }
+                _searchTimer.Stop(); // a queued tick would dispose this card
+            };
             return m;
         }
 
