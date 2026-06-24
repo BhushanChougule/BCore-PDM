@@ -485,8 +485,9 @@ namespace PDMLite
                 finish.Length == 0 && partType.Length == 0 && status.Length == 0 &&
                 fileType.Length == 0)
             {
-                _countLabel.ForeColor = cTextGray;
-                _countLabel.Text = "Type a term or pick a filter to search.";
+                // No term / filters → show the user's recently-opened files
+                // (quick access, like Vault/PDM — moved here off the task pane).
+                ShowRecentFiles();
                 return;
             }
 
@@ -582,6 +583,92 @@ namespace PDMLite
             _countLabel.Text = truncated
                 ? "Showing first " + cards.Count + " — refine to narrow results."
                 : cards.Count + " result" + (cards.Count == 1 ? "" : "s") + ".";
+        }
+
+        // Empty fields → show the user's recently-opened files (RecentFiles is
+        // populated by the task pane on every active saved doc). ONE DB load via
+        // GetFilesByPaths; ONE card per recent FILE (its primary/first config) so
+        // a multi-config recent doesn't expand into N cards. Recency order is
+        // kept (no sort — recency is the point). Export stays disabled (it's for
+        // an actual search).
+        private void ShowRecentFiles()
+        {
+            List<string> paths = RecentFiles.Get();
+            if (paths.Count == 0)
+            {
+                _countLabel.ForeColor = cTextGray;
+                _countLabel.Text = "Type a term or pick a filter to search.";
+                return;
+            }
+            List<VaultFile> recents;
+            try { recents = DatabaseManager.GetFilesByPaths(paths); }
+            catch
+            {
+                _countLabel.ForeColor = cMaroon;
+                _countLabel.Text = "Vault unavailable — check the N: drive.";
+                return;
+            }
+            if (recents.Count == 0)
+            {
+                _countLabel.ForeColor = cTextGray;
+                _countLabel.Text = "Type a term or pick a filter to search.";
+                return;
+            }
+
+            DatabaseManager.DrawingIndex drwIndex;
+            try { drwIndex = DatabaseManager.BuildDrawingIndex(); }
+            catch { drwIndex = null; }
+
+            var cards = new List<Card>();
+            foreach (var f in recents)
+            {
+                string baseName = Path.GetFileNameWithoutExtension(
+                    string.IsNullOrEmpty(f.FileName)
+                        ? Path.GetFileName(f.FilePath) : f.FileName);
+                string ext = (Path.GetExtension(f.FileName) ?? "").ToLowerInvariant();
+                // One card per recent FILE — its primary (first) config.
+                ConfigEntry c = (f.Configurations != null && f.Configurations.Count > 0)
+                    ? f.Configurations[0] : null;
+                string cfgName = c != null ? c.Name : "";
+                string drawingPath = null;
+                var drws = drwIndex?.DrawingsForConfig(f.FilePath, cfgName);
+                if (drws != null && drws.Count > 0) drawingPath = drws[0];
+                cards.Add(new Card
+                {
+                    DisplayName  = baseName,
+                    ModelPath    = f.FilePath,
+                    ModelExt     = ext,
+                    ConfigName   = cfgName,
+                    PartNumber   = FirstNonBlank(c != null ? c.PartNo : null,
+                                                 f.PartNumber),
+                    Description  = FirstNonBlank(c != null ? c.Description : null,
+                                                 f.Description),
+                    Revision     = FirstNonBlank(c != null ? c.Revision : null,
+                                                 f.Revision),
+                    Status       = f.Status,
+                    SupersededBy = f.SupersededBy,
+                    DrawingPath  = drawingPath
+                });
+            }
+            if (cards.Count == 0)
+            {
+                _countLabel.ForeColor = cTextGray;
+                _countLabel.Text = "Type a term or pick a filter to search.";
+                return;
+            }
+            RenderCards(cards);
+            _countLabel.ForeColor = cTextGray;
+            _countLabel.Text = "Recently opened (" + cards.Count +
+                ") — type a term or pick a filter to search.";
+        }
+
+        // On open (empty fields) show recents — RunSearch routes the all-empty
+        // case to ShowRecentFiles. Done in OnShown (not the ctor) so the results
+        // panel is laid out at its real width before the cards tile.
+        protected override void OnShown(EventArgs e)
+        {
+            base.OnShown(e);
+            try { RunSearch(); } catch { }
         }
 
         private void RenderCards(List<Card> cards)

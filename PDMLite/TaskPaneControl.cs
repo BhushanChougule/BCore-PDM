@@ -106,9 +106,6 @@ namespace PDMLite
             _cardMenu = BuildCardMenu();
 
             BuildUI();
-            // Empty box on open → show recently-opened files (cheap no-op when
-            // there are none / DB unreachable).
-            try { ShowRecentFiles(); } catch { }
         }
 
         // base.Dispose disposes child CONTROLS, but not fonts (a control does
@@ -351,7 +348,10 @@ namespace PDMLite
                 _searchTimer.Stop();
                 if (_searchBox.Text.Length >= 2) _searchTimer.Start();
                 else if (_searchBox.Text.Length == 0)
-                    RunSearch(); // empty term → recently-opened files
+                {
+                    ClearAndDispose(_resultsPanel);
+                    _resultsPanel.Height = 0;
+                }
             };
             searchCard.Controls.Add(_searchBox);
 
@@ -780,8 +780,7 @@ namespace PDMLite
 
             if (string.IsNullOrEmpty(term))
             {
-                // Empty box → recently-opened files (quick access, like Vault/PDM).
-                ShowRecentFiles();
+                _resultsPanel.Height = 0;
                 return;
             }
 
@@ -837,10 +836,9 @@ namespace PDMLite
             RenderCards(cards, truncated, null);
         }
 
-        // Render result / recent cards into the results panel. SHARED by the
-        // search (RunSearch) and the recently-opened list (ShowRecentFiles); a
-        // non-null headerText (e.g. "RECENTLY OPENED") draws a small caption row
-        // above the cards.
+        // Render the search-result cards into the results panel. headerText is
+        // an optional caption row above the cards (currently always null — the
+        // quick box clears on empty; RECENTLY OPENED lives in Advanced Search).
         private void RenderCards(List<SearchGroup> cards, bool truncated,
             string headerText)
         {
@@ -1141,26 +1139,6 @@ namespace PDMLite
             _resultsPanel.Height = ry;
         }
 
-        // Empty search box → show the user's recently-opened files as cards
-        // (RecentFiles, persisted per-user). GetFilesByPaths reads them in ONE
-        // DB load; an empty list / DB error renders nothing (never throws on the
-        // timer tick or at construction).
-        private void ShowRecentFiles()
-        {
-            List<string> paths = RecentFiles.Get();
-            if (paths.Count == 0) { _resultsPanel.Height = 0; return; }
-            List<VaultFile> recents;
-            try { recents = DatabaseManager.GetFilesByPaths(paths); }
-            catch { _resultsPanel.Height = 0; return; }
-            if (recents.Count == 0) { _resultsPanel.Height = 0; return; }
-            // termL "" → AddModelConfigCards shows every config (Contains("") is
-            // always true) — recents are a small set, so this stays well under the
-            // card cap.
-            var cards = BuildConfigCards(recents, "");
-            if (cards.Count == 0) { _resultsPanel.Height = 0; return; }
-            RenderCards(cards, false, "RECENTLY OPENED");
-        }
-
         // Multi-line hover tooltip: the FULL metadata the compact card
         // ellipsises (name / PN / rev / description) + status, lock owner,
         // superseded-by and modified-by/date — the detail industry tools surface
@@ -1280,69 +1258,6 @@ namespace PDMLite
             {
                 MessageBox.Show("Could not open Where Used:\n" + ex.Message,
                     "BCore PDM", MessageBoxButtons.OK, MessageBoxIcon.Warning);
-            }
-        }
-
-        // Recently-opened vault files, persisted per-user to
-        // %LOCALAPPDATA%\BCorePDM\recent.txt (most-recent first, capped). Shown as
-        // cards when the search box is empty (Vault/PDM-style quick access);
-        // populated from Refresh() whenever a saved file becomes active. All I/O
-        // is swallowed — a missing/locked recents file never disrupts the pane.
-        private static class RecentFiles
-        {
-            private const int Cap = 12;
-            private static readonly object _gate = new object();
-
-            private static string FilePathOf()
-            {
-                string dir = Path.Combine(System.Environment.GetFolderPath(
-                    System.Environment.SpecialFolder.LocalApplicationData),
-                    "BCorePDM");
-                return Path.Combine(dir, "recent.txt");
-            }
-
-            public static List<string> Get()
-            {
-                var list = new List<string>();
-                try
-                {
-                    string f = FilePathOf();
-                    if (!File.Exists(f)) return list;
-                    foreach (var line in File.ReadAllLines(f))
-                    {
-                        string p = (line ?? "").Trim();
-                        if (p.Length == 0) continue;
-                        if (!list.Contains(p, StringComparer.OrdinalIgnoreCase))
-                            list.Add(p);
-                        if (list.Count >= Cap) break;
-                    }
-                }
-                catch { }
-                return list;
-            }
-
-            public static void Add(string filePath)
-            {
-                if (string.IsNullOrWhiteSpace(filePath)) return;
-                try
-                {
-                    lock (_gate)
-                    {
-                        var list = Get();
-                        // Skip the write when it is already the most-recent entry.
-                        if (list.Count > 0 && string.Equals(
-                                list[0], filePath, StringComparison.OrdinalIgnoreCase))
-                            return;
-                        list.RemoveAll(p => string.Equals(
-                            p, filePath, StringComparison.OrdinalIgnoreCase));
-                        list.Insert(0, filePath);
-                        if (list.Count > Cap) list.RemoveRange(Cap, list.Count - Cap);
-                        string f = FilePathOf();
-                        Directory.CreateDirectory(Path.GetDirectoryName(f));
-                        File.WriteAllLines(f, list);
-                    }
-                }
-                catch { }
             }
         }
 
@@ -2407,6 +2322,70 @@ namespace PDMLite
                 case "Obsolete": return Color.FromArgb(120, 120, 120);
                 default: return cBrand;
             }
+        }
+    }
+
+    // Recently-opened vault files, persisted per-user to
+    // %LOCALAPPDATA%\BCorePDM\recent.txt (most-recent first, capped). Populated
+    // from TaskPaneControl.Refresh whenever a saved file becomes active; READ by
+    // AdvancedSearchForm to show recents when its fields are empty. Top-level
+    // (not nested) so both surfaces can reach it. All I/O is swallowed — a
+    // missing / locked recents file never disrupts either surface.
+    internal static class RecentFiles
+    {
+        private const int Cap = 12;
+        private static readonly object _gate = new object();
+
+        private static string FilePathOf()
+        {
+            string dir = Path.Combine(System.Environment.GetFolderPath(
+                System.Environment.SpecialFolder.LocalApplicationData),
+                "BCorePDM");
+            return Path.Combine(dir, "recent.txt");
+        }
+
+        public static List<string> Get()
+        {
+            var list = new List<string>();
+            try
+            {
+                string f = FilePathOf();
+                if (!File.Exists(f)) return list;
+                foreach (var line in File.ReadAllLines(f))
+                {
+                    string p = (line ?? "").Trim();
+                    if (p.Length == 0) continue;
+                    if (!list.Contains(p, StringComparer.OrdinalIgnoreCase))
+                        list.Add(p);
+                    if (list.Count >= Cap) break;
+                }
+            }
+            catch { }
+            return list;
+        }
+
+        public static void Add(string filePath)
+        {
+            if (string.IsNullOrWhiteSpace(filePath)) return;
+            try
+            {
+                lock (_gate)
+                {
+                    var list = Get();
+                    // Skip the write when it is already the most-recent entry.
+                    if (list.Count > 0 && string.Equals(
+                            list[0], filePath, StringComparison.OrdinalIgnoreCase))
+                        return;
+                    list.RemoveAll(p => string.Equals(
+                        p, filePath, StringComparison.OrdinalIgnoreCase));
+                    list.Insert(0, filePath);
+                    if (list.Count > Cap) list.RemoveRange(Cap, list.Count - Cap);
+                    string f = FilePathOf();
+                    Directory.CreateDirectory(Path.GetDirectoryName(f));
+                    File.WriteAllLines(f, list);
+                }
+            }
+            catch { }
         }
     }
 }
