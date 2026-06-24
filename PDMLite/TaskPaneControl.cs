@@ -838,17 +838,21 @@ namespace PDMLite
             }
 
             int barW = S(15);
-            int cardH = S(74);
-            // A SMALL SQUARE thumbnail sits at the top-left of the content area:
-            // the text wraps to its right and the Open buttons span the FULL
-            // width BELOW it, so the preview never squeezes the text or buttons.
-            int thumbW = S(40);
-            int thumbX = barW + S(4);
-            int contentLeft = thumbX + thumbW + S(6);
-            int contentW = rw - contentLeft - S(3);
-            // Buttons run the full card width under the thumbnail (their original
-            // size — anchored to the status bar, NOT to the narrower text column).
-            int btnLeft = thumbX;
+            // Taller card so the part number and revision each get their OWN row
+            // and the preview sits on the RIGHT without crowding the text.
+            int cardH = S(96);
+            int contentLeft = barW + S(6);
+            // Square preview tile in the TOP-RIGHT corner (spans the name + part-no
+            // rows). The text runs down its LEFT; the description and the two Open
+            // buttons below it use the full width.
+            int thumbW = S(46);
+            int thumbX = rw - thumbW - S(6);
+            int thumbY = S(6);
+            // Text beside the thumbnail (name / part no / rev) stops before it;
+            // the description + buttons (below the thumbnail) use the full width.
+            int textW = thumbX - contentLeft - S(6);
+            int fullW = rw - contentLeft - S(6);
+            int btnLeft = contentLeft;
             int btnFullW = rw - btnLeft - S(3);
 
             foreach (SearchGroup g in cards)
@@ -906,9 +910,9 @@ namespace PDMLite
                 string thumbCfg = configName;
                 var thumb = new ThumbPanel(() => GetThumbnail(thumbPath, thumbCfg))
                 {
-                    Location = new Point(thumbX, S(6)),
+                    Location = new Point(thumbX, thumbY),
                     Width = thumbW,
-                    Height = thumbW, // square, top-aligned with the text block
+                    Height = thumbW, // square, top-right corner
                     BackColor = cCard
                 };
                 thumb.Click += (s, e) => ShowLargePreview(thumbPath, thumbCfg);
@@ -920,30 +924,42 @@ namespace PDMLite
                     Text = g.DisplayName,
                     Font = _fBold38,
                     ForeColor = cTextDark,
-                    Location = new Point(contentLeft, S(6)),
+                    Location = new Point(contentLeft, S(8)),
                     AutoSize = false,
-                    Width = contentW,
+                    Width = textW,
+                    Height = S(16),
+                    AutoEllipsis = true
+                });
+
+                // ── Part number (own row) ─────────────────────────────────
+                // PartNumber is the config's own PN (= config name) with a
+                // file-level fallback; whitespace-safe so a blank/space-only
+                // value still shows the honest "No Part No" placeholder rather
+                // than an empty line.
+                card.Controls.Add(new Label
+                {
+                    Text = string.IsNullOrWhiteSpace(g.PartNumber)
+                                ? "No Part No" : g.PartNumber,
+                    Font = _fBold35,
+                    ForeColor = cTextGray,
+                    Location = new Point(contentLeft, S(26)),
+                    AutoSize = false,
+                    Width = textW,
                     Height = S(14),
                     AutoEllipsis = true
                 });
 
-                // ── Part number (+ revision) ──────────────────────────────
-                // PartNumber here is the config's own PN (= config name). The
-                // revision is this config's revision, so two configs of the same
-                // file show distinct PN + REV lines.
-                string pnText = string.IsNullOrEmpty(g.PartNumber)
-                                    ? "No Part No" : g.PartNumber;
-                if (!string.IsNullOrEmpty(g.Revision))
-                    pnText += "   REV " + g.Revision;
+                // ── Revision (own row) ────────────────────────────────────
                 card.Controls.Add(new Label
                 {
-                    Text = pnText,
+                    Text = string.IsNullOrWhiteSpace(g.Revision)
+                                ? "" : "REV " + g.Revision,
                     Font = _fBold35,
                     ForeColor = cTextGray,
-                    Location = new Point(contentLeft, S(21)),
+                    Location = new Point(contentLeft, S(42)),
                     AutoSize = false,
-                    Width = contentW,
-                    Height = S(13),
+                    Width = textW,
+                    Height = S(14),
                     AutoEllipsis = true
                 });
 
@@ -959,23 +975,23 @@ namespace PDMLite
                 {
                     Text = obsoleteWithRepl
                         ? "→ Superseded by " + g.SupersededBy
-                        : (string.IsNullOrEmpty(g.Description)
+                        : (string.IsNullOrWhiteSpace(g.Description)
                                 ? "(no description)" : g.Description),
                     Font = _fReg33,
                     ForeColor = obsoleteWithRepl ? cMaroon : cTextLight,
-                    Location = new Point(contentLeft, S(34)),
+                    Location = new Point(contentLeft, S(58)),
                     AutoSize = false,
-                    Width = contentW,
-                    Height = S(13),
+                    Width = fullW,
+                    Height = S(14),
                     AutoEllipsis = true
                 });
 
                 // ── Two buttons: Open Part/Assembly + Open Drawing ────────
-                // Full width under the thumbnail (btnLeft/btnFullW), not the
-                // narrower text column, so the buttons keep their original size.
+                // Full width along the bottom (btnLeft/btnFullW), below the
+                // thumbnail and the text rows, at their original size.
                 int gap = S(4);
                 int btnW = (btnFullW - gap) / 2;
-                int btnY = S(52);
+                int btnY = S(74);
                 int btnH = S(18);
 
                 string partLabel = g.ModelExt == ".sldasm"
@@ -1396,17 +1412,31 @@ namespace PDMLite
                     ModelPath    = model.FilePath,
                     ModelExt     = ext,
                     ConfigName   = c.Name,
-                    PartNumber   = string.IsNullOrEmpty(c.PartNo)
-                                     ? model.PartNumber : c.PartNo,
-                    Description  = string.IsNullOrEmpty(c.Description)
-                                     ? model.Description : c.Description,
-                    Revision     = c.Revision,
+                    // Per-config value first, then the file-level value. Legacy
+                    // records (saved before per-config PN/Desc/Rev indexing) have
+                    // empty <Config> fields, so a config card showed a blank PN /
+                    // no description / NO revision (Revision had no fallback at
+                    // all) even when the file-level fields were populated. Fall
+                    // back, whitespace-safe, so those records render their data.
+                    PartNumber   = FirstNonBlank(c.PartNo, model.PartNumber),
+                    Description  = FirstNonBlank(c.Description, model.Description),
+                    Revision     = FirstNonBlank(c.Revision, model.Revision),
                     Status       = model.Status,
                     SupersededBy = model.SupersededBy,
                     DrawingPath  = drawingPath,
                     TotalConfigs = total
                 });
             }
+        }
+
+        // First non-whitespace value (trimmed), else "". Lets a config card fall
+        // back from a blank per-config field to the file-level value.
+        private static string FirstNonBlank(params string[] vals)
+        {
+            if (vals != null)
+                foreach (var v in vals)
+                    if (!string.IsNullOrWhiteSpace(v)) return v.Trim();
+            return "";
         }
 
         // One search card. With multi-config support a card represents a single
