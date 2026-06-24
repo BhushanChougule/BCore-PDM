@@ -65,15 +65,17 @@ namespace PDMLite
         private Font _cellBold; // shared bold font: Status cell + header text
 
         // Summary strip: clickable count "links" (Total/WIP/Released/Locked/
-        // Broken Refs act as quick filters) + a plain showing/page label.
+        // Obsolete/Broken Refs/Stale WIP act as quick filters) + a plain
+        // showing/page label.
         private FlowLayoutPanel _summaryPanel;
-        private Label _lblTotal, _lblWip, _lblReleased, _lblLocked, _lblBroken, _lblShowing;
+        private Label _lblTotal, _lblWip, _lblReleased, _lblLocked, _lblObsolete, _lblBroken, _lblStale, _lblShowing;
         private Font _summaryFont;       // base (bold)
         private Font _summaryFontActive; // active quick-filter (bold + underline)
         private ToolTip _summaryTip;     // shared tip for the clickable counts
         // Special non-column filter: show only files with broken references
         // (HasBrokenRefs is a flag, not a column, so it can't live in _colFilters).
         private bool _brokenRefsOnly = false;
+        private bool _staleWipOnly = false;  // "Stale WIP" quick-filter (WipDays > StaleWipDays)
         private Label _lblHint;       // faint discoverability footer in the top panel
         private DateTime _loadedAt;   // snapshot time, shown in the summary as "as of HH:mm"
         // KPI tiles (read-only, boxed) below the clickable quick-filter strip.
@@ -91,11 +93,12 @@ namespace PDMLite
         private Font _kpiFont;
         private double _kpiAvgWipAge;     // avg WipDays over WIP files in _view
         private int _kpiReleased7dCount;  // whole-vault files released within 7 days (throughput)
+        private int _kpiReleased7dPrev;   // whole-vault files released 7–14 days ago (trend baseline)
         private int _kpiBrokenInView;     // broken-ref files in _view
         private int _kpiOpenReqCount;     // pending requests (whole vault, per load)
         // Whole-vault counts — invariant under filtering, so cached once per load
         // (UpdateSummary used to re-scan _all 4× on every keystroke / page click).
-        private int _cntWip, _cntRel, _cntLck, _cntBrk;
+        private int _cntWip, _cntRel, _cntLck, _cntObs, _cntBrk, _cntStale;
         private const int ColRev = 4;        // "Rev" column index
         private const int ColModifiedBy = 5; // first of the metadata columns (5..9)
         private const int ColWipDays = 9; // appended "WIP Days" column index
@@ -125,6 +128,7 @@ namespace PDMLite
         private const int VisibleRows = 20;     // fixed grid height = 20 rows
         private const int PageSize = VisibleRows; // 20 rows per page (the "20 row rule")
         private const double MaxScreenFraction = 0.80; // popup ≤ 80% of screen
+        private const int StaleWipDays = 30; // WIP older than this = "stale" (aging surfacing)
         private int GlyphZone => S(20);         // right-edge hit area for the arrow
 
         // Current page (0-based) into _view, and the pager controls rebuilt for it.
@@ -334,7 +338,9 @@ namespace PDMLite
             _lblWip      = MakeCountLabel("Filter to WIP",      () => ToggleStatusFilter("WIP"));
             _lblReleased = MakeCountLabel("Filter to Released", () => ToggleStatusFilter("Released"));
             _lblLocked   = MakeCountLabel("Filter to Locked",   () => ToggleStatusFilter("Locked"));
+            _lblObsolete = MakeCountLabel("Filter to Obsolete", () => ToggleStatusFilter("Obsolete"));
             _lblBroken   = MakeCountLabel("Show only broken references", () => ToggleBrokenFilter());
+            _lblStale    = MakeCountLabel("Show only WIP files not saved in over " + StaleWipDays + " days (stuck/neglected work)", () => ToggleStaleFilter());
             _lblShowing  = new Label
             {
                 Font = _summaryFont,
@@ -344,7 +350,8 @@ namespace PDMLite
             };
             _summaryPanel.Controls.AddRange(new Control[]
             {
-                _lblTotal, _lblWip, _lblReleased, _lblLocked, _lblBroken, _lblShowing
+                _lblTotal, _lblWip, _lblReleased, _lblLocked, _lblObsolete,
+                _lblBroken, _lblStale, _lblShowing
             });
             _topPanel.Controls.Add(_summaryPanel);
 
@@ -364,7 +371,7 @@ namespace PDMLite
                 Location = new Point(S(14), kpiY)
             };
             _kpiAvgAge     = MakeKpiTile("Average age (days since last save) of WIP files in the current view");
-            _kpiReleased7d = MakeKpiTile("Files released within the last 7 days across the whole vault (release throughput; not affected by filters)");
+            _kpiReleased7d = MakeKpiTile("Files released within the last 7 days across the whole vault (release throughput; not affected by filters). ▲/▼ shows the change vs the prior 7 days.");
             _kpiOpenReq    = MakeKpiTile("Pending engineer requests across the whole vault (Unlock / Revision / Release)");
             _kpiBroken     = MakeKpiTile("Files with broken references in the current view");
             _kpiPanel.Controls.AddRange(new Control[]
@@ -698,6 +705,8 @@ namespace PDMLite
             {
                 if (!columnFiltersOnly && _brokenRefsOnly && !f.HasBrokenRefs)
                     continue;
+                if (!columnFiltersOnly && _staleWipOnly && WipDays(f) <= StaleWipDays)
+                    continue;
                 bool ok = true;
                 foreach (var kv in _colFilters)
                 {
@@ -743,6 +752,8 @@ namespace PDMLite
             {
                 // Broken-refs-only quick filter (from the summary strip).
                 if (_brokenRefsOnly && !f.HasBrokenRefs) return false;
+                // Stale-WIP-only quick filter (WipDays is -1 for non-WIP → excluded).
+                if (_staleWipOnly && WipDays(f) <= StaleWipDays) return false;
                 // Per-column (Excel-style) value filters — ALL must pass.
                 // FilterKey (not CellText) so date columns match by DAY.
                 foreach (var kv in _colFilters)
@@ -1060,6 +1071,7 @@ namespace PDMLite
         {
             _colFilters.Clear();
             _brokenRefsOnly = false;                  // clear the broken-refs view
+            _staleWipOnly = false;                    // clear the stale-WIP view
             _sortColumn = DefaultSortColumn;          // back to newest-first
             _sortDir = ListSortDirection.Descending;
             _search.Text = "";       // raises TextChanged → starts the debounce timer…
@@ -1342,24 +1354,33 @@ namespace PDMLite
         // per load (Refresh) instead of re-scanning _all on every keystroke.
         private void ComputeVaultCounts()
         {
-            _cntWip = _cntRel = _cntLck = _cntBrk = 0;
+            _cntWip = _cntRel = _cntLck = _cntObs = _cntBrk = _cntStale = 0;
             // Released (7d) is a WHOLE-VAULT throughput metric (release velocity),
             // so it is counted here in the once-per-load _all scan — NOT over the
             // filtered _view. A file released in the window still counts even if a
             // New Revision / Unlock has since put it back to WIP (it WAS released
             // this week), and the number stays stable as the user filters/searches.
-            int rel7 = 0;
-            DateTime cutoff = DateTime.Now.AddDays(-7);
+            // rel7Prev is the SAME measure one week earlier (latest release 7–14
+            // days ago) — the baseline for the tile's ▲/▼ trend arrow.
+            int rel7 = 0, rel7Prev = 0;
+            DateTime cutoff7  = DateTime.Now.AddDays(-7);
+            DateTime cutoff14 = DateTime.Now.AddDays(-14);
             foreach (var f in _all)
             {
-                if (Eq(f.Status, "WIP"))           _cntWip++;
-                else if (Eq(f.Status, "Released")) _cntRel++;
-                else if (Eq(f.Status, "Locked"))   _cntLck++;
-                if (f.HasBrokenRefs)               _cntBrk++;
-                if (f.ReleasedDate != DateTime.MinValue && f.ReleasedDate >= cutoff)
-                    rel7++;
+                if (Eq(f.Status, "WIP"))            _cntWip++;
+                else if (Eq(f.Status, "Released"))  _cntRel++;
+                else if (Eq(f.Status, "Locked"))    _cntLck++;
+                else if (Eq(f.Status, "Obsolete"))  _cntObs++;
+                if (f.HasBrokenRefs)                _cntBrk++;
+                if (WipDays(f) > StaleWipDays)       _cntStale++; // WipDays is -1 for non-WIP
+                if (f.ReleasedDate != DateTime.MinValue)
+                {
+                    if (f.ReleasedDate >= cutoff7)        rel7++;
+                    else if (f.ReleasedDate >= cutoff14)  rel7Prev++;
+                }
             }
             _kpiReleased7dCount = rel7;
+            _kpiReleased7dPrev = rel7Prev;
         }
 
         private void UpdateSummary(int showing)
@@ -1368,7 +1389,9 @@ namespace PDMLite
             _lblWip.Text      = $"WIP: {_cntWip}";
             _lblReleased.Text = $"Released: {_cntRel}";
             _lblLocked.Text   = $"Locked: {_cntLck}";
+            _lblObsolete.Text = $"Obsolete: {_cntObs}";
             _lblBroken.Text   = $"Broken Refs: {_cntBrk}";
+            _lblStale.Text    = $"Stale WIP (>{StaleWipDays}d): {_cntStale}";
 
             int from = showing == 0 ? 0 : PageStart + 1;
             int to = Math.Min(showing, PageStart + PageSize);
@@ -1381,14 +1404,20 @@ namespace PDMLite
             SetActive(_lblWip,      IsStatusFilter("WIP"));
             SetActive(_lblReleased, IsStatusFilter("Released"));
             SetActive(_lblLocked,   IsStatusFilter("Locked"));
+            SetActive(_lblObsolete, IsStatusFilter("Obsolete"));
             SetActive(_lblBroken,   _brokenRefsOnly);
+            SetActive(_lblStale,    _staleWipOnly);
 
             // KPI tiles (values cached by ComputeKpis / LoadData).
             if (_kpiAvgAge != null)
             {
                 _kpiAvgAge.Text = "Avg WIP age: " +
                     _kpiAvgWipAge.ToString("0.0", CultureInfo.InvariantCulture) + " d";
-                _kpiReleased7d.Text = "Released (7d): " + _kpiReleased7dCount;
+                // Release-velocity trend vs the prior 7 days: ▲ up / ▼ down / ▬ flat,
+                // with the absolute change. Whole-vault, so it doesn't move on filter.
+                int d = _kpiReleased7dCount - _kpiReleased7dPrev;
+                string trend = d > 0 ? "  ▲" + d : d < 0 ? "  ▼" + (-d) : "  ▬";
+                _kpiReleased7d.Text = "Released (7d): " + _kpiReleased7dCount + trend;
                 _kpiOpenReq.Text    = "Open requests: " + _kpiOpenReqCount;
                 _kpiBroken.Text     = "Broken refs: " + _kpiBrokenInView;
             }
@@ -1457,7 +1486,8 @@ namespace PDMLite
                 // disabled) — make a "0" link inert instead.
                 int cnt = Eq(status, "WIP") ? _cntWip
                         : Eq(status, "Released") ? _cntRel
-                        : Eq(status, "Locked") ? _cntLck : -1;
+                        : Eq(status, "Locked") ? _cntLck
+                        : Eq(status, "Obsolete") ? _cntObs : -1;
                 if (cnt == 0) return;
                 _colFilters[3] = new HashSet<string>(
                     new[] { status }, StringComparer.OrdinalIgnoreCase);
@@ -1475,6 +1505,15 @@ namespace PDMLite
             // found in PR-52 testing). Turning it OFF is always allowed.
             if (!_brokenRefsOnly && _cntBrk == 0) return;
             _brokenRefsOnly = !_brokenRefsOnly;
+            ApplyFilter();
+        }
+
+        // Click "Stale WIP" → toggle the stale-WIP-only view (WipDays > StaleWipDays).
+        // Same zero-count guard as Broken Refs: turning ON a 0 would blank the grid.
+        private void ToggleStaleFilter()
+        {
+            if (!_staleWipOnly && _cntStale == 0) return;
+            _staleWipOnly = !_staleWipOnly;
             ApplyFilter();
         }
 
