@@ -838,20 +838,20 @@ namespace PDMLite
             }
 
             int barW = S(15);
-            // Taller card so the part number and revision each get their OWN row
-            // and the preview sits on the RIGHT without crowding the text.
-            int cardH = S(96);
+            // Taller card: the FILE NAME gets its own FULL-WIDTH top row (so a
+            // long name is never crowded by the preview), then the part number
+            // and revision each get their own row beside the preview.
+            int cardH = S(98);
             int contentLeft = barW + S(6);
-            // Square preview tile in the TOP-RIGHT corner (spans the name + part-no
-            // rows). The text runs down its LEFT; the description and the two Open
-            // buttons below it use the full width.
-            int thumbW = S(46);
+            // Square preview tile on the RIGHT, dropped BELOW the full-width file
+            // name row so it spans the part-no / rev / description rows only.
+            int thumbW = S(44);
             int thumbX = rw - thumbW - S(6);
-            int thumbY = S(6);
-            // Text beside the thumbnail (name / part no / rev) stops before it;
-            // the description + buttons (below the thumbnail) use the full width.
-            int textW = thumbX - contentLeft - S(6);
+            int thumbY = S(27);
+            // The file name + description use the FULL width; the part no / rev
+            // rows sit to the LEFT of the preview (textW stops before it).
             int fullW = rw - contentLeft - S(6);
+            int textW = thumbX - contentLeft - S(6);
             int btnLeft = contentLeft;
             int btnFullW = rw - btnLeft - S(3);
 
@@ -918,15 +918,18 @@ namespace PDMLite
                 thumb.Click += (s, e) => ShowLargePreview(thumbPath, thumbCfg);
                 card.Controls.Add(thumb);
 
-                // ── File name (no extension) ──────────────────────────────
+                // ── File name (no extension) — FULL-WIDTH top row, so a long
+                // name uses the whole card and is never crowded by the preview.
+                // Fall back to the part number if the name is somehow blank, so
+                // the top row is never empty. ──────────────────────────────
                 card.Controls.Add(new Label
                 {
-                    Text = g.DisplayName,
+                    Text = FirstNonBlank(g.DisplayName, g.PartNumber),
                     Font = _fBold38,
                     ForeColor = cTextDark,
-                    Location = new Point(contentLeft, S(8)),
+                    Location = new Point(contentLeft, S(7)),
                     AutoSize = false,
-                    Width = textW,
+                    Width = fullW,
                     Height = S(16),
                     AutoEllipsis = true
                 });
@@ -942,7 +945,7 @@ namespace PDMLite
                                 ? "No Part No" : g.PartNumber,
                     Font = _fBold35,
                     ForeColor = cTextGray,
-                    Location = new Point(contentLeft, S(26)),
+                    Location = new Point(contentLeft, S(27)),
                     AutoSize = false,
                     Width = textW,
                     Height = S(14),
@@ -956,7 +959,7 @@ namespace PDMLite
                                 ? "" : "REV " + g.Revision,
                     Font = _fBold35,
                     ForeColor = cTextGray,
-                    Location = new Point(contentLeft, S(42)),
+                    Location = new Point(contentLeft, S(43)),
                     AutoSize = false,
                     Width = textW,
                     Height = S(14),
@@ -979,9 +982,9 @@ namespace PDMLite
                                 ? "(no description)" : g.Description),
                     Font = _fReg33,
                     ForeColor = obsoleteWithRepl ? cMaroon : cTextLight,
-                    Location = new Point(contentLeft, S(58)),
+                    Location = new Point(contentLeft, S(59)),
                     AutoSize = false,
-                    Width = fullW,
+                    Width = textW,
                     Height = S(14),
                     AutoEllipsis = true
                 });
@@ -991,7 +994,7 @@ namespace PDMLite
                 // thumbnail and the text rows, at their original size.
                 int gap = S(4);
                 int btnW = (btnFullW - gap) / 2;
-                int btnY = S(74);
+                int btnY = S(76);
                 int btnH = S(18);
 
                 string partLabel = g.ModelExt == ".sldasm"
@@ -1150,13 +1153,22 @@ namespace PDMLite
                         Path.GetFileNameWithoutExtension(filePath);
                     f.StartPosition = FormStartPosition.CenterScreen;
                     f.BackColor = Color.White;
+                    f.ShowInTaskbar = false;
                     int w = Math.Min(Math.Max(full.Width, S(320)), S(900));
                     int h = Math.Min(Math.Max(full.Height, S(320)), S(700));
                     f.ClientSize = new Size(w, h);
                     pb.Dock = DockStyle.Fill;
                     pb.SizeMode = PictureBoxSizeMode.Zoom;
                     pb.Image = full; // PictureBox does not own/dispose its Image
+                    pb.Cursor = Cursors.Hand;
                     f.Controls.Add(pb);
+                    // Esc closes (KeyPreview so the form sees the key before the
+                    // PictureBox) — the modal had no keyboard escape; a click on
+                    // the image closes it too (common preview-popup UX).
+                    f.KeyPreview = true;
+                    f.KeyDown += (s, e) =>
+                    { if (e.KeyCode == Keys.Escape) f.Close(); };
+                    pb.Click += (s, e) => f.Close();
                     f.ShowDialog(this);
                 }
             }
