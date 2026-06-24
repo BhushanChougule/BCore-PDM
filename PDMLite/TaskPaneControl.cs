@@ -842,6 +842,13 @@ namespace PDMLite
         private void RenderCards(List<SearchGroup> cards, bool truncated,
             string headerText)
         {
+            // Drop the previous render's tooltip registrations BEFORE re-registering
+            // (audit-C4): a WinForms ToolTip keeps every SetToolTip'd control in its
+            // internal table until RemoveAll/Dispose — disposing the control (next
+            // ClearAndDispose) does NOT remove it, so without this the disposed
+            // cards accumulate in _cardTip on every keystroke / doc switch.
+            _cardTip.RemoveAll();
+
             int ry = 0;
             int rw = S(188);
 
@@ -1241,13 +1248,35 @@ namespace PDMLite
         private void CardWhereUsed()
         {
             if (_menuCard == null) return;
-            string path = CardFilePath(_menuCard);
-            if (string.IsNullOrEmpty(path)) return;
+            // Where-used is a MODEL question — a drawing is never a component, so
+            // querying a drawing path always reports "not used". For an orphan-
+            // drawing card (no model record) resolve the model from the drawing;
+            // if there is none, say so rather than running a misleading query.
+            string path   = _menuCard.ModelPath;
+            string partNo = _menuCard.PartNumber;
+            string config = _menuCard.ConfigName;
+            if (string.IsNullOrEmpty(path))
+            {
+                VaultFile model = null;
+                try { model = DatabaseManager.GetModelForDrawing(_menuCard.DrawingPath); }
+                catch { }
+                if (model == null || string.IsNullOrEmpty(model.FilePath))
+                {
+                    MessageBox.Show(
+                        "No part/assembly is linked to this drawing, so Where Used " +
+                        "has nothing to trace.",
+                        "BCore PDM", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                    return;
+                }
+                path   = model.FilePath;
+                partNo = model.PartNumber;
+                config = null; // model's primary config
+            }
             try
             {
                 string toOpen = null;
                 using (var v = new WhereUsedForm(path, Path.GetFileName(path),
-                    _menuCard.PartNumber, _menuCard.ConfigName))
+                    partNo, config))
                 {
                     v.ShowDialog(this);
                     toOpen = v.FileToOpen;
@@ -1298,14 +1327,13 @@ namespace PDMLite
             }
             catch { thumb = null; }
 
-            // Crude bound: when full, dispose + clear (previews re-load on
-            // demand) — simpler than an LRU and fine for a task-pane session.
+            // Crude bound: when full, drop the cache so previews re-load on demand.
+            // Do NOT Dispose the cached Images here — a ThumbPanel in the CURRENT
+            // view shares the cached Image (it never owns it), so disposing one
+            // mid-session blanks a live tile until the next rebuild; Clear() drops
+            // our refs and GC reclaims the unreferenced ones once panels go away.
             if (_thumbCache.Count >= ThumbCacheCap)
-            {
-                foreach (var img in _thumbCache.Values)
-                    try { img?.Dispose(); } catch { }
                 _thumbCache.Clear();
-            }
             _thumbCache[key] = thumb;
             return thumb;
         }
@@ -1421,6 +1449,12 @@ namespace PDMLite
         // modal. Re-extracts the un-resized preview; null → friendly info.
         private void ShowLargePreview(string filePath, string config)
         {
+            // This opens a modal (ShowDialog) that pumps the message loop; a queued
+            // debounce tick would then RunSearch → ClearAndDispose the very card
+            // whose Click is on the stack (ObjectDisposedException, audit-M8). Stop
+            // it, exactly like the context-menu / Open-button paths.
+            _searchTimer.Stop();
+
             Image full = null;
             try
             {
@@ -2335,6 +2369,12 @@ namespace PDMLite
     {
         private const int Cap = 12;
         private static readonly object _gate = new object();
+        // recent.txt is per-user but shared by EVERY SOLIDWORKS instance that user
+        // runs on the machine, so the in-process _gate alone can't stop two
+        // instances clobbering each other's read-modify-write. A machine-local
+        // named Mutex serialises the Add across processes (best-effort — if it
+        // can't be taken in time we proceed, never block the UI).
+        private const string MutexName = "BCorePDM.RecentFiles";
 
         private static string FilePathOf()
         {
@@ -2370,19 +2410,27 @@ namespace PDMLite
             try
             {
                 lock (_gate)
+                using (var mtx = new System.Threading.Mutex(false, MutexName))
                 {
-                    var list = Get();
-                    // Skip the write when it is already the most-recent entry.
-                    if (list.Count > 0 && string.Equals(
-                            list[0], filePath, StringComparison.OrdinalIgnoreCase))
-                        return;
-                    list.RemoveAll(p => string.Equals(
-                        p, filePath, StringComparison.OrdinalIgnoreCase));
-                    list.Insert(0, filePath);
-                    if (list.Count > Cap) list.RemoveRange(Cap, list.Count - Cap);
-                    string f = FilePathOf();
-                    Directory.CreateDirectory(Path.GetDirectoryName(f));
-                    File.WriteAllLines(f, list);
+                    bool held = false;
+                    try { held = mtx.WaitOne(500); }
+                    catch (System.Threading.AbandonedMutexException) { held = true; }
+                    try
+                    {
+                        var list = Get();
+                        // Skip the write when it is already the most-recent entry.
+                        if (list.Count > 0 && string.Equals(
+                                list[0], filePath, StringComparison.OrdinalIgnoreCase))
+                            return;
+                        list.RemoveAll(p => string.Equals(
+                            p, filePath, StringComparison.OrdinalIgnoreCase));
+                        list.Insert(0, filePath);
+                        if (list.Count > Cap) list.RemoveRange(Cap, list.Count - Cap);
+                        string f = FilePathOf();
+                        Directory.CreateDirectory(Path.GetDirectoryName(f));
+                        File.WriteAllLines(f, list);
+                    }
+                    finally { if (held) try { mtx.ReleaseMutex(); } catch { } }
                 }
             }
             catch { }

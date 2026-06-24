@@ -2822,6 +2822,9 @@ namespace PDMLite
                                 Revision          = rev,
                                 Status            = (string)mel.Element("Status") ?? "",
                                 SupersededBy      = (string)mel.Element("SupersededBy") ?? "",
+                                ModifiedBy        = (string)mel.Element("ModifiedBy") ?? "",
+                                ModifiedDate      = ParseRoundtrip((string)mel.Element("ModifiedDate")),
+                                LockedBy          = (string)mel.Element("LockedBy") ?? "",
                                 Configurations    = ReadConfigs(mel, pn, dsc, rev)
                             };
                         }
@@ -2852,6 +2855,9 @@ namespace PDMLite
                             Revision       = rev,
                             Status         = (string)el.Element("Status") ?? "",
                             SupersededBy   = (string)el.Element("SupersededBy") ?? "",
+                            ModifiedBy     = (string)el.Element("ModifiedBy") ?? "",
+                            ModifiedDate   = ParseRoundtrip((string)el.Element("ModifiedDate")),
+                            LockedBy       = (string)el.Element("LockedBy") ?? "",
                             Configurations = ReadConfigs(el, pn, dsc, rev)
                         };
                     }

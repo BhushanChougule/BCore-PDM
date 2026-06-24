@@ -527,7 +527,8 @@ namespace PDMLite
                 string baseName = Path.GetFileNameWithoutExtension(
                     string.IsNullOrEmpty(f.FileName)
                         ? Path.GetFileName(f.FilePath) : f.FileName);
-                string ext = (Path.GetExtension(f.FileName) ?? "").ToLowerInvariant();
+                string ext = (Path.GetExtension(string.IsNullOrEmpty(f.FileName)
+                    ? f.FilePath : f.FileName) ?? "").ToLowerInvariant();
 
                 // SearchFilesAdvanced already TRIMMED Configurations to the
                 // matching configs, so one card per entry is exactly right.
@@ -625,7 +626,8 @@ namespace PDMLite
                 string baseName = Path.GetFileNameWithoutExtension(
                     string.IsNullOrEmpty(f.FileName)
                         ? Path.GetFileName(f.FilePath) : f.FileName);
-                string ext = (Path.GetExtension(f.FileName) ?? "").ToLowerInvariant();
+                string ext = (Path.GetExtension(string.IsNullOrEmpty(f.FileName)
+                    ? f.FilePath : f.FileName) ?? "").ToLowerInvariant();
                 // One card per recent FILE — its primary (first) config.
                 ConfigEntry c = (f.Configurations != null && f.Configurations.Count > 0)
                     ? f.Configurations[0] : null;
@@ -1225,12 +1227,11 @@ namespace PDMLite
             }
             catch { thumb = null; }
 
+            // Don't Dispose cached Images here — a ThumbPanel in the current view
+            // shares (never owns) the cached Image, so disposing mid-session blanks
+            // a live tile. Clear() drops our refs; GC reclaims the rest.
             if (_thumbCache.Count >= ThumbCacheCap)
-            {
-                foreach (var img in _thumbCache.Values)
-                    try { img?.Dispose(); } catch { }
                 _thumbCache.Clear();
-            }
             _thumbCache[key] = thumb;
             return thumb;
         }
@@ -1343,6 +1344,11 @@ namespace PDMLite
         // cleaner at this size). Esc / click-the-image closes. Null → info.
         private void ShowLargePreview(string filePath, string config)
         {
+            // Modal ShowDialog pumps the message loop; a queued debounce tick would
+            // RunSearch → ClearAndDispose the card whose Click is on the stack
+            // (ObjectDisposedException, audit-M8). Stop it, like the other modals.
+            _timer.Stop();
+
             Image full = null;
             try
             {
