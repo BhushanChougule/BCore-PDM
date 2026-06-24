@@ -86,6 +86,10 @@ namespace PDMLite
         // to a control is not owned by it — per-call fonts leaked a GDI
         // handle each (audit C4). Disposed in Dispose(bool).
         private readonly Font _fCardBold, _fCardSub, _fCardPn, _fCardBtn;
+        // Responsiveness SLA: a pending request older than this many days is shown
+        // as overdue (red + ⚠). No due dates exist in the model, so "time in queue"
+        // is the honest SLA. Mirrors VaultDashboardForm.RequestSlaDays.
+        private const int RequestSlaDays = 3;
 
         public PendingRequestsForm(float scale)
         {
@@ -517,16 +521,33 @@ namespace PDMLite
                 });
 
                 string dateStr = "—";
-                if (DateTime.TryParse(req.RequestDate, out DateTime dt))
+                bool overdue = false;
+                // RequestDate is stored as DateTime.Now.ToString("o") (ISO-8601
+                // roundtrip) — parse it invariant + RoundtripKind, matching the
+                // dashboard's oldest-request parse and the project's culture rule.
+                if (DateTime.TryParse(req.RequestDate,
+                        System.Globalization.CultureInfo.InvariantCulture,
+                        System.Globalization.DateTimeStyles.RoundtripKind, out DateTime dt))
+                {
                     // MM/dd like everywhere else — the card rendered dd/MM,
                     // contradicting the project-wide MM/dd/yyyy convention.
                     dateStr = dt.ToString("MM/dd/yy HH:mm",
                         System.Globalization.CultureInfo.InvariantCulture);
+                    // Request AGE (responsiveness SLA): how long it has sat pending.
+                    int ageDays = (int)(DateTime.Now.Date - dt.Date).TotalDays;
+                    overdue = ageDays > RequestSlaDays;
+                    string ageText = ageDays <= 0 ? "today"
+                                   : ageDays == 1 ? "1 day ago"
+                                   : ageDays + " days ago";
+                    dateStr += "  ·  " + ageText;
+                }
                 card.Controls.Add(new Label
                 {
-                    Text = dateStr,
-                    Font = _fCardSub,
-                    ForeColor = cTextLight,
+                    // Overdue requests turn red + bold with a ⚠ so a Master sees the
+                    // stale queue at a glance (the SLA breach lives where they act).
+                    Text = overdue ? dateStr + "   ⚠ overdue" : dateStr,
+                    Font = overdue ? _fCardPn : _fCardSub,
+                    ForeColor = overdue ? cRed : cTextLight,
                     Location = new Point(S(8), yDate),
                     AutoSize = true
                 });

@@ -109,3 +109,26 @@ Multi-site collaboration, supplier portal, PDF redline/markup, full offline
 conflict resolution, and a network API surface — defensibly out of scope for a
 single-share, 10-seat deployment. Reporting/analytics is already best-covered
 (dashboard + audit report).
+
+### Deferred from the dashboard-KPI work (foundations now in place)
+
+- **Deadline-based SLA.** The dashboard + Pending-Requests SLA shipped as
+  AGING-only ("time in queue"), because the data model has no due dates. A true
+  "overdue vs a committed date" SLA needs a `DueDate` field per item and likely
+  a project/ECO entity (PLM project-management scope). Revisit with a
+  projects/ECO layer. The aging half (oldest-request age, overdue flag, Stale
+  WIP, Avg WIP age) already ships on existing timestamps.
+
+- **Full charting subsystem.** The MS Chart control
+  (`System.Windows.Forms.DataVisualization`, framework built-in, no NuGet) is
+  now wired in for the Vault Dashboard's status-distribution doughnut. That is
+  the *foundation* — additional charts plug into the same control with no infra
+  change: release-trend over weeks (audit `ReleasedDate` / cycle-time data),
+  cycle-time histogram (`ComputeCycleRecords`), WIP-aging buckets, by-division
+  throughput. A dedicated charts tab/surface (vs the single inline doughnut) is
+  the scaled-up version. Not scheduled.
+
+- **Per-engineer "My Work" beyond last-saver.** The "Mine" dashboard filter uses
+  `ModifiedBy == me` (the honest proxy in a last-save-wins model). A richer
+  My-Work lens (files I currently have open via OpenSessions, or files reserved
+  to me) lands naturally with the check-out feature (Phase 4, #8).

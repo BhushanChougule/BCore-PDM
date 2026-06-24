@@ -7,6 +7,7 @@ using System.IO;
 using System.Linq;
 using System.Text;
 using System.Windows.Forms;
+using System.Windows.Forms.DataVisualization.Charting;
 
 namespace PDMLite
 {
@@ -64,21 +65,53 @@ namespace PDMLite
         private System.Windows.Forms.Timer _searchTimer;
         private Font _cellBold; // shared bold font: Status cell + header text
 
-        // Summary strip: clickable count "links" (Total/WIP/Released/Locked/
-        // Broken Refs act as quick filters) + a plain showing/page label.
-        private FlowLayoutPanel _summaryPanel;
-        private Label _lblTotal, _lblWip, _lblReleased, _lblLocked, _lblBroken, _lblShowing;
+        // Summary strip: clickable count "links" (Total/Mine/WIP/Released/Locked/
+        // Obsolete/Broken Refs/Stale WIP act as quick filters), justified across the
+        // control-row width. _lblShowing (the "Showing… · Page…" status) lives in the
+        // BOTTOM panel on the pager line, not here.
+        private Label[] _countLabels;   // the 8 clickable count quick-filters, justified across the control-row width
+        private Label _lblTotal, _lblMine, _lblWip, _lblReleased, _lblLocked, _lblObsolete, _lblBroken, _lblStale, _lblShowing;
         private Font _summaryFont;       // base (bold)
         private Font _summaryFontActive; // active quick-filter (bold + underline)
         private ToolTip _summaryTip;     // shared tip for the clickable counts
         // Special non-column filter: show only files with broken references
         // (HasBrokenRefs is a flag, not a column, so it can't live in _colFilters).
         private bool _brokenRefsOnly = false;
+        private bool _staleWipOnly = false;  // "Stale WIP" quick-filter (WipDays > StaleWipDays)
+        // "My Work" lens: files this user last saved (ModifiedBy == me). The #1 PDM
+        // dashboard lens. A shortcut over the Modified By column filter, so it reuses
+        // _colFilters[ColModifiedBy] rather than a separate flag.
+        private readonly string _me = (Environment.UserName ?? "").Trim();
         private Label _lblHint;       // faint discoverability footer in the top panel
         private DateTime _loadedAt;   // snapshot time, shown in the summary as "as of HH:mm"
+        // KPI tiles (read-only, boxed) below the clickable quick-filter strip.
+        // Two kinds: STATE-OF-VIEW tiles (avg WIP age, broken refs) recompute over
+        // the FILTERED view on every filter/search change (ComputeKpis); ACTIVITY
+        // tiles (Released-7d, Open Requests) are WHOLE-VAULT throughput/queue
+        // metrics computed once per load and stable under filtering — Released-7d
+        // in ComputeVaultCounts' _all scan, Open Requests via GetPendingRequests.
+        // (A file released in the 7d window counts even if a New Revision has since
+        // returned it to WIP — it WAS released this week; making it filter-based
+        // wrongly dropped those when you clicked the Released quick-filter.)
+        // Distinct from the quick-filter counts: not clickable, boxed, dark text.
+        private FlowLayoutPanel _kpiPanel;
+        private Label _kpiAvgAge, _kpiReleased7d, _kpiOpenReq, _kpiBroken;
+        private Font _kpiFont;
+        private double _kpiAvgWipAge;     // avg WipDays over WIP files in _view
+        private int _kpiReleased7dCount;  // whole-vault files released within 7 days (throughput)
+        private int _kpiReleased7dPrev;   // whole-vault files released 7–14 days ago (trend baseline)
+        private int _kpiBrokenInView;     // broken-ref files in _view
+        private int _kpiOpenReqCount;     // pending requests (whole vault, per load)
+        private int _oldestReqDays = -1;  // age (days) of the oldest pending request, -1 = none
+        // Status-distribution doughnut (MS Chart, the framework's built-in control —
+        // ships with .NET 4.8, NO NuGet). WHOLE-VAULT mix (matches the count strip),
+        // refreshed once per load. Sits in the top panel's right gutter; responsive
+        // (hidden when the form is too narrow to avoid overlapping the centred block).
+        private Chart _statusChart;
+        private Font _chartFont;
         // Whole-vault counts — invariant under filtering, so cached once per load
         // (UpdateSummary used to re-scan _all 4× on every keystroke / page click).
-        private int _cntWip, _cntRel, _cntLck, _cntBrk;
+        private int _cntWip, _cntRel, _cntLck, _cntObs, _cntBrk, _cntStale, _cntMine;
         private const int ColRev = 4;        // "Rev" column index
         private const int ColModifiedBy = 5; // first of the metadata columns (5..9)
         private const int ColWipDays = 9; // appended "WIP Days" column index
@@ -108,6 +141,8 @@ namespace PDMLite
         private const int VisibleRows = 20;     // fixed grid height = 20 rows
         private const int PageSize = VisibleRows; // 20 rows per page (the "20 row rule")
         private const double MaxScreenFraction = 0.80; // popup ≤ 80% of screen
+        private const int StaleWipDays = 30; // WIP older than this = "stale" (aging surfacing)
+        private const int RequestSlaDays = 3; // pending request older than this = SLA breach
         private int GlyphZone => S(20);         // right-edge hit area for the arrow
 
         // Current page (0-based) into _view, and the pager controls rebuilt for it.
@@ -298,11 +333,35 @@ namespace PDMLite
             _topPanel.Controls.Add(_btnAudit);
 
             int summaryY = rowY + ctrlH + S(10);
-            // Summary strip = a row of count "links". Total/WIP/Released/Locked/
-            // Broken Refs are clickable quick filters; the trailing label shows the
-            // page range. A FlowLayoutPanel lays them out left-to-right and is
-            // centred as one unit by LayoutTopControls.
-            _summaryPanel = new FlowLayoutPanel
+            // Summary strip = a row of clickable count "links" (Total/Mine/WIP/
+            // Released/Locked/Obsolete/Broken Refs/Stale WIP — quick filters). They
+            // are direct _topPanel children JUSTIFIED across the control-row width
+            // (search → Audit Report) by LayoutTopControls, so the strip lines up
+            // with the row above it (a FlowLayoutPanel can't space-between).
+            _lblTotal    = MakeCountLabel("All files (clear filters)", () => ClearAllFilters());
+            _lblMine     = MakeCountLabel("My Work — files I last saved (" + _me + ")", () => ToggleMineFilter());
+            _lblWip      = MakeCountLabel("Filter to WIP",      () => ToggleStatusFilter("WIP"));
+            _lblReleased = MakeCountLabel("Filter to Released", () => ToggleStatusFilter("Released"));
+            _lblLocked   = MakeCountLabel("Filter to Locked",   () => ToggleStatusFilter("Locked"));
+            _lblObsolete = MakeCountLabel("Filter to Obsolete", () => ToggleStatusFilter("Obsolete"));
+            _lblBroken   = MakeCountLabel("Show only broken references", () => ToggleBrokenFilter());
+            _lblStale    = MakeCountLabel("Show only WIP files not saved in over " + StaleWipDays + " days (stuck/neglected work)", () => ToggleStaleFilter());
+            _countLabels = new[]
+            {
+                _lblTotal, _lblMine, _lblWip, _lblReleased, _lblLocked, _lblObsolete,
+                _lblBroken, _lblStale
+            };
+            foreach (var l in _countLabels)
+            {
+                l.Top = summaryY;                 // Left is justified in LayoutTopControls
+                _topPanel.Controls.Add(l);
+            }
+
+            // KPI tiles — at-a-glance metrics, read-only and boxed so they read
+            // as a distinct strip from the clickable count quick-filters above.
+            int kpiY = summaryY + (int)_summaryFont.GetHeight() + S(8);
+            _kpiFont = new Font("Segoe UI", 3.7f * _scale, FontStyle.Bold);
+            _kpiPanel = new FlowLayoutPanel
             {
                 AutoSize = true,
                 AutoSizeMode = AutoSizeMode.GrowAndShrink,
@@ -311,29 +370,22 @@ namespace PDMLite
                 BackColor = cBg,
                 Margin = Padding.Empty,
                 Padding = Padding.Empty,
-                Location = new Point(S(14), summaryY)
+                Location = new Point(S(14), kpiY)
             };
-            _lblTotal    = MakeCountLabel("All files (clear filters)", () => ClearAllFilters());
-            _lblWip      = MakeCountLabel("Filter to WIP",      () => ToggleStatusFilter("WIP"));
-            _lblReleased = MakeCountLabel("Filter to Released", () => ToggleStatusFilter("Released"));
-            _lblLocked   = MakeCountLabel("Filter to Locked",   () => ToggleStatusFilter("Locked"));
-            _lblBroken   = MakeCountLabel("Show only broken references", () => ToggleBrokenFilter());
-            _lblShowing  = new Label
-            {
-                Font = _summaryFont,
-                ForeColor = cTextGray,
-                AutoSize = true,
-                Margin = new Padding(S(6), 0, 0, 0)
-            };
-            _summaryPanel.Controls.AddRange(new Control[]
-            {
-                _lblTotal, _lblWip, _lblReleased, _lblLocked, _lblBroken, _lblShowing
-            });
-            _topPanel.Controls.Add(_summaryPanel);
+            _kpiAvgAge     = MakeKpiTile("Average age (days since last save) of WIP files in the current view");
+            _kpiReleased7d = MakeKpiTile("Files released within the last 7 days across the whole vault (release throughput; not affected by filters). ▲/▼ shows the change vs the prior 7 days.");
+            _kpiOpenReq    = MakeKpiTile("Pending engineer requests across the whole vault (Unlock / Revision / Release). Shows the oldest request's age; turns maroon when the oldest is over " + RequestSlaDays + " days (responsiveness SLA — open Pending Requests to act).");
+            _kpiBroken     = MakeKpiTile("Files with broken references in the current view");
+            _kpiPanel.Controls.AddRange(new Control[]
+            { _kpiAvgAge, _kpiReleased7d, _kpiOpenReq, _kpiBroken });
+            _topPanel.Controls.Add(_kpiPanel);
 
-            // Faint discoverability footer below the counts — new users won't
-            // guess the right-click menu / column-resize / clickable counts.
-            int hintY = summaryY + (int)_summaryFont.GetHeight() + S(4);
+            // Faint discoverability footer below the KPI tiles — new users won't
+            // guess the right-click menu / column-resize / clickable counts. The
+            // "Showing… · Page… · as of…" status lives in the BOTTOM panel now,
+            // right-aligned on the pager line (built below), so the hint owns this
+            // line alone (centred in LayoutTopControls).
+            int hintY = kpiY + (int)_kpiFont.GetHeight() + S(10);
             _lblHint = new Label
             {
                 Text = "Double-click or right-click a row to open  ·  Drag a column edge to "
@@ -344,6 +396,28 @@ namespace PDMLite
                 Location = new Point(S(14), hintY)
             };
             _topPanel.Controls.Add(_lblHint);
+
+            // Status-distribution doughnut, parked in the top panel's RIGHT COLUMN.
+            // LayoutTopControls reserves a right-hand column for it and centres the
+            // content in the remaining width. It spans from the TITLE row (S(10),
+            // the empty right gutter clears the centred title) down to the hint, so
+            // it has the full panel height for the doughnut + 3-entry legend (the
+            // shorter control-row→hint band clipped the last legend entry); still
+            // adds NO panel height.
+            // NON-FATAL: BuildStatusChart references System.Windows.Forms.Data-
+            // Visualization (in-box on .NET 4.8, so always present in practice). If
+            // that assembly ever fails to load, degrade to NO chart rather than
+            // letting the exception propagate onto SOLIDWORKS' message loop and
+            // break the whole dashboard (_statusChart stays null; UpdateStatusChart
+            // and LayoutTopControls both null-guard it).
+            try
+            {
+                _chartFont = new Font("Segoe UI", 3.0f * _scale);
+                _statusChart = BuildStatusChart(S(10),
+                    hintY + (int)_lblHint.Font.GetHeight());
+                _topPanel.Controls.Add(_statusChart);
+            }
+            catch { _statusChart = null; }
 
             // Tighten the panel to the hint so the grid sits right below it.
             _topPanel.Height = hintY + (int)_lblHint.Font.GetHeight() + S(8);
@@ -362,6 +436,17 @@ namespace PDMLite
             _btnClose.Location = new Point(this.ClientSize.Width - S(124), S(8));
             _btnClose.Click += (s, e) => { this.DialogResult = DialogResult.Cancel; Close(); };
             _bottomPanel.Controls.Add(_btnClose);
+            // "Showing N–M of … · Page … · as of …" sits in the BOTTOM-RIGHT, on the
+            // pager line, just left of the Close button. BuildPager owns its position
+            // on every resize (no Anchor — AutoSize + Anchor=Right is a WinForms
+            // quirk). Text set in UpdateSummary, which runs before BuildPager.
+            _lblShowing = new Label
+            {
+                Font = _summaryFont,
+                ForeColor = cTextGray,
+                AutoSize = true
+            };
+            _bottomPanel.Controls.Add(_lblShowing);
             // Re-centre the pager when the form (and so the bottom panel) resizes.
             _bottomPanel.Resize += (s, e) => BuildPager();
 
@@ -502,6 +587,8 @@ namespace PDMLite
                 _pagerFont = null;
                 _summaryFont?.Dispose();
                 _summaryFontActive?.Dispose();
+                _kpiFont?.Dispose();
+                _chartFont?.Dispose();   // Chart doesn't own the Font we assign it
                 _summaryTip?.Dispose();
                 _rowMenu?.Dispose();
             };
@@ -561,6 +648,29 @@ namespace PDMLite
             }
             _loadedAt = DateTime.Now;   // shown in the summary as "as of HH:mm"
             ComputeVaultCounts();       // cache whole-vault counts for the summary
+            UpdateStatusChart();        // refill the doughnut from the new counts
+            // Open-requests KPI is a WHOLE-VAULT metric (no per-file dimension to
+            // filter on) — read it once per load. Also derive the OLDEST pending
+            // request's age (the responsiveness SLA: there are no due dates in the
+            // model, so "time in queue" is the honest SLA signal). Network blip →
+            // 0 / no age, never throws.
+            try
+            {
+                var pending = DatabaseManager.GetPendingRequests();
+                _kpiOpenReqCount = pending.Count;
+                _oldestReqDays = -1;
+                foreach (var r in pending)
+                {
+                    DateTime d;
+                    if (DateTime.TryParse(r.RequestDate, CultureInfo.InvariantCulture,
+                            DateTimeStyles.RoundtripKind, out d))
+                    {
+                        int age = (int)(DateTime.Now.Date - d.Date).TotalDays;
+                        if (age > _oldestReqDays) _oldestReqDays = age;
+                    }
+                }
+            }
+            catch { _kpiOpenReqCount = 0; _oldestReqDays = -1; }
             // Populate the grid, then size columns to the full data ONCE and fit
             // the form to them — so columns/width stay stable while the user
             // types in the search box (no per-keystroke resizing).
@@ -652,6 +762,8 @@ namespace PDMLite
             {
                 if (!columnFiltersOnly && _brokenRefsOnly && !f.HasBrokenRefs)
                     continue;
+                if (!columnFiltersOnly && _staleWipOnly && WipDays(f) <= StaleWipDays)
+                    continue;
                 bool ok = true;
                 foreach (var kv in _colFilters)
                 {
@@ -697,6 +809,8 @@ namespace PDMLite
             {
                 // Broken-refs-only quick filter (from the summary strip).
                 if (_brokenRefsOnly && !f.HasBrokenRefs) return false;
+                // Stale-WIP-only quick filter (WipDays is -1 for non-WIP → excluded).
+                if (_staleWipOnly && WipDays(f) <= StaleWipDays) return false;
                 // Per-column (Excel-style) value filters — ALL must pass.
                 // FilterKey (not CellText) so date columns match by DAY.
                 foreach (var kv in _colFilters)
@@ -722,8 +836,30 @@ namespace PDMLite
             // No per-row objects are created, so this stays instant at 50–100k rows.
             _view = view;
             _page = 0;
+            ComputeKpis();           // recompute the view-based KPI tiles ONCE per
+                                     // filter change (UpdateSummary just reads them,
+                                     // so paging doesn't rescan — matches the cached
+                                     // whole-vault counts' performance discipline)
             ShowGridPage();          // also refreshes the summary (page indicator)
-            LayoutTopControls();     // re-centre: the summary width changed
+            LayoutTopControls();     // re-centre: the summary/KPI width changed
+        }
+
+        // Recompute the VIEW-based KPI tiles over the current filtered _view:
+        //   avg WIP age (days) · releases in the last 7 days · broken refs.
+        // (Open Requests is whole-vault, fetched once per load in LoadData.)
+        private void ComputeKpis()
+        {
+            long ageSum = 0; int wipCount = 0, brk = 0;
+            foreach (var f in _view)
+            {
+                int age = WipDays(f);          // -1 for non-WIP / no modified date
+                if (age >= 0) { ageSum += age; wipCount++; }
+                if (f.HasBrokenRefs) brk++;
+            }
+            _kpiAvgWipAge = wipCount > 0 ? (double)ageSum / wipCount : 0;
+            _kpiBrokenInView = brk;
+            // _kpiReleased7dCount is whole-vault (release throughput), computed
+            // once per load in ComputeVaultCounts — NOT recomputed per filter.
         }
 
         // Render the current page: clamp _page, set the grid's RowCount to just
@@ -737,11 +873,12 @@ namespace PDMLite
             _grid.CurrentCell = null;
             _grid.RowCount = Math.Max(0, Math.Min(PageSize, _view.Count - PageStart));
             _grid.Invalidate();
-            BuildPager();
-            // Refresh the summary HERE so the "Showing X–Y · Page N of M" indicator
-            // can never desync from the rendered page — any future direct
-            // ShowGridPage() caller stays correct without remembering to follow up.
+            // UpdateSummary FIRST so the "Showing X–Y · Page N of M" label's text
+            // (and width) is current — BuildPager positions that label at the bottom
+            // right and reserves the pager's space to its LEFT, so it must run after.
+            // (Also keeps the indicator from ever desyncing from the rendered page.)
             UpdateSummary(_view.Count);
+            BuildPager();
         }
 
         private void GoToPage(int page)
@@ -798,8 +935,25 @@ namespace PDMLite
             int totalW = -gap;
             foreach (var c in items) totalW += c.Width + gap;
 
-            int closeZone = S(140); // keep the pager clear of the Close button
-            int avail = Math.Max(totalW, _bottomPanel.ClientSize.Width - closeZone);
+            // Position the "Showing… · Page… · as of…" label at the BOTTOM-RIGHT,
+            // vertically centred on the pager line, just left of the Close button
+            // (its Text/Width are set by UpdateSummary, which runs before BuildPager
+            // in ShowGridPage). The pager then centres in the area to its LEFT.
+            int rightLimit = _bottomPanel.ClientSize.Width - S(140); // Close-button zone
+            if (_lblShowing != null)
+            {
+                // Close button is anchored Right at panelW - S(124); derive its left
+                // from the panel width (deterministic — doesn't depend on the anchor
+                // having repositioned _btnClose yet during this resize pass).
+                int closeLeft = _bottomPanel.ClientSize.Width - S(124);
+                int sLeft = Math.Max(S(8), closeLeft - S(16) - _lblShowing.Width);
+                _lblShowing.Left = sLeft;
+                _lblShowing.Top = Math.Max(S(2),
+                    (_bottomPanel.ClientSize.Height - _lblShowing.Height) / 2);
+                rightLimit = sLeft - S(12);   // keep the pager clear of Showing
+            }
+
+            int avail = Math.Max(totalW, rightLimit);
             int x = Math.Max(S(8), (avail - totalW) / 2);
             int y = Math.Max(S(4), (_bottomPanel.ClientSize.Height - S(26)) / 2);
             foreach (var c in items)
@@ -992,6 +1146,7 @@ namespace PDMLite
         {
             _colFilters.Clear();
             _brokenRefsOnly = false;                  // clear the broken-refs view
+            _staleWipOnly = false;                    // clear the stale-WIP view
             _sortColumn = DefaultSortColumn;          // back to newest-first
             _sortDir = ListSortDirection.Descending;
             _search.Text = "";       // raises TextChanged → starts the debounce timer…
@@ -1203,12 +1358,22 @@ namespace PDMLite
 
             var area = Screen.FromControl(this).WorkingArea;
 
+            int borderW = this.Width - this.ClientSize.Width;   // 0 before shown
+            int maxClientW = (int)(area.Width * MaxScreenFraction) - borderW;
+
+            // A HORIZONTAL scrollbar appears when the columns are wider than the
+            // (capped) client width — it sits along the grid's bottom and would
+            // otherwise eat the 20th row. Reserve its height so all 20 rows stay
+            // fully visible above it (the "20 row rule").
+            bool needsHScroll = totalCols + S(4) > maxClientW;
+
             // Height = a CONSTANT 20 grid rows + panels, capped at 80% of the
             // screen. On a small screen / high DPI the cap can bite, which forces
             // the grid to show a vertical scrollbar — detect that so the width can
             // reserve room for it (otherwise the last column clips under it).
             int gridH = _grid.ColumnHeadersHeight
-                      + _grid.RowTemplate.Height * VisibleRows + S(2);
+                      + _grid.RowTemplate.Height * VisibleRows + S(2)
+                      + (needsHScroll ? SystemInformation.HorizontalScrollBarHeight : 0);
             int desiredH = _topPanel.Height + gridH + _bottomPanel.Height;
             int borderH = this.Height - this.ClientSize.Height;
             int maxClientH = (int)(area.Height * MaxScreenFraction) - borderH;
@@ -1219,9 +1384,6 @@ namespace PDMLite
             // scrollbar — reserve its width ONLY when the height clamp forced one.
             int chrome = S(4) + (needsVScroll ? SystemInformation.VerticalScrollBarWidth : 0);
             int clientW = totalCols + chrome;
-
-            int borderW = this.Width - this.ClientSize.Width;   // 0 before shown
-            int maxClientW = (int)(area.Width * MaxScreenFraction) - borderW;
             if (clientW > maxClientW) clientW = maxClientW;
             int minClientW = S(800);                            // keep top row visible
             if (clientW < minClientW) clientW = minClientW;
@@ -1238,61 +1400,242 @@ namespace PDMLite
             int panelW = _topPanel.ClientSize.Width;
             int gap = S(10);
 
-            if (_title != null)
-                _title.Left = Math.Max(S(14), (panelW - _title.Width) / 2);
-
             int rowW = _search.Width + gap + _btnRefresh.Width + gap
                      + _btnExport.Width + gap + _btnClear.Width
                      + gap + _btnAudit.Width;
-            int startX = Math.Max(S(14), (panelW - rowW) / 2);
+
+            // Natural minimum width of the count strip (sum of the 8 labels + the
+            // tightest S(6) gaps). Folded into 'widest' below so the chart hides /
+            // centerW shrinks if the counts would otherwise overflow the control row
+            // (realistic at large-vault scale: "Total: 99999" … "Stale WIP: 999").
+            int nCounts = _countLabels != null ? _countLabels.Length : 0;
+            int countsSumW = 0;
+            if (_countLabels != null)
+                foreach (var l in _countLabels) countsSumW += l.Width;
+            int countsMinW = countsSumW + Math.Max(0, nCounts - 1) * S(6);
+
+            // The status doughnut takes a RESERVED right-hand COLUMN; the control
+            // row / counts / KPI / hint are centred in the REMAINING width (centerW).
+            // The counts JUSTIFY across the control-row width when they fit, so the
+            // chart guard bounds them by max(rowW, their natural width).
+            int widest = rowW;
+            if (_kpiPanel != null) widest = Math.Max(widest, _kpiPanel.Width);
+            widest = Math.Max(widest, countsMinW);
+
+            int centerW = panelW;
+            if (_statusChart != null)
+            {
+                int reserve = _statusChart.Width + S(16);
+                bool room = (panelW - reserve) >= widest;
+                _statusChart.Visible = room;
+                if (room)
+                {
+                    centerW = panelW - reserve;
+                    _statusChart.Left = panelW - _statusChart.Width - S(14);
+                }
+            }
+
+            // The TITLE is centred in the FULL width (it's a header above the chart
+            // band, so it can't overlap), per the "centre the title" request.
+            if (_title != null)
+                _title.Left = Math.Max(S(14), (panelW - _title.Width) / 2);
+
+            int startX = Math.Max(S(14), (centerW - rowW) / 2);
             _search.Left     = startX;
             _btnRefresh.Left = _search.Right + gap;
             _btnExport.Left  = _btnRefresh.Right + gap;
             _btnClear.Left   = _btnExport.Right + gap;
             _btnAudit.Left   = _btnClear.Right + gap;
 
-            if (_summaryPanel != null)
-                _summaryPanel.Left = Math.Max(S(14),
-                    (panelW - _summaryPanel.Width) / 2);
+            // JUSTIFY the count quick-filters across the SAME span as the control
+            // row above (search.Left → btnAudit.Right), space-between: first flush
+            // left, last flush right, equal gaps — so the strip lines up with the
+            // row above at any width. If the labels can't fit that span (large-vault
+            // counts), centre the natural-width strip in centerW instead (the chart
+            // is already hidden / centerW widened via 'widest'), so they never spill
+            // into the reserved chart column.
+            if (nCounts > 0)
+            {
+                int left = _search.Left;
+                int right = _btnAudit.Right;
+                bool fits = countsMinW <= right - left;
+                int gapC = fits
+                    ? (nCounts > 1 ? (right - left - countsSumW) / (nCounts - 1) : 0)
+                    : S(6);
+                int cx = fits ? left
+                              : Math.Max(S(14), (centerW - countsMinW) / 2);
+                for (int i = 0; i < nCounts; i++)
+                {
+                    _countLabels[i].Left = cx;
+                    cx += _countLabels[i].Width + gapC;
+                }
+                // Land the LAST count's right edge EXACTLY on btnAudit.Right (the
+                // strip must span to the Audit Report button) — absorbs the gap
+                // integer-division remainder; only in the fits case.
+                if (fits)
+                    _countLabels[nCounts - 1].Left =
+                        right - _countLabels[nCounts - 1].Width;
+            }
 
+            if (_kpiPanel != null)
+                _kpiPanel.Left = Math.Max(S(14),
+                    (centerW - _kpiPanel.Width) / 2);
+
+            // The hint owns its line alone now (Showing moved to the bottom pager).
             if (_lblHint != null)
-                _lblHint.Left = Math.Max(S(14), (panelW - _lblHint.Width) / 2);
+                _lblHint.Left = Math.Max(S(14), (centerW - _lblHint.Width) / 2);
+        }
+
+        // Build the status-distribution doughnut (MS Chart, built into .NET 4.8 —
+        // no NuGet). Configured once; data filled by UpdateStatusChart once per load.
+        private Chart BuildStatusChart(int topY, int bottomY)
+        {
+            var chart = new Chart
+            {
+                Width = S(180),
+                // Height = exactly the title→hint band. A fixed floor here (e.g.
+                // Math.Max(S(120), …)) is DECOUPLED from _topPanel.Height (which is
+                // derived from the hint font), so at DPIs where the band < the floor
+                // the chart grew taller than the panel and the bottom-docked legend
+                // clipped under the grid. The band is always large (title row →
+                // hint) and the panel contains it with an S(8) margin, so honour it.
+                Height = Math.Max(S(40), bottomY - topY),
+                Top = topY,
+                BackColor = cBg,
+                AntiAliasing = AntiAliasingStyles.All,
+                Visible = false                 // LayoutTopControls decides
+            };
+            chart.ChartAreas.Add(new ChartArea("main") { BackColor = cBg });
+            var s = new Series("status")
+            {
+                ChartArea = "main",
+                ChartType = SeriesChartType.Doughnut,
+                Font = _chartFont
+            };
+            s["DoughnutRadius"] = "55";          // ring thickness
+            s["PieLabelStyle"] = "Disabled";     // names+counts live in the legend
+            chart.Series.Add(s);
+            chart.Legends.Add(new Legend("leg")
+            {
+                Docking = Docking.Bottom,
+                Alignment = StringAlignment.Center,
+                Font = _chartFont,
+                BackColor = cBg
+            });
+            chart.Titles.Add(new Title("Vault status", Docking.Top, _chartFont, cTextDark));
+            return chart;
+        }
+
+        // Fill the doughnut from the WHOLE-VAULT status counts (matches the count
+        // strip — invariant under filtering, so refreshed once per load, not per
+        // filter). A zero-count status is omitted so the ring stays clean.
+        private void UpdateStatusChart()
+        {
+            if (_statusChart == null) return;
+            try
+            {
+                var s = _statusChart.Series["status"];
+                s.Points.Clear();
+                AddStatusSlice(s, "WIP",      _cntWip, cOrange);
+                AddStatusSlice(s, "Released", _cntRel, cGreen);
+                AddStatusSlice(s, "Locked",   _cntLck, cMaroon);
+                AddStatusSlice(s, "Obsolete", _cntObs, StatusColor("Obsolete"));
+            }
+            catch { /* charting is non-essential — never break a load over it */ }
+        }
+
+        private void AddStatusSlice(Series s, string name, int val, Color c)
+        {
+            if (val <= 0) return;               // omit empty statuses
+            int i = s.Points.AddXY(name, val);
+            s.Points[i].Color = c;
+            s.Points[i].LegendText = name + " (" + val + ")";
+            s.Points[i].ToolTip = name + ": " + val;
         }
 
         // Whole-vault counts are invariant under filtering, so compute them ONCE
         // per load (Refresh) instead of re-scanning _all on every keystroke.
         private void ComputeVaultCounts()
         {
-            _cntWip = _cntRel = _cntLck = _cntBrk = 0;
+            _cntWip = _cntRel = _cntLck = _cntObs = _cntBrk = _cntStale = _cntMine = 0;
+            // Released (7d) is a WHOLE-VAULT throughput metric (release velocity),
+            // so it is counted here in the once-per-load _all scan — NOT over the
+            // filtered _view. A file released in the window still counts even if a
+            // New Revision / Unlock has since put it back to WIP (it WAS released
+            // this week), and the number stays stable as the user filters/searches.
+            // rel7Prev is the SAME measure one week earlier (latest release 7–14
+            // days ago) — the baseline for the tile's ▲/▼ trend arrow.
+            int rel7 = 0, rel7Prev = 0;
+            DateTime cutoff7  = DateTime.Now.AddDays(-7);
+            DateTime cutoff14 = DateTime.Now.AddDays(-14);
             foreach (var f in _all)
             {
-                if (Eq(f.Status, "WIP"))           _cntWip++;
-                else if (Eq(f.Status, "Released")) _cntRel++;
-                else if (Eq(f.Status, "Locked"))   _cntLck++;
-                if (f.HasBrokenRefs)               _cntBrk++;
+                if (Eq(f.Status, "WIP"))            _cntWip++;
+                else if (Eq(f.Status, "Released"))  _cntRel++;
+                else if (Eq(f.Status, "Locked"))    _cntLck++;
+                else if (Eq(f.Status, "Obsolete"))  _cntObs++;
+                if (f.HasBrokenRefs)                _cntBrk++;
+                if (WipDays(f) > StaleWipDays)       _cntStale++; // WipDays is -1 for non-WIP
+                if (_me.Length > 0 && Eq(f.ModifiedBy ?? "", _me)) _cntMine++;
+                if (f.ReleasedDate != DateTime.MinValue)
+                {
+                    if (f.ReleasedDate >= cutoff7)        rel7++;
+                    else if (f.ReleasedDate >= cutoff14)  rel7Prev++;
+                }
             }
+            _kpiReleased7dCount = rel7;
+            _kpiReleased7dPrev = rel7Prev;
         }
 
         private void UpdateSummary(int showing)
         {
             _lblTotal.Text    = $"Total: {_all.Count}";
+            _lblMine.Text     = $"Mine: {_cntMine}";
             _lblWip.Text      = $"WIP: {_cntWip}";
             _lblReleased.Text = $"Released: {_cntRel}";
             _lblLocked.Text   = $"Locked: {_cntLck}";
+            _lblObsolete.Text = $"Obsolete: {_cntObs}";
             _lblBroken.Text   = $"Broken Refs: {_cntBrk}";
+            _lblStale.Text    = $"Stale WIP (>{StaleWipDays}d): {_cntStale}";
 
             int from = showing == 0 ? 0 : PageStart + 1;
             int to = Math.Min(showing, PageStart + PageSize);
             _lblShowing.Text =
-                $"     (Showing {from}–{to} of {showing}" +
-                $" · Page {_page + 1} of {PageCount}" +
-                $" · as of {_loadedAt:HH:mm})";
+                $"Showing {from}–{to} of {showing}" +
+                $"  ·  Page {_page + 1} of {PageCount}" +
+                $"  ·  as of {_loadedAt:HH:mm}";
 
             // Underline the active quick-filter so it's obvious what's applied.
+            SetActive(_lblMine,     IsMineFilter());
             SetActive(_lblWip,      IsStatusFilter("WIP"));
             SetActive(_lblReleased, IsStatusFilter("Released"));
             SetActive(_lblLocked,   IsStatusFilter("Locked"));
+            SetActive(_lblObsolete, IsStatusFilter("Obsolete"));
             SetActive(_lblBroken,   _brokenRefsOnly);
+            SetActive(_lblStale,    _staleWipOnly);
+
+            // KPI tiles (values cached by ComputeKpis / LoadData).
+            if (_kpiAvgAge != null)
+            {
+                _kpiAvgAge.Text = "Avg WIP age: " +
+                    _kpiAvgWipAge.ToString("0.0", CultureInfo.InvariantCulture) + " d";
+                // Release-velocity trend vs the prior 7 days: ▲ up / ▼ down / ▬ flat,
+                // with the absolute change. Whole-vault, so it doesn't move on filter.
+                int d = _kpiReleased7dCount - _kpiReleased7dPrev;
+                string trend = d > 0 ? "  ▲" + d : d < 0 ? "  ▼" + (-d) : "  ▬";
+                _kpiReleased7d.Text = "Released (7d): " + _kpiReleased7dCount + trend;
+                // Open requests + the responsiveness SLA: append the oldest pending
+                // request's age, and turn the tile maroon when it breaches the SLA
+                // (older than RequestSlaDays) — a queue going stale is a Master's
+                // cue to act. No due dates exist, so "oldest in queue" IS the SLA.
+                string reqAge = (_kpiOpenReqCount > 0 && _oldestReqDays >= 0)
+                    ? "  ·  oldest " + _oldestReqDays + "d" : "";
+                _kpiOpenReq.Text = "Open requests: " + _kpiOpenReqCount + reqAge;
+                _kpiOpenReq.ForeColor =
+                    (_kpiOpenReqCount > 0 && _oldestReqDays > RequestSlaDays)
+                        ? cMaroon : cTextDark;
+                _kpiBroken.Text     = "Broken refs: " + _kpiBrokenInView;
+            }
         }
 
         private void SetActive(Label l, bool active) =>
@@ -1317,6 +1660,28 @@ namespace PDMLite
             return l;
         }
 
+        // A read-only KPI "tile": boxed, dark bold text, NOT clickable. Text is
+        // set in UpdateSummary; the tip explains the metric. Reuses the shared
+        // _summaryTip (already created by the count labels above, disposed on
+        // FormClosed) so no extra disposable is introduced.
+        private Label MakeKpiTile(string tip)
+        {
+            var l = new Label
+            {
+                Font = _kpiFont,
+                ForeColor = cTextDark,
+                BackColor = Color.White,
+                BorderStyle = BorderStyle.FixedSingle,
+                AutoSize = true,
+                Padding = new Padding(S(8), S(3), S(8), S(3)),
+                Margin = new Padding(0, 0, S(10), 0),
+                TextAlign = ContentAlignment.MiddleLeft
+            };
+            if (_summaryTip == null) _summaryTip = new ToolTip();
+            _summaryTip.SetToolTip(l, tip);
+            return l;
+        }
+
         // Is the Status column filtered to EXACTLY this one value?
         private bool IsStatusFilter(string status)
         {
@@ -1336,13 +1701,38 @@ namespace PDMLite
                 // disabled) — make a "0" link inert instead.
                 int cnt = Eq(status, "WIP") ? _cntWip
                         : Eq(status, "Released") ? _cntRel
-                        : Eq(status, "Locked") ? _cntLck : -1;
+                        : Eq(status, "Locked") ? _cntLck
+                        : Eq(status, "Obsolete") ? _cntObs : -1;
                 if (cnt == 0) return;
                 _colFilters[3] = new HashSet<string>(
                     new[] { status }, StringComparer.OrdinalIgnoreCase);
             }
             ApplyFilter();
             _grid.Invalidate(); // repaint the Status header funnel glyph
+        }
+
+        // Is the Modified By column filtered to EXACTLY this user (the "Mine" lens)?
+        private bool IsMineFilter()
+        {
+            HashSet<string> set;
+            return _me.Length > 0 && _colFilters.TryGetValue(ColModifiedBy, out set)
+                && set.Count == 1 && set.Contains(_me);
+        }
+
+        // Click "Mine" → toggle the Modified By column filter to the current user.
+        // Reuses _colFilters[ColModifiedBy] (so the Modified By header funnel lights
+        // up too), exactly like the Status quick-filters share _colFilters[3].
+        private void ToggleMineFilter()
+        {
+            if (IsMineFilter()) _colFilters.Remove(ColModifiedBy);
+            else
+            {
+                if (_cntMine == 0) return;   // zero-count link is inert (blanks grid)
+                _colFilters[ColModifiedBy] = new HashSet<string>(
+                    new[] { _me }, StringComparer.OrdinalIgnoreCase);
+            }
+            ApplyFilter();
+            _grid.Invalidate(); // repaint the Modified By header funnel glyph
         }
 
         // Click "Broken Refs" → toggle the broken-references-only view.
@@ -1354,6 +1744,15 @@ namespace PDMLite
             // found in PR-52 testing). Turning it OFF is always allowed.
             if (!_brokenRefsOnly && _cntBrk == 0) return;
             _brokenRefsOnly = !_brokenRefsOnly;
+            ApplyFilter();
+        }
+
+        // Click "Stale WIP" → toggle the stale-WIP-only view (WipDays > StaleWipDays).
+        // Same zero-count guard as Broken Refs: turning ON a 0 would blank the grid.
+        private void ToggleStaleFilter()
+        {
+            if (!_staleWipOnly && _cntStale == 0) return;
+            _staleWipOnly = !_staleWipOnly;
             ApplyFilter();
         }
 
