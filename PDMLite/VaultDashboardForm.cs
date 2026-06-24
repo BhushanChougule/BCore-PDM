@@ -7,6 +7,7 @@ using System.IO;
 using System.Linq;
 using System.Text;
 using System.Windows.Forms;
+using System.Windows.Forms.DataVisualization.Charting;
 
 namespace PDMLite
 {
@@ -101,6 +102,12 @@ namespace PDMLite
         private int _kpiBrokenInView;     // broken-ref files in _view
         private int _kpiOpenReqCount;     // pending requests (whole vault, per load)
         private int _oldestReqDays = -1;  // age (days) of the oldest pending request, -1 = none
+        // Status-distribution doughnut (MS Chart, the framework's built-in control —
+        // ships with .NET 4.8, NO NuGet). WHOLE-VAULT mix (matches the count strip),
+        // refreshed once per load. Sits in the top panel's right gutter; responsive
+        // (hidden when the form is too narrow to avoid overlapping the centred block).
+        private Chart _statusChart;
+        private Font _chartFont;
         // Whole-vault counts — invariant under filtering, so cached once per load
         // (UpdateSummary used to re-scan _all 4× on every keystroke / page click).
         private int _cntWip, _cntRel, _cntLck, _cntObs, _cntBrk, _cntStale, _cntMine;
@@ -400,6 +407,14 @@ namespace PDMLite
             };
             _topPanel.Controls.Add(_lblHint);
 
+            // Status-distribution doughnut, parked in the top panel's RIGHT GUTTER.
+            // It spans the control-row → hint band vertically, so it adds NO height
+            // to the panel; Left + Visible are set responsively in LayoutTopControls.
+            _chartFont = new Font("Segoe UI", 3.0f * _scale);
+            _statusChart = BuildStatusChart(rowY,
+                hintY + (int)_lblHint.Font.GetHeight());
+            _topPanel.Controls.Add(_statusChart);
+
             // Tighten the panel to the hint so the grid sits right below it.
             _topPanel.Height = hintY + (int)_lblHint.Font.GetHeight() + S(8);
             _topPanel.Resize += (s, e) => LayoutTopControls();
@@ -558,6 +573,7 @@ namespace PDMLite
                 _summaryFont?.Dispose();
                 _summaryFontActive?.Dispose();
                 _kpiFont?.Dispose();
+                _chartFont?.Dispose();   // Chart doesn't own the Font we assign it
                 _summaryTip?.Dispose();
                 _rowMenu?.Dispose();
             };
@@ -617,6 +633,7 @@ namespace PDMLite
             }
             _loadedAt = DateTime.Now;   // shown in the summary as "as of HH:mm"
             ComputeVaultCounts();       // cache whole-vault counts for the summary
+            UpdateStatusChart();        // refill the doughnut from the new counts
             // Open-requests KPI is a WHOLE-VAULT metric (no per-file dimension to
             // filter on) — read it once per load. Also derive the OLDEST pending
             // request's age (the responsiveness SLA: there are no due dates in the
@@ -1373,6 +1390,79 @@ namespace PDMLite
 
             if (_lblHint != null)
                 _lblHint.Left = Math.Max(S(14), (panelW - _lblHint.Width) / 2);
+
+            // Status doughnut: park it in the right gutter, but only when there's
+            // room beside the centred block — otherwise hide it (responsive) so it
+            // never overlaps the title/counts/KPI on a narrow form / high DPI.
+            if (_statusChart != null)
+            {
+                int widest = Math.Max(_title != null ? _title.Width : 0,
+                             Math.Max(rowW,
+                             Math.Max(_summaryPanel != null ? _summaryPanel.Width : 0,
+                                      _kpiPanel != null ? _kpiPanel.Width : 0)));
+                int gutter = (panelW - widest) / 2;   // empty space each side
+                bool room = gutter >= _statusChart.Width + S(20);
+                _statusChart.Visible = room;
+                if (room)
+                    _statusChart.Left = panelW - _statusChart.Width - S(14);
+            }
+        }
+
+        // Build the status-distribution doughnut (MS Chart, built into .NET 4.8 —
+        // no NuGet). Configured once; data filled by UpdateStatusChart once per load.
+        private Chart BuildStatusChart(int topY, int bottomY)
+        {
+            var chart = new Chart
+            {
+                Width = S(210),
+                Height = Math.Max(S(120), bottomY - topY),
+                Top = topY,
+                BackColor = cBg,
+                AntiAliasing = AntiAliasingStyles.All,
+                Visible = false                 // LayoutTopControls decides
+            };
+            chart.ChartAreas.Add(new ChartArea("main") { BackColor = cBg });
+            var s = new Series("status")
+            {
+                ChartArea = "main",
+                ChartType = SeriesChartType.Doughnut,
+                Font = _chartFont
+            };
+            s["DoughnutRadius"] = "55";          // ring thickness
+            s["PieLabelStyle"] = "Disabled";     // names+counts live in the legend
+            chart.Series.Add(s);
+            chart.Legends.Add(new Legend("leg")
+            {
+                Docking = Docking.Bottom,
+                Alignment = StringAlignment.Center,
+                Font = _chartFont,
+                BackColor = cBg
+            });
+            chart.Titles.Add(new Title("Vault status", Docking.Top, _chartFont, cTextDark));
+            return chart;
+        }
+
+        // Fill the doughnut from the WHOLE-VAULT status counts (matches the count
+        // strip — invariant under filtering, so refreshed once per load, not per
+        // filter). A zero-count status is omitted so the ring stays clean.
+        private void UpdateStatusChart()
+        {
+            if (_statusChart == null) return;
+            var s = _statusChart.Series["status"];
+            s.Points.Clear();
+            AddStatusSlice(s, "WIP",      _cntWip, cOrange);
+            AddStatusSlice(s, "Released", _cntRel, cGreen);
+            AddStatusSlice(s, "Locked",   _cntLck, cMaroon);
+            AddStatusSlice(s, "Obsolete", _cntObs, StatusColor("Obsolete"));
+        }
+
+        private void AddStatusSlice(Series s, string name, int val, Color c)
+        {
+            if (val <= 0) return;               // omit empty statuses
+            int i = s.Points.AddXY(name, val);
+            s.Points[i].Color = c;
+            s.Points[i].LegendText = name + " (" + val + ")";
+            s.Points[i].ToolTip = name + ": " + val;
         }
 
         // Whole-vault counts are invariant under filtering, so compute them ONCE
