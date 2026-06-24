@@ -391,15 +391,54 @@ namespace PDMLite
 
         // Write one calculated field to the active config, appending a unit
         // suffix when given. Skips a blank value so a missing cut-list property
-        // never erases a previously-filled figure.
+        // never erases a previously-filled figure. The numeric value is
+        // CANONICALISED to InvariantCulture (the repo-wide rule — cf. AutoFillWeight
+        // / FixDateFormats): SOLIDWORKS formats a resolved cut-list value in the
+        // machine/document locale, so a comma-decimal seat would otherwise stamp
+        // "6,012 in". A value we can't parse as a number (e.g. a feet-and-inches
+        // compound string, or one carrying embedded text) is written RAW with NO
+        // suffix — never mis-labelled.
         private static void WriteCalcField(ModelDoc2 doc, string prop,
             string value, string unitSuffix)
         {
             if (string.IsNullOrWhiteSpace(value)) return;
             string clean = value.Trim();
-            string toWrite = string.IsNullOrEmpty(unitSuffix)
-                ? clean : clean + " " + unitSuffix;
+            decimal d;
+            string toWrite;
+            if (TryNum(clean, out d))
+            {
+                string num = d.ToString(System.Globalization.CultureInfo.InvariantCulture);
+                toWrite = string.IsNullOrEmpty(unitSuffix) ? num : num + " " + unitSuffix;
+            }
+            else
+            {
+                // Not a plain number — keep it as-is, unlabelled, rather than
+                // risk a mis-labelled compound value.
+                toWrite = clean;
+            }
             SetProperty(doc, prop, toWrite);
+        }
+
+        // Parse a SOLIDWORKS resolved cut-list value as a decimal. SW formats it
+        // in the machine/document locale, so try InvariantCulture FIRST (the
+        // common bare/en case and our own already-invariant sums) then the
+        // current culture (a comma-decimal seat). NumberStyles.Float — NOT Any —
+        // so a thousands separator is never silently accepted ("16,964" must not
+        // become 16964). decimal (not double) avoids binary round-off so the
+        // value re-emits with the same digits SW showed. Never throws.
+        private static bool TryNum(string s, out decimal d)
+        {
+            d = 0m;
+            if (string.IsNullOrWhiteSpace(s)) return false;
+            try
+            {
+                var fl = System.Globalization.NumberStyles.Float;
+                return decimal.TryParse(s, fl,
+                           System.Globalization.CultureInfo.InvariantCulture, out d)
+                    || decimal.TryParse(s, fl,
+                           System.Globalization.CultureInfo.CurrentCulture, out d);
+            }
+            catch { return false; }
         }
 
         // Short suffix for the document's LINEAR unit (cut-list evaluated values
@@ -517,18 +556,14 @@ namespace PDMLite
                         string outerStr = "", innerStr = "";
                         try { string a, r; cpm.Get4("Cutting Length-Outer", false, out a, out r); outerStr = r ?? ""; } catch { }
                         try { string a, r; cpm.Get4("Cutting Length-Inner", false, out a, out r); innerStr = r ?? ""; } catch { }
-                        double outer, inner;
-                        if (double.TryParse(outerStr,
-                                System.Globalization.NumberStyles.Any,
-                                System.Globalization.CultureInfo.InvariantCulture,
-                                out outer))
+                        decimal outer, inner;
+                        if (TryNum(outerStr, out outer))
                         {
-                            if (!double.TryParse(innerStr,
-                                    System.Globalization.NumberStyles.Any,
-                                    System.Globalization.CultureInfo.InvariantCulture,
-                                    out inner))
-                                inner = 0;
-                            v.Cut = (outer + inner).ToString("0.###",
+                            if (!TryNum(innerStr, out inner))
+                                inner = 0m;
+                            // Emit InvariantCulture; WriteCalcField re-canonicalises
+                            // and labels it (idempotent on an invariant number).
+                            v.Cut = (outer + inner).ToString(
                                 System.Globalization.CultureInfo.InvariantCulture);
                         }
                     }
