@@ -1404,13 +1404,23 @@ namespace PDMLite
                      + _btnExport.Width + gap + _btnClear.Width
                      + gap + _btnAudit.Width;
 
+            // Natural minimum width of the count strip (sum of the 8 labels + the
+            // tightest S(6) gaps). Folded into 'widest' below so the chart hides /
+            // centerW shrinks if the counts would otherwise overflow the control row
+            // (realistic at large-vault scale: "Total: 99999" … "Stale WIP: 999").
+            int nCounts = _countLabels != null ? _countLabels.Length : 0;
+            int countsSumW = 0;
+            if (_countLabels != null)
+                foreach (var l in _countLabels) countsSumW += l.Width;
+            int countsMinW = countsSumW + Math.Max(0, nCounts - 1) * S(6);
+
             // The status doughnut takes a RESERVED right-hand COLUMN; the control
             // row / counts / KPI / hint are centred in the REMAINING width (centerW).
-            // The counts are JUSTIFIED across the control-row width (= rowW), so they
-            // never extend past it — rowW already bounds the content. Show the chart
-            // only when its column fits without cramping the content.
+            // The counts JUSTIFY across the control-row width when they fit, so the
+            // chart guard bounds them by max(rowW, their natural width).
             int widest = rowW;
-            if (_kpiPanel != null)     widest = Math.Max(widest, _kpiPanel.Width);
+            if (_kpiPanel != null) widest = Math.Max(widest, _kpiPanel.Width);
+            widest = Math.Max(widest, countsMinW);
 
             int centerW = panelW;
             if (_statusChart != null)
@@ -1438,23 +1448,33 @@ namespace PDMLite
             _btnAudit.Left   = _btnClear.Right + gap;
 
             // JUSTIFY the count quick-filters across the SAME span as the control
-            // row above (search.Left → btnAudit.Right), space-between: the first
-            // sits at the left edge, the last's right edge at the right edge, with
-            // equal gaps. So the strip lines up with the row above it at any width.
-            if (_countLabels != null && _countLabels.Length > 0)
+            // row above (search.Left → btnAudit.Right), space-between: first flush
+            // left, last flush right, equal gaps — so the strip lines up with the
+            // row above at any width. If the labels can't fit that span (large-vault
+            // counts), centre the natural-width strip in centerW instead (the chart
+            // is already hidden / centerW widened via 'widest'), so they never spill
+            // into the reserved chart column.
+            if (nCounts > 0)
             {
                 int left = _search.Left;
                 int right = _btnAudit.Right;
-                int sumW = 0;
-                foreach (var l in _countLabels) sumW += l.Width;
-                int n = _countLabels.Length;
-                int gapC = n > 1 ? Math.Max(S(6), (right - left - sumW) / (n - 1)) : 0;
-                int cx = left;
-                foreach (var l in _countLabels)
+                bool fits = countsMinW <= right - left;
+                int gapC = fits
+                    ? (nCounts > 1 ? (right - left - countsSumW) / (nCounts - 1) : 0)
+                    : S(6);
+                int cx = fits ? left
+                              : Math.Max(S(14), (centerW - countsMinW) / 2);
+                for (int i = 0; i < nCounts; i++)
                 {
-                    l.Left = cx;
-                    cx += l.Width + gapC;
+                    _countLabels[i].Left = cx;
+                    cx += _countLabels[i].Width + gapC;
                 }
+                // Land the LAST count's right edge EXACTLY on btnAudit.Right (the
+                // strip must span to the Audit Report button) — absorbs the gap
+                // integer-division remainder; only in the fits case.
+                if (fits)
+                    _countLabels[nCounts - 1].Left =
+                        right - _countLabels[nCounts - 1].Width;
             }
 
             if (_kpiPanel != null)
