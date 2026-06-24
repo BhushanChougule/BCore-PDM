@@ -1225,9 +1225,11 @@ namespace PDMLite
                     "BCore PDM", MessageBoxButtons.OK, MessageBoxIcon.Information);
                 return;
             }
-            // Trim the white margin so the model fills the popup too; may return
-            // `full` itself (nothing to trim) — dispose only a NEW crop.
-            Image shown = CropToContent(full);
+            // NOTE: the large popup shows the FULL preview (NOT CropToContent) —
+            // SOLIDWORKS already frames the model centred with even margins, so
+            // the natural whitespace reads cleaner and more uniform at this size.
+            // The tight crop is reserved for the small card tiles, where every
+            // pixel counts.
             try
             {
                 using (var f = new Form())
@@ -1238,12 +1240,12 @@ namespace PDMLite
                     f.StartPosition = FormStartPosition.CenterScreen;
                     f.BackColor = Color.White;
                     f.ShowInTaskbar = false;
-                    int w = Math.Min(Math.Max(shown.Width, S(320)), S(900));
-                    int h = Math.Min(Math.Max(shown.Height, S(320)), S(700));
+                    int w = Math.Min(Math.Max(full.Width, S(320)), S(900));
+                    int h = Math.Min(Math.Max(full.Height, S(320)), S(700));
                     f.ClientSize = new Size(w, h);
                     pb.Dock = DockStyle.Fill;
                     pb.SizeMode = PictureBoxSizeMode.Zoom;
-                    pb.Image = shown; // PictureBox does not own/dispose its Image
+                    pb.Image = full; // PictureBox does not own/dispose its Image
                     pb.Cursor = Cursors.Hand;
                     f.Controls.Add(pb);
                     // Esc closes (KeyPreview so the form sees the key before the
@@ -1256,11 +1258,7 @@ namespace PDMLite
                     f.ShowDialog(this);
                 }
             }
-            finally
-            {
-                if (shown != full) shown.Dispose();
-                full.Dispose();
-            }
+            finally { full.Dispose(); }
         }
 
         private void OpenFile(string filePath)
