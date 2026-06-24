@@ -522,7 +522,12 @@ namespace PDMLite
 
                 string dateStr = "—";
                 bool overdue = false;
-                if (DateTime.TryParse(req.RequestDate, out DateTime dt))
+                // RequestDate is stored as DateTime.Now.ToString("o") (ISO-8601
+                // roundtrip) — parse it invariant + RoundtripKind, matching the
+                // dashboard's oldest-request parse and the project's culture rule.
+                if (DateTime.TryParse(req.RequestDate,
+                        System.Globalization.CultureInfo.InvariantCulture,
+                        System.Globalization.DateTimeStyles.RoundtripKind, out DateTime dt))
                 {
                     // MM/dd like everywhere else — the card rendered dd/MM,
                     // contradicting the project-wide MM/dd/yyyy convention.

@@ -418,10 +418,20 @@ namespace PDMLite
             // it has the full panel height for the doughnut + 3-entry legend (the
             // shorter control-row→hint band clipped the last legend entry); still
             // adds NO panel height.
-            _chartFont = new Font("Segoe UI", 3.0f * _scale);
-            _statusChart = BuildStatusChart(S(10),
-                hintY + (int)_lblHint.Font.GetHeight());
-            _topPanel.Controls.Add(_statusChart);
+            // NON-FATAL: BuildStatusChart references System.Windows.Forms.Data-
+            // Visualization (in-box on .NET 4.8, so always present in practice). If
+            // that assembly ever fails to load, degrade to NO chart rather than
+            // letting the exception propagate onto SOLIDWORKS' message loop and
+            // break the whole dashboard (_statusChart stays null; UpdateStatusChart
+            // and LayoutTopControls both null-guard it).
+            try
+            {
+                _chartFont = new Font("Segoe UI", 3.0f * _scale);
+                _statusChart = BuildStatusChart(S(10),
+                    hintY + (int)_lblHint.Font.GetHeight());
+                _topPanel.Controls.Add(_statusChart);
+            }
+            catch { _statusChart = null; }
 
             // Tighten the panel to the hint so the grid sits right below it.
             _topPanel.Height = hintY + (int)_lblHint.Font.GetHeight() + S(8);
@@ -1423,17 +1433,18 @@ namespace PDMLite
 
             // Showing + hint share one line, centred together as a pair in centerW;
             // the smaller hint is vertically centred against the taller Showing.
+            // Only the hint's Top is adjusted — _lblShowing.Top is left at its build
+            // position (hintY) so there's no read-then-write of the same field (and
+            // hence no drift if the labels' heights were ever to invert).
             if (_lblShowing != null && _lblHint != null)
             {
                 int gapSH = S(20);
-                int baseY = _lblShowing.Top;   // = hintY from Build
                 int lineH = Math.Max(_lblShowing.Height, _lblHint.Height);
                 int pairW = _lblShowing.Width + gapSH + _lblHint.Width;
                 int pairLeft = Math.Max(S(14), (centerW - pairW) / 2);
                 _lblShowing.Left = pairLeft;
-                _lblShowing.Top  = baseY + (lineH - _lblShowing.Height) / 2;
                 _lblHint.Left    = _lblShowing.Right + gapSH;
-                _lblHint.Top     = baseY + (lineH - _lblHint.Height) / 2;
+                _lblHint.Top     = _lblShowing.Top + (lineH - _lblHint.Height) / 2;
             }
         }
 
@@ -1444,7 +1455,13 @@ namespace PDMLite
             var chart = new Chart
             {
                 Width = S(180),
-                Height = Math.Max(S(120), bottomY - topY),
+                // Height = exactly the title→hint band. A fixed floor here (e.g.
+                // Math.Max(S(120), …)) is DECOUPLED from _topPanel.Height (which is
+                // derived from the hint font), so at DPIs where the band < the floor
+                // the chart grew taller than the panel and the bottom-docked legend
+                // clipped under the grid. The band is always large (title row →
+                // hint) and the panel contains it with an S(8) margin, so honour it.
+                Height = Math.Max(S(40), bottomY - topY),
                 Top = topY,
                 BackColor = cBg,
                 AntiAliasing = AntiAliasingStyles.All,
@@ -1477,12 +1494,16 @@ namespace PDMLite
         private void UpdateStatusChart()
         {
             if (_statusChart == null) return;
-            var s = _statusChart.Series["status"];
-            s.Points.Clear();
-            AddStatusSlice(s, "WIP",      _cntWip, cOrange);
-            AddStatusSlice(s, "Released", _cntRel, cGreen);
-            AddStatusSlice(s, "Locked",   _cntLck, cMaroon);
-            AddStatusSlice(s, "Obsolete", _cntObs, StatusColor("Obsolete"));
+            try
+            {
+                var s = _statusChart.Series["status"];
+                s.Points.Clear();
+                AddStatusSlice(s, "WIP",      _cntWip, cOrange);
+                AddStatusSlice(s, "Released", _cntRel, cGreen);
+                AddStatusSlice(s, "Locked",   _cntLck, cMaroon);
+                AddStatusSlice(s, "Obsolete", _cntObs, StatusColor("Obsolete"));
+            }
+            catch { /* charting is non-essential — never break a load over it */ }
         }
 
         private void AddStatusSlice(Series s, string name, int val, Color c)
