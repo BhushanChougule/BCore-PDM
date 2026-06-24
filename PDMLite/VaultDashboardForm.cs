@@ -662,7 +662,7 @@ namespace PDMLite
                 foreach (var r in pending)
                 {
                     DateTime d;
-                    if (DateTime.TryParse(r.RequestDate, null,
+                    if (DateTime.TryParse(r.RequestDate, CultureInfo.InvariantCulture,
                             DateTimeStyles.RoundtripKind, out d))
                     {
                         int age = (int)(DateTime.Now.Date - d.Date).TotalDays;
