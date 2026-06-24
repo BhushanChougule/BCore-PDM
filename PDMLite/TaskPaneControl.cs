@@ -1286,8 +1286,9 @@ namespace PDMLite
 
             private static string FilePathOf()
             {
-                string dir = Path.Combine(Environment.GetFolderPath(
-                    Environment.SpecialFolder.LocalApplicationData), "BCorePDM");
+                string dir = Path.Combine(System.Environment.GetFolderPath(
+                    System.Environment.SpecialFolder.LocalApplicationData),
+                    "BCorePDM");
                 return Path.Combine(dir, "recent.txt");
             }
 
