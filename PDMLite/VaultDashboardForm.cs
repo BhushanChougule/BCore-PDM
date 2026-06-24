@@ -68,7 +68,7 @@ namespace PDMLite
         // Obsolete/Broken Refs/Stale WIP act as quick filters) + a plain
         // showing/page label.
         private FlowLayoutPanel _summaryPanel;
-        private Label _lblTotal, _lblWip, _lblReleased, _lblLocked, _lblObsolete, _lblBroken, _lblStale, _lblShowing;
+        private Label _lblTotal, _lblMine, _lblWip, _lblReleased, _lblLocked, _lblObsolete, _lblBroken, _lblStale, _lblShowing;
         private Font _summaryFont;       // base (bold)
         private Font _summaryFontActive; // active quick-filter (bold + underline)
         private ToolTip _summaryTip;     // shared tip for the clickable counts
@@ -76,6 +76,10 @@ namespace PDMLite
         // (HasBrokenRefs is a flag, not a column, so it can't live in _colFilters).
         private bool _brokenRefsOnly = false;
         private bool _staleWipOnly = false;  // "Stale WIP" quick-filter (WipDays > StaleWipDays)
+        // "My Work" lens: files this user last saved (ModifiedBy == me). The #1 PDM
+        // dashboard lens. A shortcut over the Modified By column filter, so it reuses
+        // _colFilters[ColModifiedBy] rather than a separate flag.
+        private readonly string _me = (Environment.UserName ?? "").Trim();
         private Label _lblHint;       // faint discoverability footer in the top panel
         private DateTime _loadedAt;   // snapshot time, shown in the summary as "as of HH:mm"
         // KPI tiles (read-only, boxed) below the clickable quick-filter strip.
@@ -98,7 +102,7 @@ namespace PDMLite
         private int _kpiOpenReqCount;     // pending requests (whole vault, per load)
         // Whole-vault counts — invariant under filtering, so cached once per load
         // (UpdateSummary used to re-scan _all 4× on every keystroke / page click).
-        private int _cntWip, _cntRel, _cntLck, _cntObs, _cntBrk, _cntStale;
+        private int _cntWip, _cntRel, _cntLck, _cntObs, _cntBrk, _cntStale, _cntMine;
         private const int ColRev = 4;        // "Rev" column index
         private const int ColModifiedBy = 5; // first of the metadata columns (5..9)
         private const int ColWipDays = 9; // appended "WIP Days" column index
@@ -335,6 +339,7 @@ namespace PDMLite
                 Location = new Point(S(14), summaryY)
             };
             _lblTotal    = MakeCountLabel("All files (clear filters)", () => ClearAllFilters());
+            _lblMine     = MakeCountLabel("My Work — files I last saved (" + _me + ")", () => ToggleMineFilter());
             _lblWip      = MakeCountLabel("Filter to WIP",      () => ToggleStatusFilter("WIP"));
             _lblReleased = MakeCountLabel("Filter to Released", () => ToggleStatusFilter("Released"));
             _lblLocked   = MakeCountLabel("Filter to Locked",   () => ToggleStatusFilter("Locked"));
@@ -350,7 +355,7 @@ namespace PDMLite
             };
             _summaryPanel.Controls.AddRange(new Control[]
             {
-                _lblTotal, _lblWip, _lblReleased, _lblLocked, _lblObsolete,
+                _lblTotal, _lblMine, _lblWip, _lblReleased, _lblLocked, _lblObsolete,
                 _lblBroken, _lblStale, _lblShowing
             });
             _topPanel.Controls.Add(_summaryPanel);
@@ -1354,7 +1359,7 @@ namespace PDMLite
         // per load (Refresh) instead of re-scanning _all on every keystroke.
         private void ComputeVaultCounts()
         {
-            _cntWip = _cntRel = _cntLck = _cntObs = _cntBrk = _cntStale = 0;
+            _cntWip = _cntRel = _cntLck = _cntObs = _cntBrk = _cntStale = _cntMine = 0;
             // Released (7d) is a WHOLE-VAULT throughput metric (release velocity),
             // so it is counted here in the once-per-load _all scan — NOT over the
             // filtered _view. A file released in the window still counts even if a
@@ -1373,6 +1378,7 @@ namespace PDMLite
                 else if (Eq(f.Status, "Obsolete"))  _cntObs++;
                 if (f.HasBrokenRefs)                _cntBrk++;
                 if (WipDays(f) > StaleWipDays)       _cntStale++; // WipDays is -1 for non-WIP
+                if (_me.Length > 0 && Eq(f.ModifiedBy ?? "", _me)) _cntMine++;
                 if (f.ReleasedDate != DateTime.MinValue)
                 {
                     if (f.ReleasedDate >= cutoff7)        rel7++;
@@ -1386,6 +1392,7 @@ namespace PDMLite
         private void UpdateSummary(int showing)
         {
             _lblTotal.Text    = $"Total: {_all.Count}";
+            _lblMine.Text     = $"Mine: {_cntMine}";
             _lblWip.Text      = $"WIP: {_cntWip}";
             _lblReleased.Text = $"Released: {_cntRel}";
             _lblLocked.Text   = $"Locked: {_cntLck}";
@@ -1401,6 +1408,7 @@ namespace PDMLite
                 $" · as of {_loadedAt:HH:mm})";
 
             // Underline the active quick-filter so it's obvious what's applied.
+            SetActive(_lblMine,     IsMineFilter());
             SetActive(_lblWip,      IsStatusFilter("WIP"));
             SetActive(_lblReleased, IsStatusFilter("Released"));
             SetActive(_lblLocked,   IsStatusFilter("Locked"));
@@ -1494,6 +1502,30 @@ namespace PDMLite
             }
             ApplyFilter();
             _grid.Invalidate(); // repaint the Status header funnel glyph
+        }
+
+        // Is the Modified By column filtered to EXACTLY this user (the "Mine" lens)?
+        private bool IsMineFilter()
+        {
+            HashSet<string> set;
+            return _me.Length > 0 && _colFilters.TryGetValue(ColModifiedBy, out set)
+                && set.Count == 1 && set.Contains(_me);
+        }
+
+        // Click "Mine" → toggle the Modified By column filter to the current user.
+        // Reuses _colFilters[ColModifiedBy] (so the Modified By header funnel lights
+        // up too), exactly like the Status quick-filters share _colFilters[3].
+        private void ToggleMineFilter()
+        {
+            if (IsMineFilter()) _colFilters.Remove(ColModifiedBy);
+            else
+            {
+                if (_cntMine == 0) return;   // zero-count link is inert (blanks grid)
+                _colFilters[ColModifiedBy] = new HashSet<string>(
+                    new[] { _me }, StringComparer.OrdinalIgnoreCase);
+            }
+            ApplyFilter();
+            _grid.Invalidate(); // repaint the Modified By header funnel glyph
         }
 
         // Click "Broken Refs" → toggle the broken-references-only view.
