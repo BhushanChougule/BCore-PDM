@@ -355,17 +355,10 @@ namespace PDMLite
             _lblObsolete = MakeCountLabel("Filter to Obsolete", () => ToggleStatusFilter("Obsolete"));
             _lblBroken   = MakeCountLabel("Show only broken references", () => ToggleBrokenFilter());
             _lblStale    = MakeCountLabel("Show only WIP files not saved in over " + StaleWipDays + " days (stuck/neglected work)", () => ToggleStaleFilter());
-            _lblShowing  = new Label
-            {
-                Font = _summaryFont,
-                ForeColor = cTextGray,
-                AutoSize = true,
-                Margin = new Padding(S(6), 0, 0, 0)
-            };
             _summaryPanel.Controls.AddRange(new Control[]
             {
                 _lblTotal, _lblMine, _lblWip, _lblReleased, _lblLocked, _lblObsolete,
-                _lblBroken, _lblStale, _lblShowing
+                _lblBroken, _lblStale
             });
             _topPanel.Controls.Add(_summaryPanel);
 
@@ -392,10 +385,21 @@ namespace PDMLite
             { _kpiAvgAge, _kpiReleased7d, _kpiOpenReq, _kpiBroken });
             _topPanel.Controls.Add(_kpiPanel);
 
-            // Faint discoverability footer below the KPI tiles — new users won't
-            // guess the right-click menu / column-resize / clickable counts. The
-            // KPI tile height ≈ font height + padding (S(3)×2) + border (2px).
-            int hintY = kpiY + (int)_kpiFont.GetHeight() + S(10);
+            // Showing/page status on its OWN line (was in the count strip, which
+            // made the strip ~full-width and left no gutter for the status chart).
+            int showingY = kpiY + (int)_kpiFont.GetHeight() + S(10);
+            _lblShowing = new Label
+            {
+                Font = _summaryFont,
+                ForeColor = cTextGray,
+                AutoSize = true,
+                Location = new Point(S(14), showingY)
+            };
+            _topPanel.Controls.Add(_lblShowing);
+
+            // Faint discoverability footer below the showing line — new users won't
+            // guess the right-click menu / column-resize / clickable counts.
+            int hintY = showingY + (int)_summaryFont.GetHeight() + S(6);
             _lblHint = new Label
             {
                 Text = "Double-click or right-click a row to open  ·  Drag a column edge to "
@@ -407,9 +411,10 @@ namespace PDMLite
             };
             _topPanel.Controls.Add(_lblHint);
 
-            // Status-distribution doughnut, parked in the top panel's RIGHT GUTTER.
-            // It spans the control-row → hint band vertically, so it adds NO height
-            // to the panel; Left + Visible are set responsively in LayoutTopControls.
+            // Status-distribution doughnut, parked in the top panel's RIGHT COLUMN.
+            // LayoutTopControls reserves a right-hand column for it and centres the
+            // content in the remaining width; it spans the control-row → hint band
+            // vertically, so it adds NO height to the panel.
             _chartFont = new Font("Segoe UI", 3.0f * _scale);
             _statusChart = BuildStatusChart(rowY,
                 hintY + (int)_lblHint.Font.GetHeight());
@@ -1367,13 +1372,36 @@ namespace PDMLite
             int panelW = _topPanel.ClientSize.Width;
             int gap = S(10);
 
-            if (_title != null)
-                _title.Left = Math.Max(S(14), (panelW - _title.Width) / 2);
-
             int rowW = _search.Width + gap + _btnRefresh.Width + gap
                      + _btnExport.Width + gap + _btnClear.Width
                      + gap + _btnAudit.Width;
-            int startX = Math.Max(S(14), (panelW - rowW) / 2);
+
+            // The status doughnut takes a RESERVED right-hand COLUMN; the title /
+            // control row / counts / KPI / showing / hint are then centred in the
+            // REMAINING width (centerW). Show the chart only when that leaves the
+            // content uncramped — else hide it and centre across the full width.
+            int widest = rowW;
+            if (_summaryPanel != null) widest = Math.Max(widest, _summaryPanel.Width);
+            if (_kpiPanel != null)     widest = Math.Max(widest, _kpiPanel.Width);
+            if (_title != null)        widest = Math.Max(widest, _title.Width);
+
+            int centerW = panelW;
+            if (_statusChart != null)
+            {
+                int reserve = _statusChart.Width + S(28);
+                bool room = (panelW - reserve) >= widest + S(20);
+                _statusChart.Visible = room;
+                if (room)
+                {
+                    centerW = panelW - reserve;
+                    _statusChart.Left = panelW - _statusChart.Width - S(14);
+                }
+            }
+
+            if (_title != null)
+                _title.Left = Math.Max(S(14), (centerW - _title.Width) / 2);
+
+            int startX = Math.Max(S(14), (centerW - rowW) / 2);
             _search.Left     = startX;
             _btnRefresh.Left = _search.Right + gap;
             _btnExport.Left  = _btnRefresh.Right + gap;
@@ -1382,30 +1410,18 @@ namespace PDMLite
 
             if (_summaryPanel != null)
                 _summaryPanel.Left = Math.Max(S(14),
-                    (panelW - _summaryPanel.Width) / 2);
+                    (centerW - _summaryPanel.Width) / 2);
 
             if (_kpiPanel != null)
                 _kpiPanel.Left = Math.Max(S(14),
-                    (panelW - _kpiPanel.Width) / 2);
+                    (centerW - _kpiPanel.Width) / 2);
+
+            if (_lblShowing != null)
+                _lblShowing.Left = Math.Max(S(14),
+                    (centerW - _lblShowing.Width) / 2);
 
             if (_lblHint != null)
-                _lblHint.Left = Math.Max(S(14), (panelW - _lblHint.Width) / 2);
-
-            // Status doughnut: park it in the right gutter, but only when there's
-            // room beside the centred block — otherwise hide it (responsive) so it
-            // never overlaps the title/counts/KPI on a narrow form / high DPI.
-            if (_statusChart != null)
-            {
-                int widest = Math.Max(_title != null ? _title.Width : 0,
-                             Math.Max(rowW,
-                             Math.Max(_summaryPanel != null ? _summaryPanel.Width : 0,
-                                      _kpiPanel != null ? _kpiPanel.Width : 0)));
-                int gutter = (panelW - widest) / 2;   // empty space each side
-                bool room = gutter >= _statusChart.Width + S(20);
-                _statusChart.Visible = room;
-                if (room)
-                    _statusChart.Left = panelW - _statusChart.Width - S(14);
-            }
+                _lblHint.Left = Math.Max(S(14), (centerW - _lblHint.Width) / 2);
         }
 
         // Build the status-distribution doughnut (MS Chart, built into .NET 4.8 —
