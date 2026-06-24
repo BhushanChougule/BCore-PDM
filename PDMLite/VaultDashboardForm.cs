@@ -413,10 +413,13 @@ namespace PDMLite
 
             // Status-distribution doughnut, parked in the top panel's RIGHT COLUMN.
             // LayoutTopControls reserves a right-hand column for it and centres the
-            // content in the remaining width; it spans the control-row → hint band
-            // vertically, so it adds NO height to the panel.
+            // content in the remaining width. It spans from the TITLE row (S(10),
+            // the empty right gutter clears the centred title) down to the hint, so
+            // it has the full panel height for the doughnut + 3-entry legend (the
+            // shorter control-row→hint band clipped the last legend entry); still
+            // adds NO panel height.
             _chartFont = new Font("Segoe UI", 3.0f * _scale);
-            _statusChart = BuildStatusChart(rowY,
+            _statusChart = BuildStatusChart(S(10),
                 hintY + (int)_lblHint.Font.GetHeight());
             _topPanel.Controls.Add(_statusChart);
 
