@@ -838,16 +838,17 @@ namespace PDMLite
             }
 
             int barW = S(15);
-            // Taller card: the FILE NAME gets its own FULL-WIDTH top row (so a
-            // long name is never crowded by the preview), then the part number
-            // and revision each get their own row beside the preview.
-            int cardH = S(98);
+            // Taller card: the FILE NAME and the DESCRIPTION each get their own
+            // FULL-WIDTH row (so a long name/description is never crowded by the
+            // preview); the part number and revision sit beside the preview.
+            int cardH = S(104);
             int contentLeft = barW + S(6);
-            // Square preview tile on the RIGHT, dropped BELOW the full-width file
-            // name row so it spans the part-no / rev / description rows only.
-            int thumbW = S(44);
+            // Square preview tile on the RIGHT, between the full-width file-name
+            // row above and the full-width description row below — so it spans
+            // the part-no / rev rows ONLY and crowds neither full-width row.
+            int thumbW = S(40);
             int thumbX = rw - thumbW - S(6);
-            int thumbY = S(27);
+            int thumbY = S(25);
             // The file name + description use the FULL width; the part no / rev
             // rows sit to the LEFT of the preview (textW stops before it).
             int fullW = rw - contentLeft - S(6);
@@ -982,9 +983,9 @@ namespace PDMLite
                                 ? "(no description)" : g.Description),
                     Font = _fReg33,
                     ForeColor = obsoleteWithRepl ? cMaroon : cTextLight,
-                    Location = new Point(contentLeft, S(59)),
+                    Location = new Point(contentLeft, S(65)),
                     AutoSize = false,
-                    Width = textW,
+                    Width = fullW,
                     Height = S(14),
                     AutoEllipsis = true
                 });
@@ -994,7 +995,7 @@ namespace PDMLite
                 // thumbnail and the text rows, at their original size.
                 int gap = S(4);
                 int btnW = (btnFullW - gap) / 2;
-                int btnY = S(76);
+                int btnY = S(82);
                 int btnH = S(18);
 
                 string partLabel = g.ModelExt == ".sldasm"
