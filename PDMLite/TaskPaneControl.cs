@@ -839,11 +839,17 @@ namespace PDMLite
 
             int barW = S(15);
             int cardH = S(74);
-            // Thumbnail tile sits between the status bar and the text content.
-            int thumbW = S(52);
+            // A SMALL SQUARE thumbnail sits at the top-left of the content area:
+            // the text wraps to its right and the Open buttons span the FULL
+            // width BELOW it, so the preview never squeezes the text or buttons.
+            int thumbW = S(40);
             int thumbX = barW + S(4);
             int contentLeft = thumbX + thumbW + S(6);
             int contentW = rw - contentLeft - S(3);
+            // Buttons run the full card width under the thumbnail (their original
+            // size — anchored to the status bar, NOT to the narrower text column).
+            int btnLeft = thumbX;
+            int btnFullW = rw - btnLeft - S(3);
 
             foreach (SearchGroup g in cards)
             {
@@ -900,9 +906,9 @@ namespace PDMLite
                 string thumbCfg = configName;
                 var thumb = new ThumbPanel(() => GetThumbnail(thumbPath, thumbCfg))
                 {
-                    Location = new Point(thumbX, S(8)),
+                    Location = new Point(thumbX, S(6)),
                     Width = thumbW,
-                    Height = cardH - S(16),
+                    Height = thumbW, // square, top-aligned with the text block
                     BackColor = cCard
                 };
                 thumb.Click += (s, e) => ShowLargePreview(thumbPath, thumbCfg);
@@ -965,8 +971,10 @@ namespace PDMLite
                 });
 
                 // ── Two buttons: Open Part/Assembly + Open Drawing ────────
+                // Full width under the thumbnail (btnLeft/btnFullW), not the
+                // narrower text column, so the buttons keep their original size.
                 int gap = S(4);
-                int btnW = (contentW - gap) / 2;
+                int btnW = (btnFullW - gap) / 2;
                 int btnY = S(52);
                 int btnH = S(18);
 
@@ -978,7 +986,7 @@ namespace PDMLite
                     Font = _fBold34,
                     Width = btnW,
                     Height = btnH,
-                    Location = new Point(contentLeft, btnY),
+                    Location = new Point(btnLeft, btnY),
                     BackColor = hasModel ? cBrand : cTextLight,
                     ForeColor = Color.White,
                     FlatStyle = FlatStyle.Flat,
@@ -996,7 +1004,7 @@ namespace PDMLite
                     Font = _fBold34,
                     Width = btnW,
                     Height = btnH,
-                    Location = new Point(contentLeft + btnW + gap, btnY),
+                    Location = new Point(btnLeft + btnW + gap, btnY),
                     BackColor = cBrandDark,
                     ForeColor = Color.White,
                     FlatStyle = FlatStyle.Flat,
