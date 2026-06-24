@@ -8,6 +8,20 @@ A fully custom SOLIDWORKS PDM replacement system built in C# .NET Framework 4.8.
 
 Named BCore PDM (BC = bchougule initials). Replaces expensive SOLIDWORKS PDM Professional.
 
+\### Product Vision / Scope — IMPORTANT
+
+This is NOT a one-shop internal tool. It is being built as a GENERAL-PURPOSE, COMMERCIAL-GRADE PDM product that may be sold/licensed to other companies. Richards-Wilcox (2 Masters, ~5-10 engineers) is the FIRST deployment / reference customer, NOT the ceiling. Design and review every feature accordingly:
+
+\- BUILD FOR GENERALITY, not for RW's habits. Any company-specific assumption (division letters/names, the two Master usernames, Mailgun sender, the revision alphabet, required property set) is a DEFAULT or CONFIG, never a hard-coded law — prefer config files (roles.config, email.config) and centralised constants over inline shop rules, so another company can adopt it without a code change. When you touch a shop-specific value, ask "would a different customer need this configurable?" and lean toward yes.
+
+\- BUILD FOR SCALE. The vault.xml/audit.csv design targets are 50-100k+ files and 10+ concurrent machines (the cross-machine lock, VirtualMode/paginated grids, capped searches, bounded column measuring, cached counts all exist for this) — a feature must not assume a tiny vault or a handful of users. New list/grid UIs follow the 20-row paginated VirtualMode pattern; new whole-vault scans must be O(once-per-load) or cheaper, never per-keystroke.
+
+\- BUILD FOR MULTI-TENANCY READINESS. Roles, licensing and "super-access" are designed to sit ABOVE the per-vault data (roles.config is ACL-protectable; the Owner role + offline signed license live in LICENSING.md, above Master, not in vault.xml). Don't bake RW-specific identity into logic.
+
+\- COMMERCIALISATION is a real future path (see LICENSING.md — offline signed license, Owner role, graduated expiry, obfuscation, Inno Setup installer, IP-ownership gate). It is DEFERRED until development is declared done, but DO NOT build anything that fights that design. Keep conventions centralised when you touch them anyway.
+
+\- The industry benchmark is the FULL feature set of SOLIDWORKS PDM Professional / Manage, Windchill, Teamcenter, Autodesk Vault, Aras — when adding/improving a feature, measure it against how those systems do it for a GENERAL audience, then fit it to BCore's model (this is the standing instruction behind the recurring "analyse how industry-standard PDM systems handle this" reviews).
+
 
 
 \## Solution Location
@@ -1176,9 +1190,13 @@ GetNextRevision() in VaultManager.cs handles this. CONTINUES PAST Z the ASME way
 
 \## Target Users
 
-Richards-Wilcox engineering team
+PRODUCT target: any engineering organisation running SOLIDWORKS that wants a PDM without the cost/complexity of SOLIDWORKS PDM Professional — small shops through mid-size teams, multiple sites on a shared network vault. Built as a general commercial product (see Product Vision / Scope at the top); the design targets (50-100k+ files, 10+ concurrent machines, DPI 100%–250%, configurable roles/email/divisions) are sized for that audience, not just the first customer.
 
-\- 2 Masters: bchougule, rkramarz
+FIRST deployment / reference customer (the concrete numbers the current UI + workflows are validated against — a baseline, NOT the ceiling):
+
+\- Richards-Wilcox engineering team
+
+\- 2 Masters: bchougule, rkramarz (configurable via roles.config / vault.xml — never hard-coded as the only Masters)
 
 \- \~5-10 engineers on 1080p (100% scaling) and 4K (250% scaling) machines
 
