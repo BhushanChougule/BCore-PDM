@@ -838,19 +838,20 @@ namespace PDMLite
             }
 
             int barW = S(15);
-            // Taller card: the FILE NAME and the DESCRIPTION each get their own
+            // Compact card: the FILE NAME and the DESCRIPTION each get their own
             // FULL-WIDTH row (so a long name/description is never crowded by the
-            // preview); the part number and revision sit beside the preview.
-            int cardH = S(104);
+            // preview); the part number and revision sit beside a SMALL preview.
+            int cardH = S(98);
             int contentLeft = barW + S(6);
-            // Square preview tile on the RIGHT, between the full-width file-name
-            // row above and the full-width description row below — so it spans
-            // the part-no / rev rows ONLY and crowds neither full-width row.
-            int thumbW = S(40);
+            // SMALL square preview tile on the RIGHT, beside the part-no + rev
+            // rows ONLY (between the full-width file-name row above and the
+            // full-width description row below) — keeps the card compact.
+            int thumbW = S(30);
             int thumbX = rw - thumbW - S(6);
-            int thumbY = S(25);
+            int thumbY = S(26);
             // The file name + description use the FULL width; the part no / rev
-            // rows sit to the LEFT of the preview (textW stops before it).
+            // rows sit to the LEFT of the preview (textW stops before it) and
+            // ELLIPSIS at the preview edge rather than vanishing when long.
             int fullW = rw - contentLeft - S(6);
             int textW = thumbX - contentLeft - S(6);
             int btnLeft = contentLeft;
@@ -946,7 +947,7 @@ namespace PDMLite
                                 ? "No Part No" : g.PartNumber,
                     Font = _fBold35,
                     ForeColor = cTextGray,
-                    Location = new Point(contentLeft, S(27)),
+                    Location = new Point(contentLeft, S(26)),
                     AutoSize = false,
                     Width = textW,
                     Height = S(14),
@@ -960,7 +961,7 @@ namespace PDMLite
                                 ? "" : "REV " + g.Revision,
                     Font = _fBold35,
                     ForeColor = cTextGray,
-                    Location = new Point(contentLeft, S(43)),
+                    Location = new Point(contentLeft, S(42)),
                     AutoSize = false,
                     Width = textW,
                     Height = S(14),
@@ -983,7 +984,7 @@ namespace PDMLite
                                 ? "(no description)" : g.Description),
                     Font = _fReg33,
                     ForeColor = obsoleteWithRepl ? cMaroon : cTextLight,
-                    Location = new Point(contentLeft, S(65)),
+                    Location = new Point(contentLeft, S(58)),
                     AutoSize = false,
                     Width = fullW,
                     Height = S(14),
@@ -995,7 +996,7 @@ namespace PDMLite
                 // thumbnail and the text rows, at their original size.
                 int gap = S(4);
                 int btnW = (btnFullW - gap) / 2;
-                int btnY = S(82);
+                int btnY = S(76);
                 int btnH = S(18);
 
                 string partLabel = g.ModelExt == ".sldasm"
@@ -1089,7 +1090,18 @@ namespace PDMLite
                     object pic = PDMLiteAddin.SwApp.GetPreviewBitmap(
                         filePath, config ?? "");
                     using (Image full = PictureConverter.ToImage(pic))
-                        if (full != null) thumb = ResizeToThumb(full, S(96));
+                    {
+                        if (full != null)
+                        {
+                            // Trim the white margin SOLIDWORKS bakes around the
+                            // preview FIRST so the model fills the small tile.
+                            // CropToContent may return `full` itself (nothing to
+                            // trim) — only dispose a NEW crop.
+                            Image cropped = CropToContent(full);
+                            try { thumb = ResizeToThumb(cropped, S(96)); }
+                            finally { if (cropped != full) cropped.Dispose(); }
+                        }
+                    }
                 }
             }
             catch { thumb = null; }
@@ -1126,6 +1138,74 @@ namespace PDMLite
             return bmp;
         }
 
+        // Trim the near-white (or transparent) border SOLIDWORKS bakes around a
+        // preview so the model FILLS the (small) tile instead of floating in
+        // white. Scans the bounding box of non-background pixels and returns a
+        // crop with a small margin. Returns the SOURCE unchanged when there is
+        // nothing to trim, the image is all background, or anything fails — so a
+        // caller must dispose the result ONLY when it differs from the source.
+        private static Image CropToContent(Image src)
+        {
+            if (src == null) return null;
+            Bitmap bmp = null;
+            bool ownBmp = false;
+            try
+            {
+                bmp = src as Bitmap;
+                if (bmp == null) { bmp = new Bitmap(src); ownBmp = true; }
+                int w = bmp.Width, h = bmp.Height;
+                if (w < 8 || h < 8) return src;
+
+                var data = bmp.LockBits(new Rectangle(0, 0, w, h),
+                    System.Drawing.Imaging.ImageLockMode.ReadOnly,
+                    System.Drawing.Imaging.PixelFormat.Format32bppArgb);
+                int stride = data.Stride;
+                byte[] buf = new byte[stride * h];
+                System.Runtime.InteropServices.Marshal.Copy(
+                    data.Scan0, buf, 0, buf.Length);
+                bmp.UnlockBits(data);
+
+                const int T = 244; // near-white cutoff (BGRA buffer)
+                int minX = w, minY = h, maxX = -1, maxY = -1;
+                for (int y = 0; y < h; y++)
+                {
+                    int row = y * stride;
+                    for (int x = 0; x < w; x++)
+                    {
+                        int i = row + (x << 2);
+                        bool bg = buf[i + 3] < 8 ||
+                            (buf[i] >= T && buf[i + 1] >= T && buf[i + 2] >= T);
+                        if (bg) continue;
+                        if (x < minX) minX = x;
+                        if (x > maxX) maxX = x;
+                        if (y < minY) minY = y;
+                        if (y > maxY) maxY = y;
+                    }
+                }
+                if (maxX < minX || maxY < minY) return src; // all background
+
+                // ~5% margin so the model is not flush against the tile edge.
+                int padX = Math.Max(1, (maxX - minX + 1) / 20);
+                int padY = Math.Max(1, (maxY - minY + 1) / 20);
+                minX = Math.Max(0, minX - padX);
+                minY = Math.Max(0, minY - padY);
+                maxX = Math.Min(w - 1, maxX + padX);
+                maxY = Math.Min(h - 1, maxY + padY);
+                int cw = maxX - minX + 1, ch = maxY - minY + 1;
+                if (cw >= w && ch >= h) return src; // nothing to trim
+                if (cw < 4 || ch < 4) return src;   // degenerate
+
+                var crop = new Bitmap(cw, ch,
+                    System.Drawing.Imaging.PixelFormat.Format32bppArgb);
+                using (var g = Graphics.FromImage(crop))
+                    g.DrawImage(bmp, new Rectangle(0, 0, cw, ch),
+                        new Rectangle(minX, minY, cw, ch), GraphicsUnit.Pixel);
+                return crop;
+            }
+            catch { return src; }
+            finally { if (ownBmp && bmp != null) bmp.Dispose(); }
+        }
+
         // Click a card thumbnail → show the full preview bitmap larger in a
         // modal. Re-extracts the un-resized preview; null → friendly info.
         private void ShowLargePreview(string filePath, string config)
@@ -1145,6 +1225,9 @@ namespace PDMLite
                     "BCore PDM", MessageBoxButtons.OK, MessageBoxIcon.Information);
                 return;
             }
+            // Trim the white margin so the model fills the popup too; may return
+            // `full` itself (nothing to trim) — dispose only a NEW crop.
+            Image shown = CropToContent(full);
             try
             {
                 using (var f = new Form())
@@ -1155,12 +1238,12 @@ namespace PDMLite
                     f.StartPosition = FormStartPosition.CenterScreen;
                     f.BackColor = Color.White;
                     f.ShowInTaskbar = false;
-                    int w = Math.Min(Math.Max(full.Width, S(320)), S(900));
-                    int h = Math.Min(Math.Max(full.Height, S(320)), S(700));
+                    int w = Math.Min(Math.Max(shown.Width, S(320)), S(900));
+                    int h = Math.Min(Math.Max(shown.Height, S(320)), S(700));
                     f.ClientSize = new Size(w, h);
                     pb.Dock = DockStyle.Fill;
                     pb.SizeMode = PictureBoxSizeMode.Zoom;
-                    pb.Image = full; // PictureBox does not own/dispose its Image
+                    pb.Image = shown; // PictureBox does not own/dispose its Image
                     pb.Cursor = Cursors.Hand;
                     f.Controls.Add(pb);
                     // Esc closes (KeyPreview so the form sees the key before the
@@ -1173,7 +1256,11 @@ namespace PDMLite
                     f.ShowDialog(this);
                 }
             }
-            finally { full.Dispose(); }
+            finally
+            {
+                if (shown != full) shown.Dispose();
+                full.Dispose();
+            }
         }
 
         private void OpenFile(string filePath)
