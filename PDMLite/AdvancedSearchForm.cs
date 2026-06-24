@@ -338,9 +338,11 @@ namespace PDMLite
 
             // ── Shared right-click menu for result cards (acts on _menuCard) ──
             _cardMenu = new ContextMenuStrip();
+            _cardMenu.Items.Add("Copy Part No", null, (s, e) => CardCopyPartNo());
             _cardMenu.Items.Add("Copy File Path", null, (s, e) => CardCopyPath());
             _cardMenu.Items.Add("Open Containing Folder", null,
                 (s, e) => CardOpenFolder());
+            _cardMenu.Items.Add(new ToolStripSeparator());
             _cardMenu.Items.Add("Where Used…", null, (s, e) => CardWhereUsed());
 
             // ── Live search wiring (debounced) ──────────────────────────────
@@ -821,6 +823,13 @@ namespace PDMLite
         }
 
         // ── Result card right-click actions (operate on _menuCard) ───────────
+        private void CardCopyPartNo()
+        {
+            if (_menuCard == null) return;
+            string pn = FirstNonBlank(_menuCard.PartNumber, _menuCard.DisplayName);
+            try { if (!string.IsNullOrEmpty(pn)) Clipboard.SetText(pn); } catch { }
+        }
+
         private void CardCopyPath()
         {
             if (_menuCard == null || string.IsNullOrEmpty(_menuCard.ModelPath))
@@ -1184,7 +1193,23 @@ namespace PDMLite
                     data.Scan0, buf, 0, buf.Length);
                 bmp.UnlockBits(data);
 
-                const int T = 244; // near-white cutoff (BGRA buffer)
+                // Detect the ACTUAL background colour from 8 border samples
+                // (corners + edge midpoints) rather than assuming white — some
+                // seats save a light-gray / gradient backdrop where a hardcoded
+                // white cutoff trims nothing. Per-channel MEDIAN is robust to a
+                // model that reaches one sample point. (BGRA buffer.)
+                int[] sx = { 2, w - 3, 2, w - 3, w / 2, w / 2, 2, w - 3 };
+                int[] sy = { 2, 2, h - 3, h - 3, 2, h - 3, h / 2, h / 2 };
+                byte[] sB = new byte[8], sG = new byte[8], sR = new byte[8];
+                for (int k = 0; k < 8; k++)
+                {
+                    int si = sy[k] * stride + (sx[k] << 2);
+                    sB[k] = buf[si]; sG[k] = buf[si + 1]; sR[k] = buf[si + 2];
+                }
+                Array.Sort(sB); Array.Sort(sG); Array.Sort(sR);
+                int bgB = sB[4], bgG = sG[4], bgR = sR[4]; // medians
+                const int TOL = 22; // per-channel distance that still counts as bg
+
                 int minX = w, minY = h, maxX = -1, maxY = -1;
                 for (int y = 0; y < h; y++)
                 {
@@ -1193,7 +1218,9 @@ namespace PDMLite
                     {
                         int i = row + (x << 2);
                         bool bg = buf[i + 3] < 8 ||
-                            (buf[i] >= T && buf[i + 1] >= T && buf[i + 2] >= T);
+                            (Math.Abs(buf[i]     - bgB) <= TOL &&
+                             Math.Abs(buf[i + 1] - bgG) <= TOL &&
+                             Math.Abs(buf[i + 2] - bgR) <= TOL);
                         if (bg) continue;
                         if (x < minX) minX = x;
                         if (x > maxX) maxX = x;

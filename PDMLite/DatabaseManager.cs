@@ -661,6 +661,15 @@ namespace PDMLite
             else parent.Add(new XElement(name, value ?? ""));
         }
 
+        // Parse a round-trip ("o") timestamp; MinValue when absent/unparseable.
+        private static DateTime ParseRoundtrip(string s)
+        {
+            DateTime dt = DateTime.MinValue;
+            DateTime.TryParse(s ?? "", null,
+                System.Globalization.DateTimeStyles.RoundtripKind, out dt);
+            return dt;
+        }
+
         // ════════════════════════════════════════════════════════════════
         // File operations
         // ════════════════════════════════════════════════════════════════
@@ -1773,6 +1782,12 @@ namespace PDMLite
                         ReferencedModel   = (string)el.Element("ReferencedModel")   ?? "",
                         ReferencedConfigs = (string)el.Element("ReferencedConfigs") ?? "",
                         SupersededBy      = (string)el.Element("SupersededBy")      ?? "",
+                        // Card hover-tooltip + Locked-card owner (read in this same
+                        // scan — no extra I/O; LockedBy meaningful only when Locked).
+                        ModifiedBy        = (string)el.Element("ModifiedBy")        ?? "",
+                        ModifiedDate      = ParseRoundtrip(
+                                               (string)el.Element("ModifiedDate")),
+                        LockedBy          = (string)el.Element("LockedBy")          ?? "",
                         Configurations    = ReadConfigs(el, partNoRaw, descRaw,
                                                (string)el.Element("Revision") ?? "")
                     });
@@ -1791,6 +1806,60 @@ namespace PDMLite
                     p.PartNumber, p.Revision, "file missing on disk");
 
             return results;
+        }
+
+        // Returns the tracked records for a SPECIFIC set of file paths in ONE
+        // vault.xml load, IN THE INPUT ORDER (paths not found on the records are
+        // skipped — e.g. a since-removed file). Backs the task-pane "recently
+        // opened" list: a small fixed set, so one load is far cheaper than a
+        // GetFileRecord per path. Read-only; never purges. Populates the same
+        // fields as SearchFiles (incl. ModifiedBy/Date/LockedBy + Configurations)
+        // so the recent cards render exactly like search cards.
+        public static List<VaultFile> GetFilesByPaths(IList<string> paths)
+        {
+            var result = new List<VaultFile>();
+            if (paths == null || paths.Count == 0) return result;
+            var want = new HashSet<string>(paths, StringComparer.OrdinalIgnoreCase);
+            var byPath = new Dictionary<string, VaultFile>(
+                StringComparer.OrdinalIgnoreCase);
+            lock (_lock) using (AcquireProcessLock())
+            {
+                var doc = LoadOrCreate();
+                foreach (var el in doc.Root.Element("Files").Elements("File"))
+                {
+                    string status = (string)el.Element("Status") ?? "";
+                    if (string.IsNullOrEmpty(status)) continue;
+                    string filePath = (string)el.Element("FilePath") ?? "";
+                    if (!want.Contains(filePath) || byPath.ContainsKey(filePath))
+                        continue;
+                    string partNoRaw = (string)el.Element("PartNumber") ?? "";
+                    string descRaw   = (string)el.Element("Description") ?? "";
+                    byPath[filePath] = new VaultFile
+                    {
+                        FilePath    = filePath,
+                        FileName    = (string)el.Element("FileName") ?? "",
+                        PartNumber  = partNoRaw,
+                        Description = descRaw,
+                        Status      = status,
+                        Revision    = (string)el.Element("Revision") ?? "",
+                        ReferencedModel   = (string)el.Element("ReferencedModel")   ?? "",
+                        ReferencedConfigs = (string)el.Element("ReferencedConfigs") ?? "",
+                        SupersededBy      = (string)el.Element("SupersededBy")      ?? "",
+                        ModifiedBy        = (string)el.Element("ModifiedBy")        ?? "",
+                        ModifiedDate      = ParseRoundtrip(
+                                               (string)el.Element("ModifiedDate")),
+                        LockedBy          = (string)el.Element("LockedBy")          ?? "",
+                        Configurations    = ReadConfigs(el, partNoRaw, descRaw,
+                                               (string)el.Element("Revision") ?? "")
+                    };
+                }
+            }
+            foreach (var p in paths)
+            {
+                VaultFile vf;
+                if (p != null && byPath.TryGetValue(p, out vf)) result.Add(vf);
+            }
+            return result;
         }
 
         // Advanced (property-wide) search backing the AdvancedSearchForm popup.

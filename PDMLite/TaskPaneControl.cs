@@ -76,6 +76,13 @@ namespace PDMLite
             new Dictionary<string, Image>(StringComparer.OrdinalIgnoreCase);
         private const int ThumbCacheCap = 400;
 
+        // Shared hover tooltip (one instance, no per-card alloc) + shared
+        // right-click menu for result/recent cards; _menuCard is the card the
+        // menu was opened on (captured on right-click).
+        private ToolTip _cardTip;
+        private ContextMenuStrip _cardMenu;
+        private SearchGroup _menuCard;
+
         public TaskPaneControl()
         {
             this.AutoScaleMode = AutoScaleMode.Dpi;
@@ -94,8 +101,14 @@ namespace PDMLite
                 Alignment = StringAlignment.Center,
                 LineAlignment = StringAlignment.Center
             };
+            _cardTip = new ToolTip { AutoPopDelay = 20000, InitialDelay = 500,
+                                     ReshowDelay = 200, ShowAlways = true };
+            _cardMenu = BuildCardMenu();
 
             BuildUI();
+            // Empty box on open → show recently-opened files (cheap no-op when
+            // there are none / DB unreachable).
+            try { ShowRecentFiles(); } catch { }
         }
 
         // base.Dispose disposes child CONTROLS, but not fonts (a control does
@@ -119,6 +132,8 @@ namespace PDMLite
                 _fReg33?.Dispose();
                 _fItalic33?.Dispose();
                 _sfBarCenter?.Dispose();
+                _cardTip?.Dispose();
+                _cardMenu?.Dispose();
                 foreach (var img in _thumbCache.Values)
                     try { img?.Dispose(); } catch { }
                 _thumbCache.Clear();
@@ -336,10 +351,7 @@ namespace PDMLite
                 _searchTimer.Stop();
                 if (_searchBox.Text.Length >= 2) _searchTimer.Start();
                 else if (_searchBox.Text.Length == 0)
-                {
-                    ClearAndDispose(_resultsPanel);
-                    _resultsPanel.Height = 0;
-                }
+                    RunSearch(); // empty term → recently-opened files
             };
             searchCard.Controls.Add(_searchBox);
 
@@ -768,7 +780,8 @@ namespace PDMLite
 
             if (string.IsNullOrEmpty(term))
             {
-                _resultsPanel.Height = 0;
+                // Empty box → recently-opened files (quick access, like Vault/PDM).
+                ShowRecentFiles();
                 return;
             }
 
@@ -815,15 +828,39 @@ namespace PDMLite
                 return;
             }
 
-            int ry = 0;
-            int rw = S(188);
-
             // Build ONE card per matching configuration. Config name = Part No by
             // convention, so a multi-config part yields a card per config, each
             // showing THAT config's own PartNo / Description / Revision (never the
             // active config's). A drawing result maps back to its model and is
             // skipped if that model also matched (it is expanded there instead).
             var cards = BuildConfigCards(results, term.ToLowerInvariant());
+            RenderCards(cards, truncated, null);
+        }
+
+        // Render result / recent cards into the results panel. SHARED by the
+        // search (RunSearch) and the recently-opened list (ShowRecentFiles); a
+        // non-null headerText (e.g. "RECENTLY OPENED") draws a small caption row
+        // above the cards.
+        private void RenderCards(List<SearchGroup> cards, bool truncated,
+            string headerText)
+        {
+            int ry = 0;
+            int rw = S(188);
+
+            if (!string.IsNullOrEmpty(headerText))
+            {
+                _resultsPanel.Controls.Add(new Label
+                {
+                    Text = headerText,
+                    Font = _fItalic33,
+                    ForeColor = cTextLight,
+                    Location = new Point(S(2), ry + S(2)),
+                    AutoSize = false,
+                    Width = rw,
+                    Height = S(16)
+                });
+                ry += S(18);
+            }
 
             // Cap the rendered cards. SearchFiles caps at 50 FILES, but a
             // multi-config part expands to ONE card per configuration, so 50
@@ -968,22 +1005,31 @@ namespace PDMLite
                     AutoEllipsis = true
                 });
 
-                // ── Description (for an Obsolete card WITH a recorded
-                // replacement, show "→ Superseded by X" here instead — the
-                // replacement is what an engineer needs from a retired part, and
-                // it reuses this line so the fixed card height is unchanged) ──
+                // ── Description row — repurposed for the two states an engineer
+                // most needs to see at a glance: an Obsolete card shows
+                // "→ Superseded by X" (the replacement), a Locked card shows
+                // "Locked by X" (the owner — who has it, the PDM check-out cue),
+                // else the description. The full description is always in the
+                // hover tooltip. Reusing this row keeps the fixed card height. ──
                 bool obsoleteWithRepl =
                     string.Equals(g.Status, "Obsolete",
                         StringComparison.OrdinalIgnoreCase) &&
                     !string.IsNullOrEmpty(g.SupersededBy);
+                bool lockedWithOwner =
+                    string.Equals(g.Status, "Locked",
+                        StringComparison.OrdinalIgnoreCase) &&
+                    !string.IsNullOrWhiteSpace(g.LockedBy);
                 card.Controls.Add(new Label
                 {
                     Text = obsoleteWithRepl
                         ? "→ Superseded by " + g.SupersededBy
-                        : (string.IsNullOrWhiteSpace(g.Description)
-                                ? "(no description)" : g.Description),
+                        : lockedWithOwner
+                            ? "Locked by " + g.LockedBy
+                            : (string.IsNullOrWhiteSpace(g.Description)
+                                    ? "(no description)" : g.Description),
                     Font = _fReg33,
-                    ForeColor = obsoleteWithRepl ? cMaroon : cTextLight,
+                    ForeColor = obsoleteWithRepl ? cMaroon
+                              : lockedWithOwner ? cOrange : cTextLight,
                     Location = new Point(contentLeft, S(58)),
                     AutoSize = false,
                     Width = fullW,
@@ -1045,6 +1091,33 @@ namespace PDMLite
                     Height = S(1)
                 });
 
+                // ── Hover tooltip with the FULL metadata the compact card
+                // ellipsises (full name / PN / rev / description) plus status,
+                // lock owner, superseded-by and modified-by/date — the detail
+                // industry tools surface on hover. One SHARED ToolTip (no
+                // per-card alloc); set on the card AND every child so a hover
+                // anywhere on the tile shows it. ──
+                string tip = BuildCardTooltip(g);
+                _cardTip.SetToolTip(card, tip);
+
+                // ── Right-click menu (Copy Part No / Copy File Path / Open
+                // Containing Folder / Where Used) — parity with the Advanced
+                // Search cards and every industry PDM. ONE shared menu + the
+                // _menuCard captured on open (no per-card menu = no leak). ──
+                MouseEventHandler showMenu = (s, e) =>
+                {
+                    if (e.Button != MouseButtons.Right) return;
+                    _searchTimer.Stop(); // a queued tick would dispose this card
+                    _menuCard = g;
+                    _cardMenu.Show(Cursor.Position);
+                };
+                card.MouseUp += showMenu;
+                foreach (Control ch in card.Controls)
+                {
+                    _cardTip.SetToolTip(ch, tip);
+                    ch.MouseUp += showMenu;
+                }
+
                 _resultsPanel.Controls.Add(card);
                 ry += cardH + S(2);
             }
@@ -1067,6 +1140,200 @@ namespace PDMLite
             }
 
             _resultsPanel.Height = ry;
+        }
+
+        // Empty search box → show the user's recently-opened files as cards
+        // (RecentFiles, persisted per-user). GetFilesByPaths reads them in ONE
+        // DB load; an empty list / DB error renders nothing (never throws on the
+        // timer tick or at construction).
+        private void ShowRecentFiles()
+        {
+            List<string> paths = RecentFiles.Get();
+            if (paths.Count == 0) { _resultsPanel.Height = 0; return; }
+            List<VaultFile> recents;
+            try { recents = DatabaseManager.GetFilesByPaths(paths); }
+            catch { _resultsPanel.Height = 0; return; }
+            if (recents.Count == 0) { _resultsPanel.Height = 0; return; }
+            // termL "" → AddModelConfigCards shows every config (Contains("") is
+            // always true) — recents are a small set, so this stays well under the
+            // card cap.
+            var cards = BuildConfigCards(recents, "");
+            if (cards.Count == 0) { _resultsPanel.Height = 0; return; }
+            RenderCards(cards, false, "RECENTLY OPENED");
+        }
+
+        // Multi-line hover tooltip: the FULL metadata the compact card
+        // ellipsises (name / PN / rev / description) + status, lock owner,
+        // superseded-by and modified-by/date — the detail industry tools surface
+        // on hover. Invariant date so a non-US locale can't write "06.13.2026".
+        private string BuildCardTooltip(SearchGroup g)
+        {
+            var sb = new System.Text.StringBuilder();
+            sb.Append(FirstNonBlank(g.DisplayName, g.PartNumber));
+            sb.Append("\nPart No: ").Append(
+                string.IsNullOrWhiteSpace(g.PartNumber) ? "—" : g.PartNumber);
+            if (!string.IsNullOrWhiteSpace(g.Revision))
+                sb.Append("    REV ").Append(g.Revision);
+            if (g.TotalConfigs > 1)
+                sb.Append("    (").Append(g.TotalConfigs).Append(" configs)");
+            if (!string.IsNullOrWhiteSpace(g.Description))
+                sb.Append("\n").Append(g.Description);
+            sb.Append("\nStatus: ").Append(
+                string.IsNullOrEmpty(g.Status) ? "WIP" : g.Status);
+            if (string.Equals(g.Status, "Locked", StringComparison.OrdinalIgnoreCase)
+                && !string.IsNullOrWhiteSpace(g.LockedBy))
+                sb.Append("  ·  Locked by ").Append(g.LockedBy);
+            if (!string.IsNullOrWhiteSpace(g.SupersededBy))
+                sb.Append("\n→ Superseded by ").Append(g.SupersededBy);
+            if (!string.IsNullOrWhiteSpace(g.ModifiedBy) ||
+                g.ModifiedDate > DateTime.MinValue)
+            {
+                sb.Append("\nModified");
+                if (!string.IsNullOrWhiteSpace(g.ModifiedBy))
+                    sb.Append(" by ").Append(g.ModifiedBy);
+                if (g.ModifiedDate > DateTime.MinValue)
+                    sb.Append(" · ").Append(g.ModifiedDate.ToString(
+                        "MM/dd/yyyy HH:mm",
+                        System.Globalization.CultureInfo.InvariantCulture));
+            }
+            return sb.ToString();
+        }
+
+        // Shared right-click menu for result/recent cards (acts on _menuCard).
+        private ContextMenuStrip BuildCardMenu()
+        {
+            var m = new ContextMenuStrip();
+            m.Items.Add("Copy Part No", null, (s, e) => CardCopyPartNo());
+            m.Items.Add("Copy File Path", null, (s, e) => CardCopyPath());
+            m.Items.Add("Open Containing Folder", null, (s, e) => CardOpenFolder());
+            m.Items.Add(new ToolStripSeparator());
+            m.Items.Add("Where Used…", null, (s, e) => CardWhereUsed());
+            return m;
+        }
+
+        // The on-disk path a card represents (the model, else the drawing).
+        private static string CardFilePath(SearchGroup g)
+        {
+            if (g == null) return null;
+            return !string.IsNullOrEmpty(g.ModelPath) ? g.ModelPath : g.DrawingPath;
+        }
+
+        private void CardCopyPartNo()
+        {
+            if (_menuCard == null) return;
+            string pn = FirstNonBlank(_menuCard.PartNumber, _menuCard.DisplayName);
+            try { if (!string.IsNullOrEmpty(pn)) Clipboard.SetText(pn); } catch { }
+        }
+
+        private void CardCopyPath()
+        {
+            string p = CardFilePath(_menuCard);
+            try { if (!string.IsNullOrEmpty(p)) Clipboard.SetText(p); } catch { }
+        }
+
+        private void CardOpenFolder()
+        {
+            string p = CardFilePath(_menuCard);
+            if (string.IsNullOrEmpty(p)) return;
+            try
+            {
+                if (File.Exists(p))
+                    System.Diagnostics.Process.Start(
+                        "explorer.exe", "/select,\"" + p + "\"");
+                else
+                {
+                    string dir = Path.GetDirectoryName(p);
+                    if (Directory.Exists(dir))
+                        System.Diagnostics.Process.Start(
+                            "explorer.exe", "\"" + dir + "\"");
+                }
+            }
+            catch { }
+        }
+
+        private void CardWhereUsed()
+        {
+            if (_menuCard == null) return;
+            string path = CardFilePath(_menuCard);
+            if (string.IsNullOrEmpty(path)) return;
+            try
+            {
+                string toOpen = null;
+                using (var v = new WhereUsedForm(path, Path.GetFileName(path),
+                    _menuCard.PartNumber, _menuCard.ConfigName))
+                {
+                    v.ShowDialog(this);
+                    toOpen = v.FileToOpen;
+                }
+                if (!string.IsNullOrEmpty(toOpen)) OpenFile(toOpen);
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show("Could not open Where Used:\n" + ex.Message,
+                    "BCore PDM", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            }
+        }
+
+        // Recently-opened vault files, persisted per-user to
+        // %LOCALAPPDATA%\BCorePDM\recent.txt (most-recent first, capped). Shown as
+        // cards when the search box is empty (Vault/PDM-style quick access);
+        // populated from Refresh() whenever a saved file becomes active. All I/O
+        // is swallowed — a missing/locked recents file never disrupts the pane.
+        private static class RecentFiles
+        {
+            private const int Cap = 12;
+            private static readonly object _gate = new object();
+
+            private static string FilePathOf()
+            {
+                string dir = Path.Combine(Environment.GetFolderPath(
+                    Environment.SpecialFolder.LocalApplicationData), "BCorePDM");
+                return Path.Combine(dir, "recent.txt");
+            }
+
+            public static List<string> Get()
+            {
+                var list = new List<string>();
+                try
+                {
+                    string f = FilePathOf();
+                    if (!File.Exists(f)) return list;
+                    foreach (var line in File.ReadAllLines(f))
+                    {
+                        string p = (line ?? "").Trim();
+                        if (p.Length == 0) continue;
+                        if (!list.Contains(p, StringComparer.OrdinalIgnoreCase))
+                            list.Add(p);
+                        if (list.Count >= Cap) break;
+                    }
+                }
+                catch { }
+                return list;
+            }
+
+            public static void Add(string filePath)
+            {
+                if (string.IsNullOrWhiteSpace(filePath)) return;
+                try
+                {
+                    lock (_gate)
+                    {
+                        var list = Get();
+                        // Skip the write when it is already the most-recent entry.
+                        if (list.Count > 0 && string.Equals(
+                                list[0], filePath, StringComparison.OrdinalIgnoreCase))
+                            return;
+                        list.RemoveAll(p => string.Equals(
+                            p, filePath, StringComparison.OrdinalIgnoreCase));
+                        list.Insert(0, filePath);
+                        if (list.Count > Cap) list.RemoveRange(Cap, list.Count - Cap);
+                        string f = FilePathOf();
+                        Directory.CreateDirectory(Path.GetDirectoryName(f));
+                        File.WriteAllLines(f, list);
+                    }
+                }
+                catch { }
+            }
         }
 
         // Get a small cached thumbnail for a file's SOLIDWORKS preview (null on
@@ -1165,7 +1432,24 @@ namespace PDMLite
                     data.Scan0, buf, 0, buf.Length);
                 bmp.UnlockBits(data);
 
-                const int T = 244; // near-white cutoff (BGRA buffer)
+                // Detect the ACTUAL background colour from 8 border samples
+                // (corners + edge midpoints) rather than assuming white — SW's
+                // preview is usually white but some seats save a light-gray /
+                // gradient backdrop where a hardcoded white cutoff trims nothing.
+                // The per-channel MEDIAN is robust to a model that happens to
+                // reach one sample point. (BGRA buffer.)
+                int[] sx = { 2, w - 3, 2, w - 3, w / 2, w / 2, 2, w - 3 };
+                int[] sy = { 2, 2, h - 3, h - 3, 2, h - 3, h / 2, h / 2 };
+                byte[] sB = new byte[8], sG = new byte[8], sR = new byte[8];
+                for (int k = 0; k < 8; k++)
+                {
+                    int si = sy[k] * stride + (sx[k] << 2);
+                    sB[k] = buf[si]; sG[k] = buf[si + 1]; sR[k] = buf[si + 2];
+                }
+                Array.Sort(sB); Array.Sort(sG); Array.Sort(sR);
+                int bgB = sB[4], bgG = sG[4], bgR = sR[4]; // medians
+                const int TOL = 22; // per-channel distance that still counts as bg
+
                 int minX = w, minY = h, maxX = -1, maxY = -1;
                 for (int y = 0; y < h; y++)
                 {
@@ -1174,7 +1458,9 @@ namespace PDMLite
                     {
                         int i = row + (x << 2);
                         bool bg = buf[i + 3] < 8 ||
-                            (buf[i] >= T && buf[i + 1] >= T && buf[i + 2] >= T);
+                            (Math.Abs(buf[i]     - bgB) <= TOL &&
+                             Math.Abs(buf[i + 1] - bgG) <= TOL &&
+                             Math.Abs(buf[i + 2] - bgR) <= TOL);
                         if (bg) continue;
                         if (x < minX) minX = x;
                         if (x > maxX) maxX = x;
@@ -1522,7 +1808,11 @@ namespace PDMLite
                     Status       = model.Status,
                     SupersededBy = model.SupersededBy,
                     DrawingPath  = drawingPath,
-                    TotalConfigs = total
+                    TotalConfigs = total,
+                    // For the hover tooltip + the Locked-card owner line.
+                    ModifiedBy   = model.ModifiedBy,
+                    ModifiedDate = model.ModifiedDate,
+                    LockedBy     = model.LockedBy
                 });
             }
         }
@@ -1553,6 +1843,9 @@ namespace PDMLite
             public string Status;        // file-level status
             public string SupersededBy;  // replacement Part No (Obsolete files only)
             public int    TotalConfigs;  // number of configs in the file
+            public string ModifiedBy;    // last saver (tooltip)
+            public DateTime ModifiedDate;// last save time (tooltip)
+            public string LockedBy;      // lock owner (shown when Status==Locked)
         }
 
         // ── Refresh ───────────────────────────────────────────────────
@@ -1581,6 +1874,11 @@ namespace PDMLite
             // always shows something identifiable.
             string filePath = "";
             try { filePath = doc.GetPathName() ?? ""; } catch { }
+            // Track this as a recently-opened file (any saved doc that becomes
+            // active — opened via search, dashboard, or File>Open). Shown when
+            // the search box is empty. No-op for an unsaved doc (empty path).
+            try { if (!string.IsNullOrEmpty(filePath)) RecentFiles.Add(filePath); }
+            catch { }
             string fileName;
             try { fileName = Path.GetFileName(filePath); }
             catch
