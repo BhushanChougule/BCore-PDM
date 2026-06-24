@@ -523,27 +523,11 @@ namespace PDMLite
         {
             try
             {
-                // GetFeatures(FALSE) = the whole feature list INCLUDING
-                // sub-features. The old top-level-only scan (true) missed
-                // multibody sheet metal, where each body's SheetMetal feature
-                // nests inside its body folder — those parts silently never
-                // exported a flat DXF. (Detection is independent of the
-                // ExportToDWG2 export mechanism below.)
-                object[] features = (object[])doc.FeatureManager.GetFeatures(false);
-                if (features == null) return;
-
-                bool hasSheetMetal = false;
-                foreach (object f in features)
-                {
-                    string ft = "";
-                    try { ft = ((Feature)f).GetTypeName2(); } catch { }
-                    if (ft == "SheetMetal")
-                    {
-                        hasSheetMetal = true;
-                        break;
-                    }
-                }
-                if (!hasSheetMetal) return;
+                // Sheet-metal detection lives in PropertyValidator.IsSheetMetal
+                // (the single source of truth, shared with the calculated-fields
+                // fill) — it walks the whole feature list including sub-features
+                // so multibody sheet metal is detected too.
+                if (!PropertyValidator.IsSheetMetal(doc)) return;
 
                 PartDoc part = doc as PartDoc;
                 if (part == null) return;

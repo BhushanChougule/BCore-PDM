@@ -168,6 +168,34 @@ namespace PDMLite
             return parent.Length > 0 ? parent : configName;
         }
 
+        // Sheet-metal detection — the SINGLE source of truth, shared by the
+        // flat-pattern DXF export (ExportManager.ExportFlatPattern) and the
+        // sheet-metal calculated-fields fill (AutoFillSheetMetalFields), so the
+        // two can never disagree about whether a part is sheet metal.
+        // GetFeatures(FALSE) walks the WHOLE feature list INCLUDING sub-features:
+        // a top-level-only scan misses multibody sheet metal, where each body's
+        // SheetMetal feature nests inside its body folder (those parts silently
+        // skipped the flat-pattern export — found in PR-52 testing). Parts only;
+        // never throws.
+        public static bool IsSheetMetal(ModelDoc2 doc)
+        {
+            try
+            {
+                if (doc == null) return false;
+                if (doc.GetType() != (int)swDocumentTypes_e.swDocPART) return false;
+                object[] features = doc.FeatureManager.GetFeatures(false) as object[];
+                if (features == null) return false;
+                foreach (object o in features)
+                {
+                    string ft = "";
+                    try { ft = ((Feature)o).GetTypeName2(); } catch { }
+                    if (ft == "SheetMetal") return true;
+                }
+                return false;
+            }
+            catch { return false; }
+        }
+
         // Read a single property from a specific named configuration.
         // Useful when the caller knows which config to target (e.g. during
         // multi-config save or per-config revision bump).
@@ -299,6 +327,264 @@ namespace PDMLite
                 // Non-fatal — skip if mass properties unavailable
             }
         }
+
+        // Auto-fill the sheet-metal calculated fields on the ACTIVE
+        // configuration — the standard cost/quote drivers a sheet-metal shop
+        // wants on every flat part:
+        //   FlatLength / FlatWidth → flat-pattern bounding box
+        //   CutLength              → total flat-pattern cut (perimeter) length
+        //   Thickness              → sheet gauge
+        //   BlankArea              → blank bounding-rectangle area
+        //   BendCount              → number of bends (press-brake-time driver)
+        //   CutoutCount            → internal cut-out / pierce count (laser
+        //                            pierce-time driver)
+        //
+        // Source: the cut-list properties SOLIDWORKS auto-maintains for a sheet-
+        // metal body (see TryReadCutListValues for the property-name map), read
+        // from the Cut-List folder feature's CustomPropertyManager. Reading SW's
+        // own maintained values (rather than re-deriving geometry) keeps the
+        // figures identical to the cut-list table and avoids unsuppressing the
+        // flat-pattern feature inside a save event.
+        //
+        // Dimensional fields are stamped WITH the document's linear-unit suffix
+        // ("6.012 in", area "in²"); the two counts are bare — so a value is never
+        // an ambiguous bare number across imperial/metric seats (cf. PartWeight's
+        // "lbs"). ACTIVE-CONFIG scoped (like AutoFillWeight) — no config switching
+        // inside the save event; multi-config parts get each config filled as it
+        // is saved active. NON-FATAL: a part that isn't sheet metal, an up-to-date
+        // cut list that's missing, or any unreadable value is simply skipped and
+        // NEVER blocks the save. (The cut list must be up to date — SW's default
+        // "automatically update" — for the values to be present.)
+        public static void AutoFillSheetMetalFields(ModelDoc2 doc)
+        {
+            try
+            {
+                if (!IsSheetMetal(doc)) return;
+
+                CutListValues v;
+                if (!TryReadCutListValues(doc, out v)) return;
+
+                // Append the document's unit to the DIMENSIONAL fields (the
+                // chosen convention — like PartWeight's "lbs" — so a value is
+                // never an ambiguous bare number on a metric vs imperial seat).
+                // COUNTS (bend count, cut-out count) carry no unit; AREA uses
+                // the squared linear unit. Each field is written ONLY when read
+                // (never blank an existing figure because one cut-list property
+                // happened to be missing).
+                string lin = LinearUnitSuffix(doc);          // e.g. "in" / "mm"
+                string area = string.IsNullOrEmpty(lin)
+                    ? "" : lin + "²";                   // e.g. "in²"
+
+                WriteCalcField(doc, "FlatLength", v.Length, lin);
+                WriteCalcField(doc, "FlatWidth", v.Width, lin);
+                WriteCalcField(doc, "CutLength", v.Cut, lin);
+                WriteCalcField(doc, "Thickness", v.Thickness, lin);
+                WriteCalcField(doc, "BlankArea", v.BlankArea, area);
+                WriteCalcField(doc, "BendCount", v.Bends, "");      // count, no unit
+                WriteCalcField(doc, "CutoutCount", v.Cutouts, "");  // count, no unit
+            }
+            catch
+            {
+                // Non-fatal — skip if the flat-pattern dimensions are unavailable
+            }
+        }
+
+        // Write one calculated field to the active config, appending a unit
+        // suffix when given. Skips a blank value so a missing cut-list property
+        // never erases a previously-filled figure. The numeric value is
+        // CANONICALISED to InvariantCulture (the repo-wide rule — cf. AutoFillWeight
+        // / FixDateFormats): SOLIDWORKS formats a resolved cut-list value in the
+        // machine/document locale, so a comma-decimal seat would otherwise stamp
+        // "6,012 in". A value we can't parse as a number (e.g. a feet-and-inches
+        // compound string, or one carrying embedded text) is written RAW with NO
+        // suffix — never mis-labelled.
+        private static void WriteCalcField(ModelDoc2 doc, string prop,
+            string value, string unitSuffix)
+        {
+            if (string.IsNullOrWhiteSpace(value)) return;
+            string clean = value.Trim();
+            decimal d;
+            string toWrite;
+            if (TryNum(clean, out d))
+            {
+                string num = d.ToString(System.Globalization.CultureInfo.InvariantCulture);
+                toWrite = string.IsNullOrEmpty(unitSuffix) ? num : num + " " + unitSuffix;
+            }
+            else
+            {
+                // Not a plain number — keep it as-is, unlabelled, rather than
+                // risk a mis-labelled compound value.
+                toWrite = clean;
+            }
+            SetProperty(doc, prop, toWrite);
+        }
+
+        // Parse a SOLIDWORKS resolved cut-list value as a decimal. SW formats it
+        // in the machine/document locale, so try InvariantCulture FIRST (the
+        // common bare/en case and our own already-invariant sums) then the
+        // current culture (a comma-decimal seat). NumberStyles.Float — NOT Any —
+        // so a thousands separator is never silently accepted ("16,964" must not
+        // become 16964). decimal (not double) avoids binary round-off so the
+        // value re-emits with the same digits SW showed. Never throws.
+        // ASSUMPTION (pre-merge review): SW emits a resolved cut-list dimension
+        // WITHOUT thousands grouping, so the Invariant-first order is safe — a
+        // grouping-dot string like de-DE "1.234" (meaning 1234) cannot occur here
+        // (and Float would reject the grouping under either culture anyway, so no
+        // attempt order resolves that ambiguity — the no-grouping assumption is
+        // what makes it moot). Holds for these physical quantities on real seats.
+        private static bool TryNum(string s, out decimal d)
+        {
+            d = 0m;
+            if (string.IsNullOrWhiteSpace(s)) return false;
+            try
+            {
+                var fl = System.Globalization.NumberStyles.Float;
+                return decimal.TryParse(s, fl,
+                           System.Globalization.CultureInfo.InvariantCulture, out d)
+                    || decimal.TryParse(s, fl,
+                           System.Globalization.CultureInfo.CurrentCulture, out d);
+            }
+            catch { return false; }
+        }
+
+        // Short suffix for the document's LINEAR unit (cut-list evaluated values
+        // are already formatted in the document's units, so we only need to LABEL
+        // them). Returns "" on anything unrecognised — the value is then written
+        // bare rather than mis-labelled. Never throws.
+        private static string LinearUnitSuffix(ModelDoc2 doc)
+        {
+            try
+            {
+                int u = doc.GetUserPreferenceIntegerValue(
+                    (int)swUserPreferenceIntegerValue_e.swUnitsLinear);
+                switch ((swLengthUnit_e)u)
+                {
+                    case swLengthUnit_e.swINCHES: return "in";
+                    case swLengthUnit_e.swFEET: return "ft";
+                    case swLengthUnit_e.swFEETINCHES: return "in";
+                    case swLengthUnit_e.swMM: return "mm";
+                    case swLengthUnit_e.swCM: return "cm";
+                    case swLengthUnit_e.swMETER: return "m";
+                    case swLengthUnit_e.swMIL: return "mil";
+                    case swLengthUnit_e.swUIN: return "uin";
+                    case swLengthUnit_e.swMICRON: return "um";
+                    case swLengthUnit_e.swNANOMETER: return "nm";
+                    case swLengthUnit_e.swANGSTROM: return "A";
+                    default: return "";
+                }
+            }
+            catch { return ""; }
+        }
+
+        // The set of sheet-metal calculated values read from one Cut-List folder.
+        // All strings are the RESOLVED (evaluated) cut-list values, UNIT-LESS;
+        // AutoFillSheetMetalFields labels them at write time.
+        private class CutListValues
+        {
+            public string Length = "";     // bounding-box length
+            public string Width = "";      // bounding-box width
+            public string Cut = "";        // total cut length (Outer+Inner / legacy)
+            public string Thickness = "";  // sheet-metal thickness / gauge
+            public string Bends = "";      // bend count (brake-time driver)
+            public string Cutouts = "";    // internal cut-out / pierce count
+            public string BlankArea = "";  // blank bounding-rectangle area
+
+            public bool HasAny()
+            {
+                return !string.IsNullOrWhiteSpace(Length)
+                    || !string.IsNullOrWhiteSpace(Width)
+                    || !string.IsNullOrWhiteSpace(Cut)
+                    || !string.IsNullOrWhiteSpace(Thickness)
+                    || !string.IsNullOrWhiteSpace(Bends)
+                    || !string.IsNullOrWhiteSpace(Cutouts)
+                    || !string.IsNullOrWhiteSpace(BlankArea);
+            }
+        }
+
+        // Read the sheet-metal calculated values from the first Cut-List folder
+        // that carries any of them. A single-body sheet-metal part has exactly
+        // one cut-list item (the common shop case); for a multibody part the
+        // first item with readable values wins. Returns false when no cut-list
+        // folder yields anything (cut list not updated, not sheet metal after
+        // all, etc.). Never throws.
+        private static bool TryReadCutListValues(ModelDoc2 doc,
+            out CutListValues vals)
+        {
+            vals = new CutListValues();
+            try
+            {
+                object[] feats = doc.FeatureManager.GetFeatures(false) as object[];
+                if (feats == null) return false;
+                foreach (object o in feats)
+                {
+                    var f = o as Feature;
+                    if (f == null) continue;
+                    string tn = "";
+                    try { tn = f.GetTypeName2(); } catch { }
+                    if (tn != "CutListFolder") continue;
+
+                    // Read the RESOLVED (evaluated) values straight off the
+                    // cut-list feature's property manager (var, like every other
+                    // get_CustomPropertyManager call in this file — the interop's
+                    // property-manager type is never named explicitly).
+                    var cpm = f.CustomPropertyManager;
+                    if (cpm == null) continue;
+
+                    var v = new CutListValues();
+                    try { string a, r; cpm.Get4("Bounding Box Length", false, out a, out r); v.Length = r ?? ""; } catch { }
+                    try { string a, r; cpm.Get4("Bounding Box Width", false, out a, out r); v.Width = r ?? ""; } catch { }
+                    try { string a, r; cpm.Get4("Sheet Metal Thickness", false, out a, out r); v.Thickness = r ?? ""; } catch { }
+                    try { string a, r; cpm.Get4("Bends", false, out a, out r); v.Bends = r ?? ""; } catch { }
+                    try { string a, r; cpm.Get4("Cut Outs", false, out a, out r); v.Cutouts = r ?? ""; } catch { }
+                    // Blank bounding-rectangle area (what you buy / nest); fall
+                    // back to the silhouette "Bounding Box Area" on seats that
+                    // don't split out the blank form.
+                    try { string a, r; cpm.Get4("Bounding Box Area-Blank", false, out a, out r); v.BlankArea = r ?? ""; } catch { }
+                    if (string.IsNullOrWhiteSpace(v.BlankArea))
+                    {
+                        try { string a, r; cpm.Get4("Bounding Box Area", false, out a, out r); v.BlankArea = r ?? ""; } catch { }
+                    }
+
+                    // Total flat-pattern cut length. SOLIDWORKS names this
+                    // DIFFERENTLY across versions/templates:
+                    //   - older seats: a single "Cut Length";
+                    //   - 2020+ seats: "Cutting Length-Outer" (the outer profile)
+                    //     + "Cutting Length-Inner" (internal cut-outs), whose SUM
+                    //     is the real total the laser/plasma travels — equal to
+                    //     what the legacy single "Cut Length" reported.
+                    // (The shop's seat had NO "Cut Length", only the Outer/Inner
+                    // pair — found in PR-71 on-machine testing.) Prefer the single
+                    // property; otherwise sum Outer + Inner (Inner absent/blank =>
+                    // 0, so a hole-free part's outer perimeter is the whole figure).
+                    try { string a, r; cpm.Get4("Cut Length", false, out a, out r); v.Cut = r ?? ""; } catch { }
+                    if (string.IsNullOrWhiteSpace(v.Cut))
+                    {
+                        string outerStr = "", innerStr = "";
+                        try { string a, r; cpm.Get4("Cutting Length-Outer", false, out a, out r); outerStr = r ?? ""; } catch { }
+                        try { string a, r; cpm.Get4("Cutting Length-Inner", false, out a, out r); innerStr = r ?? ""; } catch { }
+                        decimal outer, inner;
+                        if (TryNum(outerStr, out outer))
+                        {
+                            if (!TryNum(innerStr, out inner))
+                                inner = 0m;
+                            // Emit InvariantCulture; WriteCalcField re-canonicalises
+                            // and labels it (idempotent on an invariant number).
+                            v.Cut = (outer + inner).ToString(
+                                System.Globalization.CultureInfo.InvariantCulture);
+                        }
+                    }
+
+                    if (v.HasAny())
+                    {
+                        vals = v;
+                        return true;
+                    }
+                }
+            }
+            catch { }
+            return false;
+        }
+
         // Convert date properties from yyyy-MM-dd to MM/dd/yyyy format
         public static void FixDateFormats(ModelDoc2 doc)
         {

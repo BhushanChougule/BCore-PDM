@@ -681,6 +681,10 @@ namespace PDMLite
 
                     PropertyValidator.FixDateFormats(doc);
                     PropertyValidator.AutoFillWeight(doc);
+                    // Sheet-metal calculated fields (FlatLength/FlatWidth/
+                    // CutLength) — no-op for non-sheet-metal parts and
+                    // assemblies; never blocks the save.
+                    PropertyValidator.AutoFillSheetMetalFields(doc);
 
                     // Rule 3.5: every configuration in the file must have a
                     // unique Part Number. SOLIDWORKS copies all properties when
