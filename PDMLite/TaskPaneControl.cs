@@ -76,12 +76,14 @@ namespace PDMLite
             new Dictionary<string, Image>(StringComparer.OrdinalIgnoreCase);
         private const int ThumbCacheCap = 400;
 
-        // Thumbnails load via a SERIALIZED, deferred queue — NEVER inside a paint
+        // Thumbnails load via a THROTTLED, deferred queue — NEVER inside a paint
         // (GetPreviewBitmap is a network COM call that pumps the STA loop). Panels
-        // request a load on first paint; DrainThumbs runs them ONE AT A TIME off
-        // the message loop. _thumbLoadsSuspended pauses loading during a doc-open
-        // or large-preview so a heavy SW operation never races a preview read.
+        // request a load on first paint; a Timer (_thumbTimer) loads ONE per tick
+        // off the message loop, so ALL cards render first and previews trickle in
+        // gently without freezing the pane. _thumbLoadsSuspended pauses loading
+        // during a doc-open / large-preview so a heavy SW op never races a read.
         private readonly Queue<ThumbPanel> _thumbQueue = new Queue<ThumbPanel>();
+        private Timer _thumbTimer;   // throttle: one preview read per tick
         private bool _thumbDraining;
         private bool _thumbLoadsSuspended;
 
@@ -129,6 +131,8 @@ namespace PDMLite
             {
                 _searchTimer?.Stop();
                 _searchTimer?.Dispose();
+                _thumbTimer?.Stop();
+                _thumbTimer?.Dispose();
                 _searchHeaderTip?.Dispose();
                 _fBold38?.Dispose();
                 _fBold35?.Dispose();
@@ -371,6 +375,10 @@ namespace PDMLite
             };
             _searchTimer = new Timer { Interval = 600 };
             _searchTimer.Tick += (s, e) => { _searchTimer.Stop(); RunSearch(); };
+            // Throttle preview loads: one per 60ms tick, so cards render first and
+            // thumbnails trickle in without freezing the pane.
+            _thumbTimer = new Timer { Interval = 60 };
+            _thumbTimer.Tick += ThumbTick;
             _searchBox.TextChanged += (s, e) =>
             {
                 _searchTimer.Stop();
@@ -1321,55 +1329,55 @@ namespace PDMLite
             }
         }
 
-        // A ThumbPanel asks (on its first paint) for its preview to be loaded.
-        // We enqueue and kick the serialized drain — the actual COM read happens
-        // in DrainThumbs, off the paint path.
+        // A ThumbPanel asks (on its first paint) for its preview. We enqueue and
+        // make sure the throttle timer is running — the COM read happens in
+        // ThumbTick, off the paint path, one per tick.
         private void QueueThumbLoad(ThumbPanel p)
         {
             if (p == null || p.IsDisposed) return;
             _thumbQueue.Enqueue(p);
-            if (!_thumbDraining && !_thumbLoadsSuspended)
-                try { BeginInvoke((Action)DrainThumbs); } catch { }
+            if (!_thumbLoadsSuspended && _thumbTimer != null && !_thumbTimer.Enabled)
+                _thumbTimer.Start();
         }
 
-        // Load exactly ONE queued thumbnail, then post itself for the next — so
-        // the network preview reads run strictly one at a time on the message
-        // loop. The re-entrancy guard matters: a load's COM call pumps the STA
-        // loop, which can re-dispatch this posted delegate; the guard makes that
-        // nested call a no-op and the in-flight load's finally posts the next.
-        private void DrainThumbs()
+        // Load ONE queued thumbnail per tick (throttled so cards stay snappy and
+        // the UI breathes between slow network reads). The re-entrancy guard
+        // matters: a load's COM call pumps the STA loop, which can re-dispatch the
+        // timer's WM_TIMER; the guard makes that nested tick a no-op. Stops the
+        // timer when the queue drains. Skips disposed panels (stale cards).
+        private void ThumbTick(object sender, EventArgs e)
         {
             if (_thumbDraining || _thumbLoadsSuspended) return;
             _thumbDraining = true;
             try
             {
-                if (_thumbQueue.Count == 0) return;
-                ThumbPanel p = _thumbQueue.Dequeue();
-                if (p != null && !p.IsDisposed) p.LoadNow();
+                while (_thumbQueue.Count > 0)
+                {
+                    ThumbPanel p = _thumbQueue.Dequeue();
+                    if (p != null && !p.IsDisposed) { p.LoadNow(); break; }
+                }
             }
             catch { }
             finally
             {
                 _thumbDraining = false;
-                if (!_thumbLoadsSuspended && _thumbQueue.Count > 0)
-                    try { BeginInvoke((Action)DrainThumbs); } catch { }
+                if (_thumbQueue.Count == 0) _thumbTimer?.Stop();
             }
         }
 
         // Pause/resume preview loading around a heavy SW operation (doc open,
-        // large preview) so a queued read never races it. On resume, restart the
-        // drain for any panels that requested while paused.
+        // large preview) so a queued read never races it.
         private void SuspendThumbLoads(bool suspend)
         {
             _thumbLoadsSuspended = suspend;
-            if (!suspend && !_thumbDraining && _thumbQueue.Count > 0)
-                try { BeginInvoke((Action)DrainThumbs); } catch { }
+            if (suspend) _thumbTimer?.Stop();
+            else if (_thumbQueue.Count > 0) _thumbTimer?.Start();
         }
 
         // Get a small cached thumbnail for a file's SOLIDWORKS preview (null on
         // failure → the card draws a placeholder). MUST run on the UI thread
         // (the SOLIDWORKS API is not thread-safe — reached only via the serialized
-        // DrainThumbs, which runs on the UI thread, NEVER inside a paint). Caches
+        // ThumbTick, which runs on the UI thread, NEVER inside a paint). Caches
         // the result (INCLUDING null, so a preview-less file is read at most once);
         // caps the cache to bound GDI handles.
         private Image GetThumbnail(string filePath, string config)

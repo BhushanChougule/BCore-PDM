@@ -109,11 +109,13 @@ namespace PDMLite
             new Dictionary<string, Image>(StringComparer.OrdinalIgnoreCase);
         private const int ThumbCacheCap = 400;
 
-        // Thumbnails load via a SERIALIZED, deferred queue — never inside a paint
+        // Thumbnails load via a THROTTLED, deferred queue — never inside a paint
         // (GetPreviewBitmap is a network COM call that pumps the STA loop and froze
-        // the popup per card). Panels request on first paint; DrainThumbs runs them
-        // one at a time off the message loop; suspended during the large preview.
+        // the popup per card). Panels request on first paint; a Timer (_thumbTimer)
+        // loads ONE per tick off the message loop so cards/recents render first;
+        // suspended during the large preview.
         private readonly Queue<ThumbPanel> _thumbQueue = new Queue<ThumbPanel>();
+        private Timer _thumbTimer;   // throttle: one preview read per tick
         private bool _thumbDraining;
         private bool _thumbLoadsSuspended;
 
@@ -151,6 +153,7 @@ namespace PDMLite
             if (disposing)
             {
                 _timer?.Stop(); _timer?.Dispose();
+                _thumbTimer?.Stop(); _thumbTimer?.Dispose();
                 _fHeader?.Dispose(); _fSection?.Dispose(); _fLabel?.Dispose();
                 _fInput?.Dispose(); _fHint?.Dispose();
                 _fCardBold?.Dispose(); _fCardPn?.Dispose(); _fCardDesc?.Dispose();
@@ -358,6 +361,10 @@ namespace PDMLite
             // Stop FIRST so a queued WM_TIMER can't re-enter; try/catch so an
             // unexpected throw on the tick can't escape onto SOLIDWORKS' loop.
             _timer.Tick += (s, e) => { _timer.Stop(); try { RunSearch(); } catch { } };
+            // Throttle preview loads: one per 60ms tick — cards/recents render
+            // first, thumbnails trickle in without freezing the popup.
+            _thumbTimer = new Timer { Interval = 60 };
+            _thumbTimer.Tick += ThumbTick;
             _mainBox.TextChanged    += (s, e) => Schedule();
             _drawnByBox.TextChanged += (s, e) => Schedule();
             // Material/Finish are editable: TextChanged catches typing AND the
@@ -679,7 +686,14 @@ namespace PDMLite
         protected override void OnShown(EventArgs e)
         {
             base.OnShown(e);
-            try { RunSearch(); } catch { }
+            // Show the popup INSTANTLY, then load recents — the recents lookup is
+            // a couple of network vault reads, and running it synchronously here
+            // froze the window while it opened. Give immediate feedback, then defer
+            // the work onto the message loop so the form paints first.
+            _countLabel.ForeColor = cTextGray;
+            _countLabel.Text = "Loading recent files…";
+            try { BeginInvoke((Action)(() => { try { RunSearch(); } catch { } })); }
+            catch { try { RunSearch(); } catch { } }
         }
 
         private void RenderCards(List<Card> cards)
@@ -1217,35 +1231,37 @@ namespace PDMLite
             }
         }
 
-        // A ThumbPanel asks (on first paint) for its preview; we enqueue and kick
-        // the serialized drain — the COM read happens in DrainThumbs, off paint.
+        // A ThumbPanel asks (on first paint) for its preview; we enqueue and make
+        // sure the throttle timer is running — the COM read happens in ThumbTick,
+        // off paint, one per tick.
         private void QueueThumbLoad(ThumbPanel p)
         {
             if (p == null || p.IsDisposed) return;
             _thumbQueue.Enqueue(p);
-            if (!_thumbDraining && !_thumbLoadsSuspended)
-                try { BeginInvoke((Action)DrainThumbs); } catch { }
+            if (!_thumbLoadsSuspended && _thumbTimer != null && !_thumbTimer.Enabled)
+                _thumbTimer.Start();
         }
 
-        // Load ONE queued thumbnail, then post for the next — network preview
-        // reads run strictly one at a time. The guard makes a pump-re-dispatched
-        // call a no-op; the in-flight load's finally posts the next.
-        private void DrainThumbs()
+        // Load ONE queued thumbnail per tick (throttled). The guard makes a
+        // pump-re-dispatched WM_TIMER a no-op; stops the timer when the queue
+        // drains; skips disposed panels.
+        private void ThumbTick(object sender, EventArgs e)
         {
             if (_thumbDraining || _thumbLoadsSuspended) return;
             _thumbDraining = true;
             try
             {
-                if (_thumbQueue.Count == 0) return;
-                ThumbPanel p = _thumbQueue.Dequeue();
-                if (p != null && !p.IsDisposed) p.LoadNow();
+                while (_thumbQueue.Count > 0)
+                {
+                    ThumbPanel p = _thumbQueue.Dequeue();
+                    if (p != null && !p.IsDisposed) { p.LoadNow(); break; }
+                }
             }
             catch { }
             finally
             {
                 _thumbDraining = false;
-                if (!_thumbLoadsSuspended && _thumbQueue.Count > 0)
-                    try { BeginInvoke((Action)DrainThumbs); } catch { }
+                if (_thumbQueue.Count == 0) _thumbTimer?.Stop();
             }
         }
 
@@ -1253,8 +1269,8 @@ namespace PDMLite
         private void SuspendThumbLoads(bool suspend)
         {
             _thumbLoadsSuspended = suspend;
-            if (!suspend && !_thumbDraining && _thumbQueue.Count > 0)
-                try { BeginInvoke((Action)DrainThumbs); } catch { }
+            if (suspend) _thumbTimer?.Stop();
+            else if (_thumbQueue.Count > 0) _thumbTimer?.Start();
         }
 
         // Cached small preview for a file (null on failure → placeholder). MUST
