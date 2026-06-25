@@ -59,7 +59,13 @@ namespace PDMLite
         private Button _btnRefresh;
         private Button _btnExport;
         private Button _btnClear;
+        private Button _btnPrint;   // batch-print released drawing PDFs
         private Button _btnAudit;   // switch to the Audit Report (single-window nav)
+        // Current released drawing PDFs live here ({DrawingNo} REV {Rev}.pdf).
+        private const string PdfExportFolder = @"N:\PDM-SolidWorks\EXPORTS\PDF";
+        // Above this many drawings, ONE EXPORTS\PDF enumeration beats N network
+        // File.Exists probes; at or below it, probe exact names with no listing.
+        private const int FastProbeMax = 50;
         private Panel _topPanel;
         private Panel _bottomPanel;
         private System.Windows.Forms.Timer _searchTimer;
@@ -230,6 +236,257 @@ namespace PDMLite
             OpenDeferred(_view[idx].FilePath);
         }
 
+        // ── Batch print released drawings ───────────────────────────────────
+        // Print the current released drawing PDF (EXPORTS\PDF\{DrawingNo} REV
+        // {Rev}.pdf) for the files in scope: the SELECTED rows (current page) if
+        // any are selected, else the whole FILTERED view. Only RELEASED files
+        // have a current released PDF. Missing PDFs are reported, never fatal.
+        private void PrintDrawings()
+        {
+            // Scope: explicit selection (current page) wins; else the filtered view.
+            // NOTE: VirtualMode clears selection on every page move, so a selection
+            // is always current-page only — the confirm states the scope explicitly.
+            bool fromSelection = _grid.SelectedRows.Count > 0;
+            var scope = new List<VaultFile>();
+            if (fromSelection)
+            {
+                foreach (DataGridViewRow row in _grid.SelectedRows)
+                {
+                    if (row.Index < 0) continue;   // defensive: a shared VirtualMode row
+                    int idx = PageStart + row.Index;
+                    if (idx >= 0 && idx < _view.Count) scope.Add(_view[idx]);
+                }
+            }
+            else scope.AddRange(_view);
+
+            var releasedPaths = scope
+                .Where(f => Eq(f.Status, "Released") &&
+                            !string.IsNullOrEmpty(f.FilePath))
+                .Select(f => f.FilePath)
+                .ToList();
+
+            if (releasedPaths.Count == 0)
+            {
+                MessageBox.Show(
+                    "No RELEASED files in the current selection/view.\n\n" +
+                    "Select rows (Ctrl/Shift-click) or filter to a set that " +
+                    "includes released files, then try again.",
+                    "BCore PDM — Print Drawings",
+                    MessageBoxButtons.OK, MessageBoxIcon.Information);
+                return;
+            }
+
+            // Resolve each released file's drawing identity (DrawingNo + Rev) in
+            // ONE vault.xml load, then locate the current PDF in EXPORTS\PDF. The
+            // network I/O below runs under a wait cursor.
+            this.Cursor = Cursors.WaitCursor;
+            List<DrawingExportRef> refs;
+            try { refs = DatabaseManager.GetDrawingExportRefs(releasedPaths); }
+            catch (Exception ex)
+            {
+                this.Cursor = Cursors.Default;
+                MessageBox.Show("Could not read drawing numbers.\n\n" + ex.Message,
+                    "BCore PDM — Print Drawings",
+                    MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                return;
+            }
+
+            var toPrint = new List<string>();                 // full paths, deduped
+            var toPrintRefs = new List<DrawingExportRef>();   // parallel: which drawing each path is (confirm list + audit log)
+            var seenPdf = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            var missing = new List<string>();                 // no current PDF
+            var needFallback = new List<DrawingExportRef>();
+
+            // For a LARGE scope, ONE EXPORTS\PDF enumeration beats N network
+            // File.Exists stats; for a small scope (the typical selection), probe
+            // each exact "{DrawingNo} REV {storedRev}.pdf" by File.Exists with NO
+            // folder listing (a 1-row print never lists tens of thousands of PDFs).
+            // Either way a missed exact name falls to the prefix scan below.
+            var pdfIndex = refs.Count > FastProbeMax ? BuildPdfIndex() : null;
+            foreach (var r in refs)
+            {
+                if (r == null || string.IsNullOrEmpty(r.DrawingNo)) continue;
+                string exactName = r.DrawingNo + " REV " + (r.Revision ?? "") + ".pdf";
+                string found = null;
+                if (pdfIndex != null)
+                {
+                    string p;
+                    if (pdfIndex.TryGetValue(exactName, out p)) found = p;
+                }
+                else
+                {
+                    string exactPath = null;
+                    try { exactPath = Path.Combine(PdfExportFolder, exactName); }
+                    catch { exactPath = null; }
+                    if (exactPath != null && File.Exists(exactPath)) found = exactPath;
+                }
+                if (found != null)
+                {
+                    if (seenPdf.Add(found)) { toPrint.Add(found); toPrintRefs.Add(r); }
+                }
+                else needFallback.Add(r);
+            }
+
+            // Prefix fallback (a stored rev drifted from disk, or a stale same-
+            // DrawingNo PDF lingers): build the folder index ONCE if we haven't
+            // already, then prefix-match each leftover deterministically.
+            if (needFallback.Count > 0)
+            {
+                if (pdfIndex == null) pdfIndex = BuildPdfIndex();
+                foreach (var r in needFallback)
+                {
+                    string found = ResolvePdfPrefix(r, pdfIndex);
+                    if (found == null)
+                    {
+                        missing.Add(r.DrawingNo + (string.IsNullOrEmpty(r.Revision)
+                            ? "" : " REV " + r.Revision));
+                        continue;
+                    }
+                    if (seenPdf.Add(found)) { toPrint.Add(found); toPrintRefs.Add(r); }
+                }
+            }
+            this.Cursor = Cursors.Default;
+
+            if (toPrint.Count == 0)
+            {
+                MessageBox.Show(
+                    "No released drawing PDFs were found for the selected files." +
+                    (missing.Count > 0
+                        ? "\n\nNo current PDF for:\n  • " +
+                          string.Join("\n  • ", missing.Take(20))
+                        : ""),
+                    "BCore PDM — Print Drawings",
+                    MessageBoxButtons.OK, MessageBoxIcon.Information);
+                return;
+            }
+
+            // Show EXACTLY which drawings will print (industry plot-list parity),
+            // not just a count — the Master verifies scope before sending.
+            var confirmSb = new StringBuilder();
+            confirmSb.Append("Print these ").Append(toPrint.Count)
+                     .Append(fromSelection
+                         ? " released drawing(s) from the selected rows (current page)"
+                         : " released drawing(s) from the whole filtered view")
+                     .Append(" to the default printer?\n");
+            for (int i = 0; i < toPrintRefs.Count && i < 20; i++)
+                confirmSb.Append("\n  • ").Append(toPrintRefs[i].DrawingNo)
+                         .Append(string.IsNullOrEmpty(toPrintRefs[i].Revision)
+                             ? "" : "  REV " + toPrintRefs[i].Revision);
+            if (toPrint.Count > 20)
+                confirmSb.Append("\n  • …and ").Append(toPrint.Count - 20).Append(" more");
+            if (missing.Count > 0)
+                confirmSb.Append("\n\n(").Append(missing.Count)
+                         .Append(" drawing(s) had no current PDF and will be skipped.)");
+            if (MessageBox.Show(confirmSb.ToString(),
+                    "BCore PDM — Print Drawings",
+                    MessageBoxButtons.YesNo, MessageBoxIcon.Question)
+                != DialogResult.Yes)
+                return;
+
+            // Print each; collect a "Printed" controlled-distribution row per
+            // success (who printed which drawing/rev, when — the ISO-9001/AS9100
+            // "who has a copy" trail, visible in the Audit Report) and write them
+            // ALL in ONE batched append AFTER the loop. The Rev logged is parsed
+            // from the PDF actually printed (RevFromPdfName), not the stored config
+            // rev, which can differ when the resolve fell back. Batching pays the
+            // audit file-lock/retry cost ONCE, so an Excel-locked audit.csv can't
+            // turn N prints into N × the retry stall. PrintPdf true = the print
+            // verb LAUNCHED (spooling is the handler's job); non-fatal throughout.
+            this.Cursor = Cursors.WaitCursor;
+            int ok = 0;
+            var failed = new List<string>();
+            var printedRows = new List<AuditLogger.AuditRow>();
+            for (int i = 0; i < toPrint.Count; i++)
+            {
+                string pdfName = Path.GetFileName(toPrint[i]);
+                if (ExportManager.PrintPdf(toPrint[i]))
+                {
+                    ok++;
+                    printedRows.Add(new AuditLogger.AuditRow
+                    {
+                        Action = "Printed", User = _me, FileName = pdfName,
+                        Revision = RevFromPdfName(pdfName),
+                        Note = "Printed to default printer"
+                    });
+                }
+                else failed.Add(pdfName);
+            }
+            if (printedRows.Count > 0) AuditLogger.LogBatch(printedRows);
+            this.Cursor = Cursors.Default;
+
+            var sb = new StringBuilder();
+            sb.Append("Sent ").Append(ok).Append(" of ").Append(toPrint.Count)
+              .Append(" drawing PDF(s) to the default printer.");
+            if (failed.Count > 0)
+                sb.Append("\n\nFailed to print:\n  • ")
+                  .Append(string.Join("\n  • ", failed.Take(20)));
+            if (missing.Count > 0)
+                sb.Append("\n\nNo current PDF (skipped):\n  • ")
+                  .Append(string.Join("\n  • ", missing.Take(20)));
+            MessageBox.Show(sb.ToString(), "BCore PDM — Print Drawings",
+                MessageBoxButtons.OK, MessageBoxIcon.Information);
+        }
+
+        // Build a filename → full-path index of EXPORTS\PDF in ONE enumeration.
+        private static Dictionary<string, string> BuildPdfIndex()
+        {
+            var idx = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            try
+            {
+                if (Directory.Exists(PdfExportFolder))
+                    foreach (string p in Directory.EnumerateFiles(PdfExportFolder, "*.pdf"))
+                        idx[Path.GetFileName(p)] = p;
+            }
+            catch { /* share unreachable → empty index, everything reports missing */ }
+            return idx;
+        }
+
+        // Among the current PDFs whose name starts with "{DrawingNo} REV " pick
+        // the NEWEST by write time — DETERMINISTIC, and lands on the latest
+        // release when the stored rev drifted or a stale same-DrawingNo PDF
+        // lingers. (The exact "{DrawingNo} REV {storedRev}.pdf" is probed first by
+        // the caller; this is the fallback only.) A plain first-hit over an
+        // unordered dictionary was nondeterministic; a lexical pick breaks past
+        // rev Z (AA sorts before Z), so write time is the key — with the FILENAME
+        // (ordinal) as a stable tie-break so an exact write-time collision still
+        // resolves the SAME way every run. The " REV " token keeps it within this
+        // exact DrawingNo (TEST-02 ≠ TEST-021). null = no current PDF.
+        private static string ResolvePdfPrefix(DrawingExportRef r,
+            Dictionary<string, string> pdfByName)
+        {
+            if (r == null || string.IsNullOrEmpty(r.DrawingNo)) return null;
+            string prefix = r.DrawingNo + " REV ";
+            string best = null, bestKey = null;
+            DateTime bestTime = DateTime.MinValue;
+            foreach (var kv in pdfByName)
+            {
+                if (!kv.Key.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
+                    continue;
+                DateTime t;
+                try { t = File.GetLastWriteTimeUtc(kv.Value); }
+                catch { t = DateTime.MinValue; }
+                if (best == null || t > bestTime ||
+                    (t == bestTime && string.CompareOrdinal(kv.Key, bestKey) > 0))
+                {
+                    best = kv.Value; bestKey = kv.Key; bestTime = t;
+                }
+            }
+            return best;
+        }
+
+        // Parse the rev token from a "{DrawingNo} REV {rev}.pdf" export name so the
+        // audit "Printed" Rev matches the PDF actually printed (the resolve may
+        // have fallen back to a rev different from the stored config rev). "" when
+        // unparseable.
+        private static string RevFromPdfName(string fileName)
+        {
+            if (string.IsNullOrEmpty(fileName)) return "";
+            string name = Path.GetFileNameWithoutExtension(fileName);
+            const string sep = " REV ";
+            int i = name.LastIndexOf(sep, StringComparison.OrdinalIgnoreCase);
+            return i < 0 ? "" : name.Substring(i + sep.Length).Trim();
+        }
+
         // ── Win32 cue banner (placeholder text — not available on .NET 4.8) ──
         [System.Runtime.InteropServices.DllImport("user32.dll",
             CharSet = System.Runtime.InteropServices.CharSet.Unicode)]
@@ -322,6 +579,16 @@ namespace PDMLite
             _btnClear.Height = ctrlH;
             _btnClear.Click += (s, e) => ClearAllFilters();
             _topPanel.Controls.Add(_btnClear);
+
+            // Batch-print released drawing PDFs for the selected rows (or the
+            // whole filtered view when nothing is selected).
+            // Same size + colour as Audit Report (it stacks flush beneath it) so
+            // the two read as a uniform pair.
+            _btnPrint = MakeButton("Print Drawings", cBrandDark, fBtn,
+                new Point(S(758), rowY), S(150));
+            _btnPrint.Height = ctrlH;
+            _btnPrint.Click += (s, e) => PrintDrawings();
+            _topPanel.Controls.Add(_btnPrint);
 
             // Switch to the Audit Report (single-window nav): signal the caller and
             // close — the task pane reopens the Audit Report in this window's place.
@@ -463,7 +730,7 @@ namespace PDMLite
                 AllowUserToResizeRows = false,
                 ReadOnly = true,
                 RowHeadersVisible = false,
-                MultiSelect = false,
+                MultiSelect = true,   // batch-print: select several rows at once
                 SelectionMode = DataGridViewSelectionMode.FullRowSelect,
                 // Widths are set per-column to fit content (+20%) in AutoSizeColumns.
                 AutoSizeColumnsMode = DataGridViewAutoSizeColumnsMode.None,
@@ -1400,6 +1667,10 @@ namespace PDMLite
             int panelW = _topPanel.ClientSize.Width;
             int gap = S(10);
 
+            // Print Drawings is NOT in this row (it stacks under Audit Report
+            // below) so the control row stays narrow enough to keep the status
+            // doughnut visible — adding a 6th button widened the row past the
+            // chart-reserve threshold and hid the chart.
             int rowW = _search.Width + gap + _btnRefresh.Width + gap
                      + _btnExport.Width + gap + _btnClear.Width
                      + gap + _btnAudit.Width;
@@ -1447,31 +1718,37 @@ namespace PDMLite
             _btnClear.Left   = _btnExport.Right + gap;
             _btnAudit.Left   = _btnClear.Right + gap;
 
-            // JUSTIFY the count quick-filters across the SAME span as the control
-            // row above (search.Left → btnAudit.Right), space-between: first flush
-            // left, last flush right, equal gaps — so the strip lines up with the
-            // row above at any width. If the labels can't fit that span (large-vault
-            // counts), centre the natural-width strip in centerW instead (the chart
-            // is already hidden / centerW widened via 'widest'), so they never spill
-            // into the reserved chart column.
+            // Print Drawings is STACKED directly beneath Audit Report (right edges
+            // flush), in the band between the control row and the KPI strip — kept
+            // OUT of the control row so the row stays narrow and the status chart
+            // stays visible. The count strip below shortens to clear its column.
+            _btnPrint.Left = _btnAudit.Right - _btnPrint.Width;
+            _btnPrint.Top  = _btnAudit.Bottom + S(6);
+
+            // JUSTIFY the count quick-filters across the span from the control
+            // row's left (search.Left) to JUST LEFT of the stacked Print Drawings
+            // button (space-between: first flush left, last flush right, equal
+            // gaps). If the labels can't fit that (now narrower) span, pack them
+            // from the left at the tight S(6) gap — LEFT-ANCHORED so they never run
+            // under the Print button or the reserved chart column (centring in
+            // centerW would overlap the stacked button).
             if (nCounts > 0)
             {
                 int left = _search.Left;
-                int right = _btnAudit.Right;
+                int right = _btnPrint.Left - gap;   // stop before the stacked Print button
                 bool fits = countsMinW <= right - left;
                 int gapC = fits
                     ? (nCounts > 1 ? (right - left - countsSumW) / (nCounts - 1) : 0)
                     : S(6);
-                int cx = fits ? left
-                              : Math.Max(S(14), (centerW - countsMinW) / 2);
+                int cx = left;   // left-anchored for both fit + overflow
                 for (int i = 0; i < nCounts; i++)
                 {
                     _countLabels[i].Left = cx;
                     cx += _countLabels[i].Width + gapC;
                 }
-                // Land the LAST count's right edge EXACTLY on btnAudit.Right (the
-                // strip must span to the Audit Report button) — absorbs the gap
-                // integer-division remainder; only in the fits case.
+                // Land the LAST count's right edge EXACTLY on the strip's right
+                // bound (just left of the stacked Print Drawings button) — absorbs
+                // the gap integer-division remainder; only in the fits case.
                 if (fits)
                     _countLabels[nCounts - 1].Left =
                         right - _countLabels[nCounts - 1].Width;

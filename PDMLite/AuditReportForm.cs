@@ -999,6 +999,7 @@ namespace PDMLite
             if (Eq(action, "MarkObsolete")) return cMaroon;
             if (Eq(action, "Reinstate")) return cBrand;
             if (Eq(action, "Lock") || Eq(action, "Unlock")) return cMaroon;
+            if (Eq(action, "Printed")) return cBrand;   // controlled-distribution event
             if (action != null && action.StartsWith("Request",
                     StringComparison.OrdinalIgnoreCase)) return cPurple;
             return cTextGray; // Create, Save, AutoPurgeOrphan, anything else

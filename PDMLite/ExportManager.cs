@@ -509,6 +509,31 @@ namespace PDMLite
             catch { }
         }
 
+        // Print a PDF to the DEFAULT printer via the shell's registered "print"
+        // verb (Adobe Reader / Edge / whatever handles .pdf). No PDF library is
+        // needed (PdfSharp can't print) and no new dependency — matches the
+        // no-NuGet/native-dep convention. Best-effort: returns false if there is
+        // no print handler registered or the launch throws. The actual spooling
+        // is the handler's job; a true return means the print verb was launched.
+        public static bool PrintPdf(string pdfPath)
+        {
+            try
+            {
+                if (string.IsNullOrEmpty(pdfPath) || !File.Exists(pdfPath))
+                    return false;
+                var psi = new System.Diagnostics.ProcessStartInfo(pdfPath)
+                {
+                    Verb = "print",
+                    UseShellExecute = true,        // required for the shell verb
+                    CreateNoWindow = true,
+                    WindowStyle = System.Diagnostics.ProcessWindowStyle.Hidden
+                };
+                System.Diagnostics.Process.Start(psi);
+                return true;
+            }
+            catch { return false; }
+        }
+
         // Sheet metal flat pattern DXF.
         // Uses the DEDICATED IPartDoc.ExportToDWG2 flat-pattern API rather than a
         // generic Extension.SaveAs(".dxf", exportData:null): that generic save

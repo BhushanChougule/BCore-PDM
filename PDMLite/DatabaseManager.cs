@@ -27,6 +27,15 @@ namespace PDMLite
         public string PartType    { get; set; }
     }
 
+    // One DrawingNo + Revision that names a CURRENT released drawing PDF
+    // (EXPORTS\PDF\{DrawingNo} REV {Revision}.pdf). Returned by
+    // DatabaseManager.GetDrawingExportRefs for the dashboard's batch-print.
+    public class DrawingExportRef
+    {
+        public string DrawingNo { get; set; }
+        public string Revision  { get; set; }
+    }
+
     // One DIRECT child of an assembly, captured at SAVE time (the assembly is open
     // then, so this is cheap and needs no file opening): which file it is, which
     // CONFIG of that file the assembly references, and how many instances. Stored
@@ -3069,6 +3078,83 @@ namespace PDMLite
             // One DB load (BuildDrawingIndex), then the shared in-memory matcher
             // — same single-load cost callers had before.
             return BuildDrawingIndex().DrawingsForConfig(modelFilePath, configName);
+        }
+
+        // BATCHED drawing-export lookup for the dashboard's batch-print: for the
+        // given file paths, return the (DrawingNo, Revision) of every config with
+        // a non-empty DrawingNo, in ONE vault.xml load (no per-file round-trip).
+        // A DRAWING path (no DrawingNo of its own) resolves to the MODEL it
+        // references and yields the model's config DrawingNos. Deduped by
+        // DrawingNo+Revision (case-insensitive). READ-ONLY (never writes/purges).
+        // LIMITATION: a LEGACY record saved before the <Configurations> block
+        // existed has no per-config DrawingNo, so it yields no ref and the batch
+        // print reports it as "no current PDF (skipped)" even if a PDF is on
+        // disk. Self-healing — any save / New Revision by the current add-in
+        // writes <Configurations> (UpsertFile), permanently fixing the record;
+        // the PR deliberately avoids opening the doc to recover it.
+        public static List<DrawingExportRef> GetDrawingExportRefs(
+            IEnumerable<string> filePaths)
+        {
+            var result = new List<DrawingExportRef>();
+            if (filePaths == null) return result;
+            var want = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (var p in filePaths)
+                if (!string.IsNullOrEmpty(p)) want.Add(p);
+            if (want.Count == 0) return result;
+
+            var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            lock (_lock) using (AcquireProcessLock())
+            {
+                var doc = LoadOrCreate();
+                var filesEl = doc.Root.Element("Files");
+                if (filesEl == null) return result;
+
+                // Index every File element by FilePath (for ReferencedModel
+                // resolution of drawing rows).
+                var byPath = new Dictionary<string, XElement>(
+                    StringComparer.OrdinalIgnoreCase);
+                foreach (var el in filesEl.Elements("File"))
+                {
+                    string fp = (string)el.Element("FilePath") ?? "";
+                    if (fp.Length > 0 && !byPath.ContainsKey(fp)) byPath[fp] = el;
+                }
+
+                foreach (string path in want)
+                {
+                    XElement el;
+                    if (!byPath.TryGetValue(path, out el)) continue;
+
+                    XElement modelEl = el;
+                    // A drawing has no DrawingNo of its own — the PDF is named by
+                    // the MODEL's DrawingNo, so resolve via ReferencedModel.
+                    if (path.EndsWith(".slddrw", StringComparison.OrdinalIgnoreCase))
+                    {
+                        string refModel = (string)el.Element("ReferencedModel") ?? "";
+                        XElement m;
+                        if (string.IsNullOrEmpty(refModel) ||
+                            !byPath.TryGetValue(refModel, out m))
+                            continue; // can't resolve the model → no DrawingNo
+                        modelEl = m;
+                    }
+
+                    string pn  = (string)modelEl.Element("PartNumber")  ?? "";
+                    string dsc = (string)modelEl.Element("Description") ?? "";
+                    string rev = (string)modelEl.Element("Revision")    ?? "";
+                    foreach (var cfg in ReadConfigs(modelEl, pn, dsc, rev))
+                    {
+                        if (string.IsNullOrWhiteSpace(cfg.DrawingNo)) continue;
+                        string key = cfg.DrawingNo.ToLowerInvariant() + "|" +
+                            (cfg.Revision ?? "").ToLowerInvariant();
+                        if (!seen.Add(key)) continue;
+                        result.Add(new DrawingExportRef
+                        {
+                            DrawingNo = cfg.DrawingNo,
+                            Revision  = cfg.Revision ?? ""
+                        });
+                    }
+                }
+            }
+            return result;
         }
 
         // Returns all configuration entries for a tracked file path.
