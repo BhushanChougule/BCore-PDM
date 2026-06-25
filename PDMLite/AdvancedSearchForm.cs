@@ -98,6 +98,27 @@ namespace PDMLite
         private StringFormat _sfBarCenter;
         private Pen _penBorder; // 1px card outline (shared — no per-paint alloc)
 
+        // Card thumbnails: extracted SOLIDWORKS preview bitmaps keyed by
+        // "filePath|config", loaded LAZILY on a card's first paint (so a 50-card
+        // search never fires 50 preview reads up front) and CACHED. The Images
+        // are SHARED (a ThumbPanel never owns its image), capped to bound GDI
+        // handles, and disposed in Dispose(bool). A null value means "tried, no
+        // preview" so a preview-less file is read at most once. Mirrors the
+        // task-pane search cards (own copy per the one-form-one-file convention).
+        private readonly Dictionary<string, Image> _thumbCache =
+            new Dictionary<string, Image>(StringComparer.OrdinalIgnoreCase);
+        private const int ThumbCacheCap = 400;
+
+        // Thumbnails load via a THROTTLED, deferred queue — never inside a paint
+        // (GetPreviewBitmap is a network COM call that pumps the STA loop and froze
+        // the popup per card). Panels request on first paint; a Timer (_thumbTimer)
+        // loads ONE per tick off the message loop so cards/recents render first;
+        // suspended during the large preview.
+        private readonly Queue<ThumbPanel> _thumbQueue = new Queue<ThumbPanel>();
+        private Timer _thumbTimer;   // throttle: one preview read per tick
+        private bool _thumbDraining;
+        private bool _thumbLoadsSuspended;
+
         public AdvancedSearchForm()
         {
             using (var g = this.CreateGraphics())
@@ -132,6 +153,7 @@ namespace PDMLite
             if (disposing)
             {
                 _timer?.Stop(); _timer?.Dispose();
+                _thumbTimer?.Stop(); _thumbTimer?.Dispose();
                 _fHeader?.Dispose(); _fSection?.Dispose(); _fLabel?.Dispose();
                 _fInput?.Dispose(); _fHint?.Dispose();
                 _fCardBold?.Dispose(); _fCardPn?.Dispose(); _fCardDesc?.Dispose();
@@ -139,6 +161,9 @@ namespace PDMLite
                 _sfBarCenter?.Dispose();
                 _penBorder?.Dispose();
                 _cardMenu?.Dispose();
+                foreach (var img in _thumbCache.Values)
+                    try { img?.Dispose(); } catch { }
+                _thumbCache.Clear();
             }
             base.Dispose(disposing);
         }
@@ -159,9 +184,11 @@ namespace PDMLite
             this.BackColor = cBg;
             this.KeyPreview = true;
             // Height = header(30) + filters(206) + bottom(42) + a results area
-            // sized to EXACTLY 5 card rows (no 6th row peeking): 5*cardH(74) +
-            // 4*rowGap(6) + top pad(6) = 400, viewport ~404 hides row 6 cleanly.
-            this.ClientSize = new Size(S(648), S(682));
+            // sized to EXACTLY 4 card rows of the taller card (no 5th row
+            // peeking): 4*cardH(98) + 3*rowGap(6) + top pad(6) = 416, viewport
+            // ~420 hides row 5 cleanly (cards grew to S98 for the new layout —
+            // file name + description on full-width rows, preview beside PN/REV).
+            this.ClientSize = new Size(S(648), S(698));
 
             int clientW = ClientSize.Width;
             int margin  = S(14);
@@ -322,9 +349,11 @@ namespace PDMLite
 
             // ── Shared right-click menu for result cards (acts on _menuCard) ──
             _cardMenu = new ContextMenuStrip();
+            _cardMenu.Items.Add("Copy Part No", null, (s, e) => CardCopyPartNo());
             _cardMenu.Items.Add("Copy File Path", null, (s, e) => CardCopyPath());
             _cardMenu.Items.Add("Open Containing Folder", null,
                 (s, e) => CardOpenFolder());
+            _cardMenu.Items.Add(new ToolStripSeparator());
             _cardMenu.Items.Add("Where Used…", null, (s, e) => CardWhereUsed());
 
             // ── Live search wiring (debounced) ──────────────────────────────
@@ -332,6 +361,10 @@ namespace PDMLite
             // Stop FIRST so a queued WM_TIMER can't re-enter; try/catch so an
             // unexpected throw on the tick can't escape onto SOLIDWORKS' loop.
             _timer.Tick += (s, e) => { _timer.Stop(); try { RunSearch(); } catch { } };
+            // Throttle preview loads: one per 60ms tick — cards/recents render
+            // first, thumbnails trickle in without freezing the popup.
+            _thumbTimer = new Timer { Interval = 60 };
+            _thumbTimer.Tick += ThumbTick;
             _mainBox.TextChanged    += (s, e) => Schedule();
             _drawnByBox.TextChanged += (s, e) => Schedule();
             // Material/Finish are editable: TextChanged catches typing AND the
@@ -453,6 +486,7 @@ namespace PDMLite
         private void RunSearch()
         {
             ClearAndDispose(_resultsPanel);
+            _thumbQueue.Clear(); // discard pending preview loads for the old cards
             if (_btnExport != null) _btnExport.Enabled = false;
 
             string main     = _mainBox.Text.Trim();
@@ -467,8 +501,9 @@ namespace PDMLite
                 finish.Length == 0 && partType.Length == 0 && status.Length == 0 &&
                 fileType.Length == 0)
             {
-                _countLabel.ForeColor = cTextGray;
-                _countLabel.Text = "Type a term or pick a filter to search.";
+                // No term / filters → show the user's recently-opened files
+                // (quick access, like Vault/PDM — moved here off the task pane).
+                ShowRecentFiles();
                 return;
             }
 
@@ -508,7 +543,8 @@ namespace PDMLite
                 string baseName = Path.GetFileNameWithoutExtension(
                     string.IsNullOrEmpty(f.FileName)
                         ? Path.GetFileName(f.FilePath) : f.FileName);
-                string ext = (Path.GetExtension(f.FileName) ?? "").ToLowerInvariant();
+                string ext = (Path.GetExtension(string.IsNullOrEmpty(f.FileName)
+                    ? f.FilePath : f.FileName) ?? "").ToLowerInvariant();
 
                 // SearchFilesAdvanced already TRIMMED Configurations to the
                 // matching configs, so one card per entry is exactly right.
@@ -524,11 +560,14 @@ namespace PDMLite
                         ModelPath    = f.FilePath,
                         ModelExt     = ext,
                         ConfigName   = c.Name,
-                        PartNumber   = string.IsNullOrEmpty(c.PartNo)
-                                          ? f.PartNumber : c.PartNo,
-                        Description  = string.IsNullOrEmpty(c.Description)
-                                          ? f.Description : c.Description,
-                        Revision     = c.Revision,
+                        // Per-config value first, then the file-level value,
+                        // whitespace-safe — legacy records have empty <Config>
+                        // fields (Revision had NO fallback before), so a card
+                        // would show a blank PN / no rev even when file-level
+                        // values exist.
+                        PartNumber   = FirstNonBlank(c.PartNo, f.PartNumber),
+                        Description  = FirstNonBlank(c.Description, f.Description),
+                        Revision     = FirstNonBlank(c.Revision, f.Revision),
                         Status       = f.Status,
                         SupersededBy = f.SupersededBy,
                         DrawingPath  = drawingPath
@@ -563,6 +602,100 @@ namespace PDMLite
                 : cards.Count + " result" + (cards.Count == 1 ? "" : "s") + ".";
         }
 
+        // Empty fields → show the user's recently-opened files (RecentFiles is
+        // populated by the task pane on every active saved doc). ONE DB load via
+        // GetFilesByPaths; ONE card per recent FILE (its primary/first config) so
+        // a multi-config recent doesn't expand into N cards. Recency order is
+        // kept (no sort — recency is the point). Export stays disabled (it's for
+        // an actual search).
+        private void ShowRecentFiles()
+        {
+            List<string> paths = RecentFiles.Get();
+            if (paths.Count == 0)
+            {
+                _countLabel.ForeColor = cTextGray;
+                _countLabel.Text = "Type a term or pick a filter to search.";
+                return;
+            }
+            List<VaultFile> recents;
+            try { recents = DatabaseManager.GetFilesByPaths(paths); }
+            catch
+            {
+                _countLabel.ForeColor = cMaroon;
+                _countLabel.Text = "Vault unavailable — check the N: drive.";
+                return;
+            }
+            if (recents.Count == 0)
+            {
+                _countLabel.ForeColor = cTextGray;
+                _countLabel.Text = "Type a term or pick a filter to search.";
+                return;
+            }
+
+            DatabaseManager.DrawingIndex drwIndex;
+            try { drwIndex = DatabaseManager.BuildDrawingIndex(); }
+            catch { drwIndex = null; }
+
+            var cards = new List<Card>();
+            foreach (var f in recents)
+            {
+                string baseName = Path.GetFileNameWithoutExtension(
+                    string.IsNullOrEmpty(f.FileName)
+                        ? Path.GetFileName(f.FilePath) : f.FileName);
+                string ext = (Path.GetExtension(string.IsNullOrEmpty(f.FileName)
+                    ? f.FilePath : f.FileName) ?? "").ToLowerInvariant();
+                // One card per recent FILE — its primary (first) config.
+                ConfigEntry c = (f.Configurations != null && f.Configurations.Count > 0)
+                    ? f.Configurations[0] : null;
+                string cfgName = c != null ? c.Name : "";
+                string drawingPath = null;
+                var drws = drwIndex?.DrawingsForConfig(f.FilePath, cfgName);
+                if (drws != null && drws.Count > 0) drawingPath = drws[0];
+                cards.Add(new Card
+                {
+                    DisplayName  = baseName,
+                    ModelPath    = f.FilePath,
+                    ModelExt     = ext,
+                    ConfigName   = cfgName,
+                    PartNumber   = FirstNonBlank(c != null ? c.PartNo : null,
+                                                 f.PartNumber),
+                    Description  = FirstNonBlank(c != null ? c.Description : null,
+                                                 f.Description),
+                    Revision     = FirstNonBlank(c != null ? c.Revision : null,
+                                                 f.Revision),
+                    Status       = f.Status,
+                    SupersededBy = f.SupersededBy,
+                    DrawingPath  = drawingPath
+                });
+            }
+            if (cards.Count == 0)
+            {
+                _countLabel.ForeColor = cTextGray;
+                _countLabel.Text = "Type a term or pick a filter to search.";
+                return;
+            }
+            RenderCards(cards);
+            _countLabel.ForeColor = cTextGray;
+            _countLabel.Text = "Recently opened (" + cards.Count +
+                ") — type a term or pick a filter to search.";
+        }
+
+        // On open (empty fields) show recents — RunSearch routes the all-empty
+        // case to ShowRecentFiles. Done in OnShown (not the ctor) so the results
+        // panel is laid out at its real width before the cards tile.
+        protected override void OnShown(EventArgs e)
+        {
+            base.OnShown(e);
+            // Show the popup INSTANTLY, then load recents — the recents lookup is
+            // a couple of network vault reads, and running it synchronously here
+            // froze the window while it opened. Give immediate feedback, then defer
+            // the work onto the message loop so the form paints first.
+            _countLabel.ForeColor = cTextGray;
+            _countLabel.Text = "Loading recent files…";
+            try { BeginInvoke((Action)(() => { try { RunSearch(); } catch { } })); }
+            catch { try { RunSearch(); } catch { } }
+        }
+
         private void RenderCards(List<Card> cards)
         {
             // THREE-COLUMN grid: full-width cards looked stretched and wasted
@@ -583,9 +716,16 @@ namespace PDMLite
                          - pad * 2 - SystemInformation.VerticalScrollBarWidth;
             int cardW = (totalW - colGap * (cols - 1)) / cols;
             int barW = S(16);
-            int cardH = S(74);
+            int cardH = S(98);
             int contentLeft = barW + S(8);
-            int contentW = cardW - contentLeft - S(8);
+            // SMALL square preview on the RIGHT, beside the part-no + rev rows;
+            // the file name + description get their own full-width rows above and
+            // below it (mirrors the task-pane search card).
+            int thumbW = S(30);
+            int thumbX = cardW - thumbW - S(8);
+            int thumbY = S(26);
+            int fullW  = cardW - contentLeft - S(8);   // file name / desc / buttons
+            int textW  = thumbX - contentLeft - S(6);  // part no / rev (stop at preview)
 
             for (int i = 0; i < cards.Count; i++)
             {
@@ -637,29 +777,53 @@ namespace PDMLite
                 };
                 card.Controls.Add(bar);
 
-                // ── File name ──
+                // ── File name — FULL-WIDTH top row (a long name uses the whole
+                // card; fall back to the part number if somehow blank). ──
                 card.Controls.Add(new Label
                 {
-                    Text = g.DisplayName, Font = _fCardBold, ForeColor = cTextDark,
-                    Location = new Point(contentLeft, S(6)),
-                    AutoSize = false, Width = contentW, Height = S(14),
+                    Text = FirstNonBlank(g.DisplayName, g.PartNumber),
+                    Font = _fCardBold, ForeColor = cTextDark,
+                    Location = new Point(contentLeft, S(7)),
+                    AutoSize = false, Width = fullW, Height = S(16),
                     AutoEllipsis = true
                 });
 
-                // ── Part number (+ revision) ──
-                string pnText = string.IsNullOrEmpty(g.PartNumber)
-                                    ? "No Part No" : g.PartNumber;
-                if (!string.IsNullOrEmpty(g.Revision))
-                    pnText += "   REV " + g.Revision;
+                // ── Thumbnail (lazy SOLIDWORKS preview; click = enlarge) ──
+                string thumbPath = hasModel ? modelPath : drawingPath;
+                string thumbCfg = configName;
+                var thumb = new ThumbPanel(thumbPath, thumbCfg,
+                    () => GetThumbnail(thumbPath, thumbCfg), RequestThumb)
+                {
+                    Location = new Point(thumbX, thumbY),
+                    Width = thumbW, Height = thumbW, BackColor = cCard
+                };
+                thumb.Click += (s, e) => ShowLargePreview(thumbPath, thumbCfg);
+                card.Controls.Add(thumb);
+
+                // ── Part number (own row, ELLIPSIS up to the preview when long) ──
                 card.Controls.Add(new Label
                 {
-                    Text = pnText, Font = _fCardPn, ForeColor = cTextGray,
-                    Location = new Point(contentLeft, S(21)),
-                    AutoSize = false, Width = contentW, Height = S(13),
+                    Text = string.IsNullOrWhiteSpace(g.PartNumber)
+                                ? "No Part No" : g.PartNumber,
+                    Font = _fCardPn, ForeColor = cTextGray,
+                    Location = new Point(contentLeft, S(26)),
+                    AutoSize = false, Width = textW, Height = S(14),
                     AutoEllipsis = true
                 });
 
-                // ── Description (or "→ Superseded by X" for an obsolete card) ──
+                // ── Revision (own row) ──
+                card.Controls.Add(new Label
+                {
+                    Text = string.IsNullOrWhiteSpace(g.Revision)
+                                ? "" : "REV " + g.Revision,
+                    Font = _fCardPn, ForeColor = cTextGray,
+                    Location = new Point(contentLeft, S(42)),
+                    AutoSize = false, Width = textW, Height = S(14),
+                    AutoEllipsis = true
+                });
+
+                // ── Description (or "→ Superseded by X" for an obsolete card) —
+                // FULL-WIDTH row below the preview. ──
                 bool obsoleteWithRepl =
                     string.Equals(g.Status, "Obsolete",
                         StringComparison.OrdinalIgnoreCase) &&
@@ -668,19 +832,19 @@ namespace PDMLite
                 {
                     Text = obsoleteWithRepl
                         ? "→ Superseded by " + g.SupersededBy
-                        : (string.IsNullOrEmpty(g.Description)
+                        : (string.IsNullOrWhiteSpace(g.Description)
                                 ? "(no description)" : g.Description),
                     Font = _fCardDesc,
                     ForeColor = obsoleteWithRepl ? cMaroon : cTextLight,
-                    Location = new Point(contentLeft, S(34)),
-                    AutoSize = false, Width = contentW, Height = S(13),
+                    Location = new Point(contentLeft, S(58)),
+                    AutoSize = false, Width = fullW, Height = S(14),
                     AutoEllipsis = true
                 });
 
-                // ── Open PRT/ASM + Open DRW ──
+                // ── Open PRT/ASM + Open DRW — full width along the bottom ──
                 int gap = S(4);
-                int btnW = (contentW - gap) / 2;
-                int btnY = S(52);
+                int btnW = (fullW - gap) / 2;
+                int btnY = S(76);
                 int btnH = S(18);
 
                 string partLabel = g.ModelExt == ".sldasm" ? "Open ASM" : "Open PRT";
@@ -772,6 +936,13 @@ namespace PDMLite
         }
 
         // ── Result card right-click actions (operate on _menuCard) ───────────
+        private void CardCopyPartNo()
+        {
+            if (_menuCard == null) return;
+            string pn = FirstNonBlank(_menuCard.PartNumber, _menuCard.DisplayName);
+            try { if (!string.IsNullOrEmpty(pn)) Clipboard.SetText(pn); } catch { }
+        }
+
         private void CardCopyPath()
         {
             if (_menuCard == null || string.IsNullOrEmpty(_menuCard.ModelPath))
@@ -969,6 +1140,391 @@ namespace PDMLite
                 case "Obsolete": return cObsolete;
                 default:         return cBrand;
             }
+        }
+
+        // First non-whitespace value (trimmed), else "". Lets a card fall back
+        // from a blank per-config field to the file-level value.
+        private static string FirstNonBlank(params string[] vals)
+        {
+            if (vals != null)
+                foreach (var v in vals)
+                    if (!string.IsNullOrWhiteSpace(v)) return v.Trim();
+            return "";
+        }
+
+        // ── Card preview thumbnails (own copy per one-form-one-file; mirrors
+        //    the task-pane search cards) ───────────────────────────────────────
+
+        // Converts an OLE IPictureDisp (what ISldWorks.GetPreviewBitmap returns)
+        // to a System.Drawing.Image via AxHost's protected static helper.
+        private sealed class PictureConverter : System.Windows.Forms.AxHost
+        {
+            private PictureConverter() : base(
+                "59EE46BA-677D-4d20-BF10-8D8067CB8B33") { }
+            public static Image ToImage(object iPictureDisp)
+            {
+                try
+                {
+                    return iPictureDisp == null
+                        ? null : GetPictureFromIPicture(iPictureDisp);
+                }
+                catch { return null; }
+            }
+        }
+
+        // A small tile that paints a SHARED cached preview Image (never owned —
+        // disposed only by the cache) or a light page-glyph placeholder. The
+        // image is fetched LAZILY on first paint (the _loaded flag set BEFORE the
+        // call so a re-entrant paint can't recurse).
+        private sealed class ThumbPanel : Panel
+        {
+            private readonly Func<Image> _loader;          // SW-API fallback read
+            private readonly Action<ThumbPanel> _request;  // parent resolves the load
+            private Image _img;     // shared cached image — NOT owned here
+            private bool _loaded, _requested;
+            public readonly string FilePath;  // for the shell load + cache key
+            public readonly string Config;
+            public ThumbPanel(string filePath, string config,
+                Func<Image> loader, Action<ThumbPanel> request)
+            {
+                FilePath = filePath;
+                Config = config;
+                _loader = loader;
+                _request = request;
+                DoubleBuffered = true;
+                Cursor = Cursors.Hand;
+            }
+            // Set the resolved tile (shell loader OR SW-API fallback); null leaves
+            // the placeholder but marks loaded so we don't re-request.
+            public void SetImage(Image img)
+            {
+                _img = img;
+                _loaded = true;
+                if (!IsDisposed) Invalidate();
+            }
+            // SW-API FALLBACK read — called by the throttle (ThumbTick), OUTSIDE any
+            // paint (doing it in OnPaint froze the popup per card and let the COM
+            // pump re-dispatch clicks).
+            public void LoadNow()
+            {
+                if (_loaded) return;
+                Image img = null;
+                try { img = _loader == null ? null : _loader(); }
+                catch { img = null; }
+                SetImage(img);
+            }
+            protected override void OnPaint(PaintEventArgs e)
+            {
+                var g = e.Graphics;
+                g.Clear(Color.White);
+                if (_img != null)
+                {
+                    g.InterpolationMode = System.Drawing.Drawing2D
+                        .InterpolationMode.HighQualityBicubic;
+                    double s = Math.Min((double)Width / _img.Width,
+                                        (double)Height / _img.Height);
+                    int w = Math.Max(1, (int)(_img.Width * s));
+                    int h = Math.Max(1, (int)(_img.Height * s));
+                    try { g.DrawImage(_img, (Width - w) / 2, (Height - h) / 2, w, h); }
+                    catch { }
+                }
+                else
+                {
+                    int mx = Width / 5, my = Height / 6;
+                    var page = new Rectangle(mx, my, Width - 2 * mx, Height - 2 * my);
+                    g.FillRectangle(Brushes.WhiteSmoke, page);
+                    g.DrawRectangle(Pens.Silver, page);
+                }
+                g.DrawRectangle(Pens.Gainsboro, 0, 0, Width - 1, Height - 1);
+                if (!_loaded && !_requested)
+                {
+                    _requested = true;
+                    _request?.Invoke(this);
+                }
+            }
+        }
+
+        private const int ShellThumbPx = 256; // shell request size, downscaled to the tile
+
+        // A card asks (on first paint) for its preview. Try the Windows SHELL
+        // thumbnail on a BACKGROUND thread FIRST (zero UI cost); a cache hit short-
+        // circuits; a shell MISS falls back to the throttled SW-API read.
+        private void RequestThumb(ThumbPanel p)
+        {
+            if (p == null || p.IsDisposed) return;
+            string key = p.FilePath + "|" + (p.Config ?? "");
+            Image cached;
+            if (_thumbCache.TryGetValue(key, out cached)) { p.SetImage(cached); return; }
+            try
+            {
+                ShellThumbnailLoader.Request(this, () => p != null && !p.IsDisposed,
+                    p.FilePath, ShellThumbPx, raw => OnShellThumb(p, key, raw));
+            }
+            catch { QueueThumbLoad(p); }
+        }
+
+        // Background shell result on the UI thread → build + cache + show; a shell
+        // MISS (null) falls back to the throttled SW read.
+        private void OnShellThumb(ThumbPanel p, string key, Bitmap raw)
+        {
+            if (raw == null) { if (p != null && !p.IsDisposed) QueueThumbLoad(p); return; }
+            Image tile = null;
+            try { tile = MakeTile(raw); } catch { tile = null; }
+            finally { try { raw.Dispose(); } catch { } }
+            if (tile == null) { if (p != null && !p.IsDisposed) QueueThumbLoad(p); return; }
+            StoreThumb(key, tile);
+            if (p != null && !p.IsDisposed) p.SetImage(tile);
+        }
+
+        // A ThumbPanel that missed the shell asks for its preview via the SW API;
+        // we enqueue and make sure the throttle timer is running — the COM read
+        // happens in ThumbTick, off paint, one per tick.
+        private void QueueThumbLoad(ThumbPanel p)
+        {
+            if (p == null || p.IsDisposed) return;
+            _thumbQueue.Enqueue(p);
+            if (!_thumbLoadsSuspended && _thumbTimer != null && !_thumbTimer.Enabled)
+                _thumbTimer.Start();
+        }
+
+        // Load ONE queued thumbnail per tick (throttled). The guard makes a
+        // pump-re-dispatched WM_TIMER a no-op; stops the timer when the queue
+        // drains; skips disposed panels.
+        private void ThumbTick(object sender, EventArgs e)
+        {
+            if (_thumbDraining || _thumbLoadsSuspended) return;
+            _thumbDraining = true;
+            try
+            {
+                while (_thumbQueue.Count > 0)
+                {
+                    ThumbPanel p = _thumbQueue.Dequeue();
+                    if (p != null && !p.IsDisposed) { p.LoadNow(); break; }
+                }
+            }
+            catch { }
+            finally
+            {
+                _thumbDraining = false;
+                if (_thumbQueue.Count == 0) _thumbTimer?.Stop();
+            }
+        }
+
+        // Pause/resume preview loading around the large-preview read+modal.
+        private void SuspendThumbLoads(bool suspend)
+        {
+            _thumbLoadsSuspended = suspend;
+            if (suspend) _thumbTimer?.Stop();
+            else if (_thumbQueue.Count > 0) _thumbTimer?.Start();
+        }
+
+        // Cached small preview for a file (null on failure → placeholder). MUST
+        // run on the UI thread (the SW API is not thread-safe). Caches the result
+        // (INCLUDING null).
+        private Image GetThumbnail(string filePath, string config)
+        {
+            if (string.IsNullOrEmpty(filePath)) return null;
+            string key = filePath + "|" + (config ?? "");
+            Image cached;
+            if (_thumbCache.TryGetValue(key, out cached)) return cached;
+
+            Image thumb = null;
+            try
+            {
+                if (PDMLiteAddin.SwApp != null && File.Exists(filePath))
+                {
+                    object pic = PDMLiteAddin.SwApp.GetPreviewBitmap(
+                        filePath, config ?? "");
+                    using (Image full = PictureConverter.ToImage(pic))
+                        thumb = MakeTile(full);
+                }
+            }
+            catch { thumb = null; }
+
+            StoreThumb(key, thumb);
+            return thumb;
+        }
+
+        // Crop the preview's baked background then shrink to the tile size; shared
+        // by the shell path (OnShellThumb) + SW path (GetThumbnail).
+        private Image MakeTile(Image full)
+        {
+            if (full == null) return null;
+            Image cropped = CropToContent(full);
+            try { return ResizeToThumb(cropped, S(96)); }
+            finally { if (cropped != full) cropped.Dispose(); }
+        }
+
+        // Cache a tile under "path|config". Don't Dispose on the cap — live tiles
+        // SHARE the cached Image; GC reclaims the rest once panels go away.
+        private void StoreThumb(string key, Image img)
+        {
+            if (_thumbCache.Count >= ThumbCacheCap) _thumbCache.Clear();
+            _thumbCache[key] = img;
+        }
+
+        // Resize to fit within maxPx (preserve aspect, never upscale) into a NEW
+        // bitmap; the caller disposes the source.
+        private static Image ResizeToThumb(Image src, int maxPx)
+        {
+            if (src == null) return null;
+            double s = Math.Min((double)maxPx / src.Width,
+                                (double)maxPx / src.Height);
+            if (s > 1) s = 1;
+            int w = Math.Max(1, (int)(src.Width * s));
+            int h = Math.Max(1, (int)(src.Height * s));
+            var bmp = new Bitmap(w, h);
+            using (var g = Graphics.FromImage(bmp))
+            {
+                g.InterpolationMode = System.Drawing.Drawing2D
+                    .InterpolationMode.HighQualityBicubic;
+                g.DrawImage(src, 0, 0, w, h);
+            }
+            return bmp;
+        }
+
+        // Trim the near-white / transparent border SOLIDWORKS bakes around a
+        // preview so the model FILLS the small tile. Returns the SOURCE unchanged
+        // when there is nothing to trim, the image is all background, or anything
+        // fails — so the caller disposes the result ONLY when it differs from src.
+        private static Image CropToContent(Image src)
+        {
+            if (src == null) return null;
+            Bitmap bmp = null;
+            bool ownBmp = false;
+            try
+            {
+                bmp = src as Bitmap;
+                if (bmp == null) { bmp = new Bitmap(src); ownBmp = true; }
+                int w = bmp.Width, h = bmp.Height;
+                if (w < 8 || h < 8) return src;
+
+                var data = bmp.LockBits(new Rectangle(0, 0, w, h),
+                    System.Drawing.Imaging.ImageLockMode.ReadOnly,
+                    System.Drawing.Imaging.PixelFormat.Format32bppArgb);
+                int stride = data.Stride;
+                byte[] buf = new byte[stride * h];
+                System.Runtime.InteropServices.Marshal.Copy(
+                    data.Scan0, buf, 0, buf.Length);
+                bmp.UnlockBits(data);
+
+                // Detect the ACTUAL background colour from 8 border samples
+                // (corners + edge midpoints) rather than assuming white — some
+                // seats save a light-gray / gradient backdrop where a hardcoded
+                // white cutoff trims nothing. Per-channel MEDIAN is robust to a
+                // model that reaches one sample point. (BGRA buffer.)
+                int[] sx = { 2, w - 3, 2, w - 3, w / 2, w / 2, 2, w - 3 };
+                int[] sy = { 2, 2, h - 3, h - 3, 2, h - 3, h / 2, h / 2 };
+                byte[] sB = new byte[8], sG = new byte[8], sR = new byte[8];
+                for (int k = 0; k < 8; k++)
+                {
+                    int si = sy[k] * stride + (sx[k] << 2);
+                    sB[k] = buf[si]; sG[k] = buf[si + 1]; sR[k] = buf[si + 2];
+                }
+                Array.Sort(sB); Array.Sort(sG); Array.Sort(sR);
+                int bgB = sB[4], bgG = sG[4], bgR = sR[4]; // medians
+                const int TOL = 22; // per-channel distance that still counts as bg
+
+                int minX = w, minY = h, maxX = -1, maxY = -1;
+                for (int y = 0; y < h; y++)
+                {
+                    int row = y * stride;
+                    for (int x = 0; x < w; x++)
+                    {
+                        int i = row + (x << 2);
+                        bool bg = buf[i + 3] < 8 ||
+                            (Math.Abs(buf[i]     - bgB) <= TOL &&
+                             Math.Abs(buf[i + 1] - bgG) <= TOL &&
+                             Math.Abs(buf[i + 2] - bgR) <= TOL);
+                        if (bg) continue;
+                        if (x < minX) minX = x;
+                        if (x > maxX) maxX = x;
+                        if (y < minY) minY = y;
+                        if (y > maxY) maxY = y;
+                    }
+                }
+                if (maxX < minX || maxY < minY) return src; // all background
+
+                int padX = Math.Max(1, (maxX - minX + 1) / 20);
+                int padY = Math.Max(1, (maxY - minY + 1) / 20);
+                minX = Math.Max(0, minX - padX);
+                minY = Math.Max(0, minY - padY);
+                maxX = Math.Min(w - 1, maxX + padX);
+                maxY = Math.Min(h - 1, maxY + padY);
+                int cw = maxX - minX + 1, ch = maxY - minY + 1;
+                if (cw >= w && ch >= h) return src; // nothing to trim
+                if (cw < 4 || ch < 4) return src;   // degenerate
+
+                var crop = new Bitmap(cw, ch,
+                    System.Drawing.Imaging.PixelFormat.Format32bppArgb);
+                using (var g = Graphics.FromImage(crop))
+                    g.DrawImage(bmp, new Rectangle(0, 0, cw, ch),
+                        new Rectangle(minX, minY, cw, ch), GraphicsUnit.Pixel);
+                return crop;
+            }
+            catch { return src; }
+            finally { if (ownBmp && bmp != null) bmp.Dispose(); }
+        }
+
+        // Click a card thumbnail → show the FULL preview larger in a modal (no
+        // crop — SW frames the model centred with even margins, which reads
+        // cleaner at this size). Esc / click-the-image closes. Null → info.
+        private void ShowLargePreview(string filePath, string config)
+        {
+            // Modal ShowDialog pumps the message loop; a queued debounce tick would
+            // RunSearch → ClearAndDispose the card whose Click is on the stack
+            // (ObjectDisposedException, audit-M8). Stop it, like the other modals.
+            _timer.Stop();
+            // Pause background card-thumbnail loads while we do our own preview
+            // read + modal, so two SOLIDWORKS preview reads never overlap.
+            SuspendThumbLoads(true);
+            try
+            {
+
+            Image full = null;
+            try
+            {
+                if (PDMLiteAddin.SwApp != null && File.Exists(filePath))
+                    full = PictureConverter.ToImage(
+                        PDMLiteAddin.SwApp.GetPreviewBitmap(filePath, config ?? ""));
+            }
+            catch { full = null; }
+
+            if (full == null)
+            {
+                MessageBox.Show("No preview available for this file.",
+                    "BCore PDM", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                return;
+            }
+            try
+            {
+                using (var f = new Form())
+                using (var pb = new PictureBox())
+                {
+                    f.Text = "Preview — " +
+                        Path.GetFileNameWithoutExtension(filePath);
+                    f.StartPosition = FormStartPosition.CenterScreen;
+                    f.BackColor = Color.White;
+                    f.ShowInTaskbar = false;
+                    int w = Math.Min(Math.Max(full.Width, S(320)), S(900));
+                    int h = Math.Min(Math.Max(full.Height, S(320)), S(700));
+                    f.ClientSize = new Size(w, h);
+                    pb.Dock = DockStyle.Fill;
+                    pb.SizeMode = PictureBoxSizeMode.Zoom;
+                    pb.Image = full; // PictureBox does not own/dispose its Image
+                    pb.Cursor = Cursors.Hand;
+                    f.Controls.Add(pb);
+                    f.KeyPreview = true;
+                    f.KeyDown += (s, e) =>
+                    { if (e.KeyCode == Keys.Escape) f.Close(); };
+                    pb.Click += (s, e) => f.Close();
+                    f.ShowDialog(this);
+                }
+            }
+            finally { full.Dispose(); }
+
+            }
+            finally { SuspendThumbLoads(false); }
         }
 
         // Controls.Clear() re-parents removed controls to the hidden parking

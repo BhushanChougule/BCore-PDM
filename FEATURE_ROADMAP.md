@@ -75,10 +75,26 @@ builds on (so it rebases cleanly once that merges).
    filters already do part of this). Depends on: **#62** (search refactor),
    **#59** (culture-safe matching).
 
-7. **Per-division auto-numbering suggester.** Suggest the next part number per
-   division from existing PartNos (cheap, additive; the docs call full
-   auto-numbering unfeasible, a *suggester* is not). New helper + a PropertyForm
-   affordance. Depends on: nothing hard.
+7. **Per-division auto-numbering generator** — *ATTEMPTED (PR #76) then CLOSED &
+   PARKED as unfeasible for Richards-Wilcox.* PR #76 built a per-division
+   `{prefix}{zero-padded counter}` generator with atomic cross-machine
+   reservation (`DatabaseManager.GenerateNextPartNo`, a `<NumberingSchemes>`
+   vault section, and a "Gen" button + Master scheme editor). It was closed
+   without merging because RW has **no standard part-number format** — a single
+   division already runs several coexisting, non-sequential families: e.g.
+   conveyor has `2035.00471` / `3035.00001` / `4035.00250` (the 4-digit prefix
+   encodes product type, not a counter), `MM372348.010` (MM + the **external
+   sales-order number** — no sequence to count), and plain `087523`. A counter
+   can't reproduce any of these, so an always-on generator only emits
+   non-conforming numbers (a footgun). The actual requirement — never reusing a
+   number — is already met by the existing duplicate-PartNo detection on save
+   (`FindPartNumberConflict`). **Branch parked** (`claude/feat-partno-generator`),
+   not deleted: if a future commercial customer (or one RW number-family that is
+   genuinely a clean counter) wants it, revive it as a **dormant/opt-in** design
+   — the Gen button appears only when a Master explicitly configures a scheme for
+   a division, so it imposes nothing on a shop that doesn't use it. This confirms
+   the standing CLAUDE.md note that format-based numbering is "unfeasible due to
+   3 divisions with inconsistent numbering."
 
 ### Phase 4 — True check-out & notifications
 
