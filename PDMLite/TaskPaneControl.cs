@@ -414,11 +414,12 @@ namespace PDMLite
             // the Active File section below.
             var hintLink = new Label
             {
-                Text = "Search part no / description   ·   ★ Saved & Recent",
+                Text = "★ Saved · Recent · Favorites",   // kept short to fit the narrow pane (was clipping)
                 Font = new Font("Segoe UI", 3.2f * _scale),
                 ForeColor = cBrand,
                 Location = new Point(x, y),
                 AutoSize = false,
+                AutoEllipsis = true,                       // never hard-clip at any DPI
                 Width = w,
                 Height = S(14),
                 Cursor = Cursors.Hand
