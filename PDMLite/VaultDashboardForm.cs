@@ -279,12 +279,12 @@ namespace PDMLite
             // Resolve each released file's drawing identity (DrawingNo + Rev) in
             // ONE vault.xml load, then locate the current PDF in EXPORTS\PDF. The
             // network I/O below runs under a wait cursor.
-            Cursor.Current = Cursors.WaitCursor;
+            this.Cursor = Cursors.WaitCursor;
             List<DrawingExportRef> refs;
             try { refs = DatabaseManager.GetDrawingExportRefs(releasedPaths); }
             catch (Exception ex)
             {
-                Cursor.Current = Cursors.Default;
+                this.Cursor = Cursors.Default;
                 MessageBox.Show("Could not read drawing numbers.\n\n" + ex.Message,
                     "BCore PDM — Print Drawings",
                     MessageBoxButtons.OK, MessageBoxIcon.Warning);
@@ -345,7 +345,7 @@ namespace PDMLite
                     if (seenPdf.Add(found)) { toPrint.Add(found); toPrintRefs.Add(r); }
                 }
             }
-            Cursor.Current = Cursors.Default;
+            this.Cursor = Cursors.Default;
 
             if (toPrint.Count == 0)
             {
@@ -392,7 +392,7 @@ namespace PDMLite
             // audit file-lock/retry cost ONCE, so an Excel-locked audit.csv can't
             // turn N prints into N × the retry stall. PrintPdf true = the print
             // verb LAUNCHED (spooling is the handler's job); non-fatal throughout.
-            Cursor.Current = Cursors.WaitCursor;
+            this.Cursor = Cursors.WaitCursor;
             int ok = 0;
             var failed = new List<string>();
             var printedRows = new List<AuditLogger.AuditRow>();
@@ -412,7 +412,7 @@ namespace PDMLite
                 else failed.Add(pdfName);
             }
             if (printedRows.Count > 0) AuditLogger.LogBatch(printedRows);
-            Cursor.Current = Cursors.Default;
+            this.Cursor = Cursors.Default;
 
             var sb = new StringBuilder();
             sb.Append("Sent ").Append(ok).Append(" of ").Append(toPrint.Count)
