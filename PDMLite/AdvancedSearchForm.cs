@@ -791,8 +791,8 @@ namespace PDMLite
                 // ── Thumbnail (lazy SOLIDWORKS preview; click = enlarge) ──
                 string thumbPath = hasModel ? modelPath : drawingPath;
                 string thumbCfg = configName;
-                var thumb = new ThumbPanel(
-                    () => GetThumbnail(thumbPath, thumbCfg), QueueThumbLoad)
+                var thumb = new ThumbPanel(thumbPath, thumbCfg,
+                    () => GetThumbnail(thumbPath, thumbCfg), RequestThumb)
                 {
                     Location = new Point(thumbX, thumbY),
                     Width = thumbW, Height = thumbW, BackColor = cCard
@@ -1178,27 +1178,40 @@ namespace PDMLite
         // call so a re-entrant paint can't recurse).
         private sealed class ThumbPanel : Panel
         {
-            private readonly Func<Image> _loader;
-            private readonly Action<ThumbPanel> _request; // parent queues a load
+            private readonly Func<Image> _loader;          // SW-API fallback read
+            private readonly Action<ThumbPanel> _request;  // parent resolves the load
             private Image _img;     // shared cached image — NOT owned here
             private bool _loaded, _requested;
-            public ThumbPanel(Func<Image> loader, Action<ThumbPanel> request)
+            public readonly string FilePath;  // for the shell load + cache key
+            public readonly string Config;
+            public ThumbPanel(string filePath, string config,
+                Func<Image> loader, Action<ThumbPanel> request)
             {
+                FilePath = filePath;
+                Config = config;
                 _loader = loader;
                 _request = request;
                 DoubleBuffered = true;
                 Cursor = Cursors.Hand;
             }
-            // The (slow, network, MESSAGE-PUMPING) preview read — called ONLY by
-            // the parent's serialized drain, OUTSIDE any paint (doing it in OnPaint
-            // froze the popup per card and let the COM pump re-dispatch clicks).
+            // Set the resolved tile (shell loader OR SW-API fallback); null leaves
+            // the placeholder but marks loaded so we don't re-request.
+            public void SetImage(Image img)
+            {
+                _img = img;
+                _loaded = true;
+                if (!IsDisposed) Invalidate();
+            }
+            // SW-API FALLBACK read — called by the throttle (ThumbTick), OUTSIDE any
+            // paint (doing it in OnPaint froze the popup per card and let the COM
+            // pump re-dispatch clicks).
             public void LoadNow()
             {
                 if (_loaded) return;
-                _loaded = true;
-                try { _img = _loader == null ? null : _loader(); }
-                catch { _img = null; }
-                if (!IsDisposed) Invalidate();
+                Image img = null;
+                try { img = _loader == null ? null : _loader(); }
+                catch { img = null; }
+                SetImage(img);
             }
             protected override void OnPaint(PaintEventArgs e)
             {
@@ -1231,9 +1244,41 @@ namespace PDMLite
             }
         }
 
-        // A ThumbPanel asks (on first paint) for its preview; we enqueue and make
-        // sure the throttle timer is running — the COM read happens in ThumbTick,
-        // off paint, one per tick.
+        private const int ShellThumbPx = 256; // shell request size, downscaled to the tile
+
+        // A card asks (on first paint) for its preview. Try the Windows SHELL
+        // thumbnail on a BACKGROUND thread FIRST (zero UI cost); a cache hit short-
+        // circuits; a shell MISS falls back to the throttled SW-API read.
+        private void RequestThumb(ThumbPanel p)
+        {
+            if (p == null || p.IsDisposed) return;
+            string key = p.FilePath + "|" + (p.Config ?? "");
+            Image cached;
+            if (_thumbCache.TryGetValue(key, out cached)) { p.SetImage(cached); return; }
+            try
+            {
+                ShellThumbnailLoader.Request(this, p.FilePath, ShellThumbPx,
+                    raw => OnShellThumb(p, key, raw));
+            }
+            catch { QueueThumbLoad(p); }
+        }
+
+        // Background shell result on the UI thread → build + cache + show; a shell
+        // MISS (null) falls back to the throttled SW read.
+        private void OnShellThumb(ThumbPanel p, string key, Bitmap raw)
+        {
+            if (raw == null) { if (p != null && !p.IsDisposed) QueueThumbLoad(p); return; }
+            Image tile = null;
+            try { tile = MakeTile(raw); } catch { tile = null; }
+            finally { try { raw.Dispose(); } catch { } }
+            if (tile == null) { if (p != null && !p.IsDisposed) QueueThumbLoad(p); return; }
+            StoreThumb(key, tile);
+            if (p != null && !p.IsDisposed) p.SetImage(tile);
+        }
+
+        // A ThumbPanel that missed the shell asks for its preview via the SW API;
+        // we enqueue and make sure the throttle timer is running — the COM read
+        // happens in ThumbTick, off paint, one per tick.
         private void QueueThumbLoad(ThumbPanel p)
         {
             if (p == null || p.IsDisposed) return;
@@ -1291,27 +1336,31 @@ namespace PDMLite
                     object pic = PDMLiteAddin.SwApp.GetPreviewBitmap(
                         filePath, config ?? "");
                     using (Image full = PictureConverter.ToImage(pic))
-                    {
-                        if (full != null)
-                        {
-                            // Trim the white margin FIRST so the model fills the
-                            // small tile; CropToContent may return `full` itself.
-                            Image cropped = CropToContent(full);
-                            try { thumb = ResizeToThumb(cropped, S(96)); }
-                            finally { if (cropped != full) cropped.Dispose(); }
-                        }
-                    }
+                        thumb = MakeTile(full);
                 }
             }
             catch { thumb = null; }
 
-            // Don't Dispose cached Images here — a ThumbPanel in the current view
-            // shares (never owns) the cached Image, so disposing mid-session blanks
-            // a live tile. Clear() drops our refs; GC reclaims the rest.
-            if (_thumbCache.Count >= ThumbCacheCap)
-                _thumbCache.Clear();
-            _thumbCache[key] = thumb;
+            StoreThumb(key, thumb);
             return thumb;
+        }
+
+        // Crop the preview's baked background then shrink to the tile size; shared
+        // by the shell path (OnShellThumb) + SW path (GetThumbnail).
+        private Image MakeTile(Image full)
+        {
+            if (full == null) return null;
+            Image cropped = CropToContent(full);
+            try { return ResizeToThumb(cropped, S(96)); }
+            finally { if (cropped != full) cropped.Dispose(); }
+        }
+
+        // Cache a tile under "path|config". Don't Dispose on the cap — live tiles
+        // SHARE the cached Image; GC reclaims the rest once panels go away.
+        private void StoreThumb(string key, Image img)
+        {
+            if (_thumbCache.Count >= ThumbCacheCap) _thumbCache.Clear();
+            _thumbCache[key] = img;
         }
 
         // Resize to fit within maxPx (preserve aspect, never upscale) into a NEW

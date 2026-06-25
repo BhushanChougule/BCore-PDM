@@ -5,6 +5,7 @@ using System.Collections.Generic;
 using System.Drawing;
 using System.Linq;
 using System.IO;
+using System.Runtime.InteropServices;
 using System.Windows.Forms;
 
 namespace PDMLite
@@ -176,31 +177,41 @@ namespace PDMLite
         // re-entrant paint (a COM read can pump messages) can't recurse into it.
         private sealed class ThumbPanel : Panel
         {
-            private readonly Func<Image> _loader;
-            private readonly Action<ThumbPanel> _request; // parent queues a load
+            private readonly Func<Image> _loader;          // SW-API fallback read
+            private readonly Action<ThumbPanel> _request;  // parent resolves the load
             private Image _img;     // shared cached image — NOT owned here
             private bool _loaded, _requested;
-            public ThumbPanel(Func<Image> loader, Action<ThumbPanel> request)
+            public readonly string FilePath;  // for the shell load + cache key
+            public readonly string Config;
+            public ThumbPanel(string filePath, string config,
+                Func<Image> loader, Action<ThumbPanel> request)
             {
+                FilePath = filePath;
+                Config = config;
                 _loader = loader;
                 _request = request;
                 DoubleBuffered = true;
                 Cursor = Cursors.Hand;
             }
-            // Run the (slow, network, MESSAGE-PUMPING) SOLIDWORKS preview read.
-            // Called ONLY by the parent's serialized drain — on the UI thread but
-            // OUTSIDE any paint. Doing this inside OnPaint (as before) blocked the
-            // UI per card AND let the COM call's STA pump re-dispatch a queued
-            // click mid-paint (a preview click landed as an Open) and re-enter SW
-            // while it was opening a doc (crash). _loaded set FIRST so a re-entrant
-            // paint during the read neither re-requests nor reloads.
+            // Set the resolved tile (from the shell loader OR the SW-API fallback).
+            // null leaves the placeholder but marks loaded so we don't re-request.
+            public void SetImage(Image img)
+            {
+                _img = img;
+                _loaded = true;
+                if (!IsDisposed) Invalidate();
+            }
+            // SW-API FALLBACK read (only when the shell has no thumbnail). Runs on
+            // the UI thread via the throttle (ThumbTick), OUTSIDE any paint — doing
+            // a SW preview read inside OnPaint blocked the UI per card and let the
+            // COM pump re-dispatch a click mid-paint / re-enter a doc-open (crash).
             public void LoadNow()
             {
                 if (_loaded) return;
-                _loaded = true;
-                try { _img = _loader == null ? null : _loader(); }
-                catch { _img = null; }
-                if (!IsDisposed) Invalidate();
+                Image img = null;
+                try { img = _loader == null ? null : _loader(); }
+                catch { img = null; }
+                SetImage(img);
             }
             protected override void OnPaint(PaintEventArgs e)
             {
@@ -990,8 +1001,8 @@ namespace PDMLite
                 // Use the model's preview when there is one, else the drawing's.
                 string thumbPath = hasModel ? modelPath : drawingPath;
                 string thumbCfg = configName;
-                var thumb = new ThumbPanel(
-                    () => GetThumbnail(thumbPath, thumbCfg), QueueThumbLoad)
+                var thumb = new ThumbPanel(thumbPath, thumbCfg,
+                    () => GetThumbnail(thumbPath, thumbCfg), RequestThumb)
                 {
                     Location = new Point(thumbX, thumbY),
                     Width = thumbW,
@@ -1329,9 +1340,44 @@ namespace PDMLite
             }
         }
 
-        // A ThumbPanel asks (on its first paint) for its preview. We enqueue and
-        // make sure the throttle timer is running — the COM read happens in
-        // ThumbTick, off the paint path, one per tick.
+        private const int ShellThumbPx = 256; // shell request size, downscaled to the tile
+
+        // A card asks (on its first paint) for its preview. Try the Windows SHELL
+        // thumbnail on a BACKGROUND thread FIRST (zero UI cost — see ShellThumbnail
+        // / ShellThumbnailLoader); a cache hit short-circuits; a shell MISS falls
+        // back to the throttled SW-API read (QueueThumbLoad → ThumbTick → the
+        // GetThumbnail path), so a machine without the shell handler is no worse
+        // than before.
+        private void RequestThumb(ThumbPanel p)
+        {
+            if (p == null || p.IsDisposed) return;
+            string key = p.FilePath + "|" + (p.Config ?? "");
+            Image cached;
+            if (_thumbCache.TryGetValue(key, out cached)) { p.SetImage(cached); return; }
+            try
+            {
+                ShellThumbnailLoader.Request(this, p.FilePath, ShellThumbPx,
+                    raw => OnShellThumb(p, key, raw));
+            }
+            catch { QueueThumbLoad(p); } // loader unavailable → SW fallback
+        }
+
+        // A background shell result arrives on the UI thread. Build + cache the
+        // tile and show it; a shell MISS (null) falls back to the throttled SW read.
+        private void OnShellThumb(ThumbPanel p, string key, Bitmap raw)
+        {
+            if (raw == null) { if (p != null && !p.IsDisposed) QueueThumbLoad(p); return; }
+            Image tile = null;
+            try { tile = MakeTile(raw); } catch { tile = null; }
+            finally { try { raw.Dispose(); } catch { } }
+            if (tile == null) { if (p != null && !p.IsDisposed) QueueThumbLoad(p); return; }
+            StoreThumb(key, tile);
+            if (p != null && !p.IsDisposed) p.SetImage(tile);
+        }
+
+        // A ThumbPanel that missed the shell asks for its preview via the SW API.
+        // We enqueue and make sure the throttle timer is running — the COM read
+        // happens in ThumbTick, off the paint path, one per tick.
         private void QueueThumbLoad(ThumbPanel p)
         {
             if (p == null || p.IsDisposed) return;
@@ -1395,31 +1441,33 @@ namespace PDMLite
                     object pic = PDMLiteAddin.SwApp.GetPreviewBitmap(
                         filePath, config ?? "");
                     using (Image full = PictureConverter.ToImage(pic))
-                    {
-                        if (full != null)
-                        {
-                            // Trim the white margin SOLIDWORKS bakes around the
-                            // preview FIRST so the model fills the small tile.
-                            // CropToContent may return `full` itself (nothing to
-                            // trim) — only dispose a NEW crop.
-                            Image cropped = CropToContent(full);
-                            try { thumb = ResizeToThumb(cropped, S(96)); }
-                            finally { if (cropped != full) cropped.Dispose(); }
-                        }
-                    }
+                        thumb = MakeTile(full);
                 }
             }
             catch { thumb = null; }
 
-            // Crude bound: when full, drop the cache so previews re-load on demand.
-            // Do NOT Dispose the cached Images here — a ThumbPanel in the CURRENT
-            // view shares the cached Image (it never owns it), so disposing one
-            // mid-session blanks a live tile until the next rebuild; Clear() drops
-            // our refs and GC reclaims the unreferenced ones once panels go away.
-            if (_thumbCache.Count >= ThumbCacheCap)
-                _thumbCache.Clear();
-            _thumbCache[key] = thumb;
+            StoreThumb(key, thumb);
             return thumb;
+        }
+
+        // Crop the preview's baked background, then shrink to the card-tile size.
+        // CropToContent may return `full` itself (nothing to trim) — only dispose a
+        // NEW crop. Shared by the shell path (OnShellThumb) + SW path (GetThumbnail).
+        private Image MakeTile(Image full)
+        {
+            if (full == null) return null;
+            Image cropped = CropToContent(full);
+            try { return ResizeToThumb(cropped, S(96)); }
+            finally { if (cropped != full) cropped.Dispose(); }
+        }
+
+        // Cache a resolved tile under "path|config". Crude bound: when full, drop
+        // the cache (do NOT dispose — live tiles SHARE the cached Image; GC
+        // reclaims the unreferenced ones once their panels go away).
+        private void StoreThumb(string key, Image img)
+        {
+            if (_thumbCache.Count >= ThumbCacheCap) _thumbCache.Clear();
+            _thumbCache[key] = img;
         }
 
         // Resize to fit within maxPx (preserve aspect, never upscale) into a NEW
@@ -2540,6 +2588,138 @@ namespace PDMLite
                 }
             }
             catch { }
+        }
+    }
+
+    // Fetches a file's Windows SHELL thumbnail — the same preview Explorer shows,
+    // produced by SOLIDWORKS' registered thumbnail handler. Unlike ISldWorks
+    // .GetPreviewBitmap (which must run on SW's STA UI thread and BLOCKS it), the
+    // shell image factory is a SEPARATE COM object SAFE to call on a background
+    // thread, so card previews load with zero UI-thread cost. Returns null on ANY
+    // failure (no thumbnail / handler not registered / error) → caller falls back
+    // to the SW-API read. Minimal P/Invoke surface (one interface, one method) to
+    // keep the native risk small; Image.FromHbitmap gives an OPAQUE copy, which is
+    // fine — SW previews sit on a solid background and the card crop trims it.
+    internal static class ShellThumbnail
+    {
+        [ComImport, Guid("bcc18b79-ba16-442f-80c4-8a59c30c463b"),
+         InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+        private interface IShellItemImageFactory
+        {
+            [PreserveSig] int GetImage(SIZE size, int flags, out IntPtr phbm);
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct SIZE { public int cx; public int cy; }
+
+        [DllImport("shell32.dll", CharSet = CharSet.Unicode, PreserveSig = false)]
+        private static extern void SHCreateItemFromParsingName(
+            [MarshalAs(UnmanagedType.LPWStr)] string pszPath, IntPtr pbc,
+            [MarshalAs(UnmanagedType.LPStruct)] Guid riid,
+            [MarshalAs(UnmanagedType.Interface)] out object ppv);
+
+        [DllImport("gdi32.dll")]
+        private static extern bool DeleteObject(IntPtr hObject);
+
+        private const int SIIGBF_THUMBNAILONLY = 0x08; // a thumbnail, never an icon
+        private static readonly Guid IID_IShellItemImageFactory =
+            new Guid("bcc18b79-ba16-442f-80c4-8a59c30c463b");
+
+        // HandleProcessCorruptedStateExceptions so the catch below also swallows an
+        // AccessViolation from a hypothetical bad P/Invoke signature — a failed
+        // thumbnail (→ SW-API fallback) must never be able to crash SOLIDWORKS.
+        [System.Runtime.ExceptionServices.HandleProcessCorruptedStateExceptions]
+        [System.Security.SecurityCritical]
+        public static Bitmap TryGet(string path, int size)
+        {
+            if (string.IsNullOrEmpty(path) || size <= 0) return null;
+            try { if (!File.Exists(path)) return null; } catch { return null; }
+            object obj = null;
+            IntPtr hbm = IntPtr.Zero;
+            try
+            {
+                SHCreateItemFromParsingName(path, IntPtr.Zero,
+                    IID_IShellItemImageFactory, out obj);
+                var factory = obj as IShellItemImageFactory;
+                if (factory == null) return null;
+                SIZE sz; sz.cx = size; sz.cy = size;
+                int hr = factory.GetImage(sz, SIIGBF_THUMBNAILONLY, out hbm);
+                if (hr != 0 || hbm == IntPtr.Zero) return null;
+                using (var tmp = Image.FromHbitmap(hbm))
+                    return new Bitmap(tmp); // copy so the HBITMAP can be freed
+            }
+            catch { return null; }
+            finally
+            {
+                if (hbm != IntPtr.Zero) { try { DeleteObject(hbm); } catch { } }
+                if (obj != null) { try { Marshal.ReleaseComObject(obj); } catch { } }
+            }
+        }
+    }
+
+    // Runs ShellThumbnail.TryGet on ONE dedicated background STA thread and
+    // marshals each result back to the requesting control's UI thread — so card
+    // preview reads never touch the UI thread. IsBackground, so it dies with the
+    // process (no shutdown needed). Best-effort: a disposed owner / failed marshal
+    // just drops the bitmap. Shared by TaskPaneControl + AdvancedSearchForm.
+    internal static class ShellThumbnailLoader
+    {
+        private sealed class Req
+        {
+            public Control Owner; public string Path; public int Size;
+            public Action<Bitmap> Done;
+        }
+        private static readonly object _gate = new object();
+        private static readonly Queue<Req> _q = new Queue<Req>();
+        private static readonly System.Threading.AutoResetEvent _signal =
+            new System.Threading.AutoResetEvent(false);
+        private static System.Threading.Thread _worker;
+
+        public static void Request(Control owner, string path, int size,
+            Action<Bitmap> done)
+        {
+            if (owner == null || string.IsNullOrEmpty(path) || done == null) return;
+            lock (_gate)
+            {
+                _q.Enqueue(new Req { Owner = owner, Path = path, Size = size,
+                                     Done = done });
+                if (_worker == null)
+                {
+                    _worker = new System.Threading.Thread(WorkerLoop)
+                    { IsBackground = true, Name = "BCorePDM.ShellThumbs" };
+                    _worker.SetApartmentState(System.Threading.ApartmentState.STA);
+                    _worker.Start();
+                }
+            }
+            _signal.Set();
+        }
+
+        private static void WorkerLoop()
+        {
+            while (true)
+            {
+                Req r = null;
+                lock (_gate) { if (_q.Count > 0) r = _q.Dequeue(); }
+                if (r == null) { _signal.WaitOne(); continue; }
+
+                Bitmap bmp = null;
+                try { bmp = ShellThumbnail.TryGet(r.Path, r.Size); }
+                catch { bmp = null; }
+
+                try
+                {
+                    Control owner = r.Owner;
+                    if (owner != null && !owner.IsDisposed && owner.IsHandleCreated)
+                    {
+                        Bitmap captured = bmp;
+                        Action<Bitmap> done = r.Done;
+                        owner.BeginInvoke((Action)(() => done(captured)));
+                        bmp = null; // ownership handed to the UI callback
+                    }
+                }
+                catch { }
+                finally { if (bmp != null) { try { bmp.Dispose(); } catch { } } }
+            }
         }
     }
 }
