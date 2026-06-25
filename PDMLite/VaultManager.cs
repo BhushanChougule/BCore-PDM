@@ -1632,7 +1632,13 @@ namespace PDMLite
                     // Affected-items: list the top-level products that ultimately
                     // contain this file so the Master sees the release impact up
                     // front. Non-fatal (a failed where-used walk never blocks).
-                    confirmBody += "\n\n" + BuildAffectedProductsText(filePath);
+                    // Wait cursor: the where-used walk is a one-pass disk read
+                    // that can briefly pause the UI on a large vault (matches
+                    // WhereUsedForm). Previous cursor restored in finally.
+                    Cursor prevCursor = Cursor.Current;
+                    Cursor.Current = Cursors.WaitCursor;
+                    try { confirmBody += "\n\n" + BuildAffectedProductsText(filePath); }
+                    finally { Cursor.Current = prevCursor; }
                 }
                 else
                 {
@@ -3433,6 +3439,23 @@ namespace PDMLite
             // RELEASED-copy / double record can't add the same parent twice.
             var seenAsmNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
+            // Load every tracked record ONCE into a path->record map for the
+            // parent enrichment below. The old code called GetFileRecord per
+            // assembly — each a full vault.xml SMB load under the cross-machine
+            // lock, i.e. O(assemblies) loads (punishing on the release-confirm
+            // path and at 50-100k scale). One GetAllFiles snapshot replaces them;
+            // lookups are in-memory. Non-fatal: a failed load leaves entries with
+            // no PartNo/Rev/Status, exactly like the old per-record catch.
+            var recByPath = new Dictionary<string, VaultFile>(
+                StringComparer.OrdinalIgnoreCase);
+            try
+            {
+                foreach (var rf in DatabaseManager.GetAllFiles())
+                    if (rf != null && !string.IsNullOrEmpty(rf.FilePath))
+                        recByPath[rf.FilePath] = rf;
+            }
+            catch { }
+
             foreach (string asmPath in
                      DatabaseManager.GetTrackedFilePathsByExtension(".sldasm"))
             {
@@ -3475,17 +3498,13 @@ namespace PDMLite
                             Path = asmPath,
                             Name = Path.GetFileName(asmPath)
                         };
-                        try
+                        VaultFile rec;
+                        if (recByPath.TryGetValue(asmPath, out rec) && rec != null)
                         {
-                            var rec = DatabaseManager.GetFileRecord(asmPath);
-                            if (rec != null)
-                            {
-                                entry.PartNo   = rec.PartNumber;
-                                entry.Revision = rec.Revision;
-                                entry.Status   = rec.Status;
-                            }
+                            entry.PartNo   = rec.PartNumber;
+                            entry.Revision = rec.Revision;
+                            entry.Status   = rec.Status;
                         }
-                        catch { }
                     }
 
                     List<WhereUsedEntry> list;
