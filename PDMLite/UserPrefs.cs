@@ -6,18 +6,19 @@ using System.Xml.Linq;
 
 namespace PDMLite
 {
-    // Per-user, per-machine UI preferences: saved (named) quick searches, the
-    // recently-opened file list, and starred favourites. Stored LOCALLY at
-    // %LOCALAPPDATA%\BCorePDM\prefs.xml (NOT vault.xml) — these are personal and
-    // high-churn (Recent updates on every open), so they must never contend for
-    // the cross-machine vault lock or bloat the shared DB. Mirrors the audit
-    // spill's local-folder choice. Every operation is NON-FATAL (swallows IO
-    // errors) — a preferences hiccup must never disrupt a workflow.
+    // Per-user, per-machine UI preferences: saved (named) quick searches and
+    // starred favourites. Stored LOCALLY at %LOCALAPPDATA%\BCorePDM\prefs.xml
+    // (NOT vault.xml) — these are personal, so they must never contend for the
+    // cross-machine vault lock or bloat the shared DB. Mirrors the audit spill's
+    // local-folder choice. Every operation is NON-FATAL (swallows IO errors) — a
+    // preferences hiccup must never disrupt a workflow.
+    // NOTE: the "Recent files" list is NOT here — it's the shared RecentFiles
+    // store (recent.txt, populated on every doc activation), which both Quick
+    // Access and Advanced Search read, so there is ONE recent list, not two.
     public static class UserPrefs
     {
         public class SavedSearch { public string Name; public string Term; }
 
-        private const int RecentCap = 15;
         private static readonly object _lock = new object();
 
         private static string Dir => Path.Combine(
@@ -31,7 +32,6 @@ namespace PDMLite
             catch { }
             return new XDocument(new XElement("Prefs",
                 new XElement("SavedSearches"),
-                new XElement("Recent"),
                 new XElement("Favorites")));
         }
 
@@ -50,42 +50,6 @@ namespace PDMLite
 
         private static bool Eq(string a, string b) =>
             string.Equals(a, b, StringComparison.OrdinalIgnoreCase);
-
-        // ── Recent files (most-recent-first, capped, deduped) ───────────
-        public static void AddRecent(string path)
-        {
-            if (string.IsNullOrEmpty(path)) return;
-            lock (_lock)
-            {
-                try
-                {
-                    var d = Load();
-                    var rec = Section(d, "Recent");
-                    rec.Elements("Item")
-                       .Where(e => Eq((string)e.Attribute("Path"), path))
-                       .ToList().ForEach(e => e.Remove());
-                    rec.AddFirst(new XElement("Item", new XAttribute("Path", path)));
-                    var items = rec.Elements("Item").ToList();
-                    for (int i = RecentCap; i < items.Count; i++) items[i].Remove();
-                    Save(d);
-                }
-                catch { }
-            }
-        }
-
-        public static List<string> GetRecent()
-        {
-            lock (_lock)
-            {
-                try
-                {
-                    return Section(Load(), "Recent").Elements("Item")
-                        .Select(e => (string)e.Attribute("Path"))
-                        .Where(p => !string.IsNullOrEmpty(p)).ToList();
-                }
-                catch { return new List<string>(); }
-            }
-        }
 
         // ── Favourites ─────────────────────────────────────────────────
         public static bool IsFavorite(string path)

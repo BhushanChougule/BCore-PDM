@@ -180,7 +180,10 @@ namespace PDMLite
         private void RebuildLists()
         {
             _saved = UserPrefs.GetSavedSearches();
-            _recentPaths = UserPrefs.GetRecent();
+            // Recents come from the SHARED store (RecentFiles → recent.txt,
+            // populated on every doc activation in TaskPaneControl.Refresh) so
+            // Quick Access and Advanced Search show ONE consistent Recent list.
+            _recentPaths = RecentFiles.Get();
             _favPaths = UserPrefs.GetFavorites();
 
             _lbSaved.Items.Clear();

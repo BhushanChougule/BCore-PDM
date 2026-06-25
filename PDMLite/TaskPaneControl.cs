@@ -1706,8 +1706,9 @@ namespace PDMLite
                 return;
             }
 
-            // Record in the per-user Recent list (local prefs, non-fatal).
-            try { UserPrefs.AddRecent(filePath); } catch { }
+            // Recents are recorded by RecentFiles.Add in Refresh when the opened
+            // doc becomes active (the shared store Quick Access + Advanced Search
+            // both read) — no separate per-open record needed here.
 
             try
             {
