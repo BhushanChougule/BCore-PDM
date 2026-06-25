@@ -293,6 +293,7 @@ namespace PDMLite
             catch { /* share unreachable → everything reports as missing */ }
 
             var toPrint = new List<string>();                 // full paths, deduped
+            var toPrintRefs = new List<DrawingExportRef>();   // parallel: which drawing each path is (confirm list + audit log)
             var seenPdf = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             var missing = new List<string>();                 // no current PDF
             foreach (var r in refs)
@@ -304,7 +305,7 @@ namespace PDMLite
                         ? "" : " REV " + r.Revision));
                     continue;
                 }
-                if (seenPdf.Add(found)) toPrint.Add(found);
+                if (seenPdf.Add(found)) { toPrint.Add(found); toPrintRefs.Add(r); }
             }
 
             if (toPrint.Count == 0)
@@ -320,24 +321,44 @@ namespace PDMLite
                 return;
             }
 
-            if (MessageBox.Show(
-                    "Print " + toPrint.Count +
-                    " released drawing PDF(s) to the default printer?" +
-                    (missing.Count > 0
-                        ? "\n\n(" + missing.Count +
-                          " drawing(s) had no current PDF and will be skipped.)"
-                        : ""),
+            // Show EXACTLY which drawings will print (industry plot-list parity),
+            // not just a count — the Master verifies scope before sending.
+            var confirmSb = new StringBuilder();
+            confirmSb.Append("Print these ").Append(toPrint.Count)
+                     .Append(" released drawing(s) to the default printer?\n");
+            for (int i = 0; i < toPrintRefs.Count && i < 20; i++)
+                confirmSb.Append("\n  • ").Append(toPrintRefs[i].DrawingNo)
+                         .Append(string.IsNullOrEmpty(toPrintRefs[i].Revision)
+                             ? "" : "  REV " + toPrintRefs[i].Revision);
+            if (toPrint.Count > 20)
+                confirmSb.Append("\n  • …and ").Append(toPrint.Count - 20).Append(" more");
+            if (missing.Count > 0)
+                confirmSb.Append("\n\n(").Append(missing.Count)
+                         .Append(" drawing(s) had no current PDF and will be skipped.)");
+            if (MessageBox.Show(confirmSb.ToString(),
                     "BCore PDM — Print Drawings",
                     MessageBoxButtons.YesNo, MessageBoxIcon.Question)
                 != DialogResult.Yes)
                 return;
 
+            // Print each, and LOG every successful print as a controlled-
+            // distribution event (who printed which drawing/rev, when) — the
+            // ISO-9001/AS9100 "who has a copy" trail, visible in the Audit Report.
+            // PrintPdf returns true when the print verb LAUNCHED (spooling is the
+            // handler's job), so "Printed" means sent-to-printer. AuditLogger is
+            // non-fatal, so a logging hiccup never affects the print.
             int ok = 0;
             var failed = new List<string>();
-            foreach (string pdf in toPrint)
+            for (int i = 0; i < toPrint.Count; i++)
             {
-                if (ExportManager.PrintPdf(pdf)) ok++;
-                else failed.Add(Path.GetFileName(pdf));
+                if (ExportManager.PrintPdf(toPrint[i]))
+                {
+                    ok++;
+                    AuditLogger.Log("Printed", _me, Path.GetFileName(toPrint[i]),
+                        "", toPrintRefs[i].Revision ?? "",
+                        "Printed to default printer");
+                }
+                else failed.Add(Path.GetFileName(toPrint[i]));
             }
 
             var sb = new StringBuilder();
