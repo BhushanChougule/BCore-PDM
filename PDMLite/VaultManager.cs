@@ -3259,14 +3259,18 @@ namespace PDMLite
         // confirm: the final assemblies that ultimately contain this file
         // (GetWhereUsedTopLevel — file-level, all configs, since releasing
         // freezes the whole file). "none (standalone)" when nothing references
-        // it. Capped so the confirm dialog stays readable. NON-FATAL — any
-        // where-used failure returns a "(could not determine)" note rather than
-        // throwing out of the release flow.
+        // it. Capped so the confirm dialog stays readable. NON-FATAL — a failed
+        // where-used walk (walkOk=false) OR a thrown error both yield a
+        // "(could not determine)" note (never a misleading "none (standalone)"),
+        // rather than throwing out of the release flow.
         private static string BuildAffectedProductsText(string filePath)
         {
             try
             {
-                var tops = GetWhereUsedTopLevel(filePath, null);
+                bool walkOk;
+                var tops = GetWhereUsedTopLevel(filePath, null, out walkOk);
+                if (!walkOk)
+                    return "Affected top-level products: (could not determine)";
                 if (tops == null || tops.Count == 0)
                     return "Affected top-level products: none (standalone)";
 
@@ -3307,12 +3311,27 @@ namespace PDMLite
         public static List<WhereUsedEntry> GetWhereUsedTopLevel(string filePath,
             string targetPartNo = null)
         {
+            bool walkOk;
+            return GetWhereUsedTopLevel(filePath, targetPartNo, out walkOk);
+        }
+
+        // walkOk = false ONLY when the reverse-dependency map build FAILED (vault
+        // unreachable / corrupt) — distinct from an empty result (the file is
+        // genuinely standalone). Lets the release-confirm Affected-items list show
+        // "(could not determine)" instead of a falsely reassuring "none
+        // (standalone)" on a transient failure (mirrors the
+        // GetBrokenReferences(out walkCompleted) idiom). Existing 2-arg callers
+        // (WhereUsedForm) are unaffected.
+        public static List<WhereUsedEntry> GetWhereUsedTopLevel(string filePath,
+            string targetPartNo, out bool walkOk)
+        {
+            walkOk = true;
             var result = new List<WhereUsedEntry>();
             if (string.IsNullOrEmpty(filePath)) return result;
 
             Dictionary<string, List<WhereUsedEntry>> map;
             try { map = BuildReverseDependencyMap(); }
-            catch { return result; }
+            catch { walkOk = false; return result; }
 
             string root;
             try { root = Path.GetFullPath(filePath); } catch { root = filePath; }
@@ -3444,8 +3463,13 @@ namespace PDMLite
             // assembly — each a full vault.xml SMB load under the cross-machine
             // lock, i.e. O(assemblies) loads (punishing on the release-confirm
             // path and at 50-100k scale). One GetAllFiles snapshot replaces them;
-            // lookups are in-memory. Non-fatal: a failed load leaves entries with
-            // no PartNo/Rev/Status, exactly like the old per-record catch.
+            // lookups are in-memory. Non-fatal: a missing/failed record leaves an
+            // entry with no PartNo/Rev/Status (filename fallback in the affected
+            // list). NOTE: GetAllFiles skips empty-<Status> records and dedupes by
+            // filename, so a legacy/hand-edited DUP whose first doc-order record
+            // has no Status enriches blank where the old per-path GetFileRecord
+            // would have populated it — display-only, and a normal vault never
+            // produces that shape (UpsertFile always writes Status="WIP" on create).
             var recByPath = new Dictionary<string, VaultFile>(
                 StringComparer.OrdinalIgnoreCase);
             try
