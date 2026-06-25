@@ -465,8 +465,10 @@ namespace PDMLite
 
             // Batch-print released drawing PDFs for the selected rows (or the
             // whole filtered view when nothing is selected).
-            _btnPrint = MakeButton("Print Drawings", cBrand, fBtn,
-                new Point(S(758), rowY), S(140));
+            // Same size + colour as Audit Report (it stacks flush beneath it) so
+            // the two read as a uniform pair.
+            _btnPrint = MakeButton("Print Drawings", cBrandDark, fBtn,
+                new Point(S(758), rowY), S(150));
             _btnPrint.Height = ctrlH;
             _btnPrint.Click += (s, e) => PrintDrawings();
             _topPanel.Controls.Add(_btnPrint);
