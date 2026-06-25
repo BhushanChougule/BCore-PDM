@@ -1628,6 +1628,17 @@ namespace PDMLite
                             "  • Lock file as Released\n" +
                             "  • Log the revision";
                     }
+
+                    // Affected-items: list the top-level products that ultimately
+                    // contain this file so the Master sees the release impact up
+                    // front. Non-fatal (a failed where-used walk never blocks).
+                    // Wait cursor: the where-used walk is a one-pass disk read
+                    // that can briefly pause the UI on a large vault (matches
+                    // WhereUsedForm). Previous cursor restored in finally.
+                    Cursor prevCursor = Cursor.Current;
+                    Cursor.Current = Cursors.WaitCursor;
+                    try { confirmBody += "\n\n" + BuildAffectedProductsText(filePath); }
+                    finally { Cursor.Current = prevCursor; }
                 }
                 else
                 {
@@ -3244,6 +3255,52 @@ namespace PDMLite
             }
         }
 
+        // Build the "Affected top-level products" block shown on the release
+        // confirm: the final assemblies that ultimately contain this file
+        // (GetWhereUsedTopLevel — file-level, all configs, since releasing
+        // freezes the whole file). "none (standalone)" when nothing references
+        // it. Capped so the confirm dialog stays readable. NON-FATAL — a failed
+        // where-used walk (walkOk=false) OR a thrown error both yield a
+        // "(could not determine)" note (never a misleading "none (standalone)"),
+        // rather than throwing out of the release flow.
+        private static string BuildAffectedProductsText(string filePath)
+        {
+            try
+            {
+                bool walkOk;
+                var tops = GetWhereUsedTopLevel(filePath, null, out walkOk);
+                if (!walkOk)
+                    return "Affected top-level products: (could not determine)";
+                if (tops == null || tops.Count == 0)
+                    return "Affected top-level products: none (standalone)";
+
+                const int max = 15;
+                var sb = new StringBuilder();
+                sb.Append("Affected top-level products (")
+                  .Append(tops.Count).Append("):");
+                int shown = 0;
+                foreach (var t in tops)
+                {
+                    if (shown >= max) break;
+                    string pn = string.IsNullOrEmpty(t.PartNo)
+                        ? Path.GetFileNameWithoutExtension(t.Path ?? "")
+                        : t.PartNo;
+                    if (string.IsNullOrEmpty(pn)) pn = t.Name ?? "(unknown)";
+                    string rev = string.IsNullOrEmpty(t.Revision)
+                        ? "" : "   REV " + t.Revision;
+                    sb.Append("\n  • ").Append(pn).Append(rev);
+                    shown++;
+                }
+                if (tops.Count > max)
+                    sb.Append("\n  • …and ").Append(tops.Count - max).Append(" more");
+                return sb.ToString();
+            }
+            catch
+            {
+                return "Affected top-level products: (could not determine)";
+            }
+        }
+
         // TOP-LEVEL where-used: only the ROOT assemblies that ULTIMATELY contain
         // the file — i.e. the final products, skipping every intermediate sub-
         // assembly. Collects every ancestor (BFS up the reverse map) then keeps
@@ -3254,12 +3311,27 @@ namespace PDMLite
         public static List<WhereUsedEntry> GetWhereUsedTopLevel(string filePath,
             string targetPartNo = null)
         {
+            bool walkOk;
+            return GetWhereUsedTopLevel(filePath, targetPartNo, out walkOk);
+        }
+
+        // walkOk = false ONLY when the reverse-dependency map build FAILED (vault
+        // unreachable / corrupt) — distinct from an empty result (the file is
+        // genuinely standalone). Lets the release-confirm Affected-items list show
+        // "(could not determine)" instead of a falsely reassuring "none
+        // (standalone)" on a transient failure (mirrors the
+        // GetBrokenReferences(out walkCompleted) idiom). Existing 2-arg callers
+        // (WhereUsedForm) are unaffected.
+        public static List<WhereUsedEntry> GetWhereUsedTopLevel(string filePath,
+            string targetPartNo, out bool walkOk)
+        {
+            walkOk = true;
             var result = new List<WhereUsedEntry>();
             if (string.IsNullOrEmpty(filePath)) return result;
 
             Dictionary<string, List<WhereUsedEntry>> map;
             try { map = BuildReverseDependencyMap(); }
-            catch { return result; }
+            catch { walkOk = false; return result; }
 
             string root;
             try { root = Path.GetFullPath(filePath); } catch { root = filePath; }
@@ -3386,6 +3458,28 @@ namespace PDMLite
             // RELEASED-copy / double record can't add the same parent twice.
             var seenAsmNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
+            // Load every tracked record ONCE into a path->record map for the
+            // parent enrichment below. The old code called GetFileRecord per
+            // assembly — each a full vault.xml SMB load under the cross-machine
+            // lock, i.e. O(assemblies) loads (punishing on the release-confirm
+            // path and at 50-100k scale). One GetAllFiles snapshot replaces them;
+            // lookups are in-memory. Non-fatal: a missing/failed record leaves an
+            // entry with no PartNo/Rev/Status (filename fallback in the affected
+            // list). NOTE: GetAllFiles skips empty-<Status> records and dedupes by
+            // filename, so a legacy/hand-edited DUP whose first doc-order record
+            // has no Status enriches blank where the old per-path GetFileRecord
+            // would have populated it — display-only, and a normal vault never
+            // produces that shape (UpsertFile always writes Status="WIP" on create).
+            var recByPath = new Dictionary<string, VaultFile>(
+                StringComparer.OrdinalIgnoreCase);
+            try
+            {
+                foreach (var rf in DatabaseManager.GetAllFiles())
+                    if (rf != null && !string.IsNullOrEmpty(rf.FilePath))
+                        recByPath[rf.FilePath] = rf;
+            }
+            catch { }
+
             foreach (string asmPath in
                      DatabaseManager.GetTrackedFilePathsByExtension(".sldasm"))
             {
@@ -3428,17 +3522,13 @@ namespace PDMLite
                             Path = asmPath,
                             Name = Path.GetFileName(asmPath)
                         };
-                        try
+                        VaultFile rec;
+                        if (recByPath.TryGetValue(asmPath, out rec) && rec != null)
                         {
-                            var rec = DatabaseManager.GetFileRecord(asmPath);
-                            if (rec != null)
-                            {
-                                entry.PartNo   = rec.PartNumber;
-                                entry.Revision = rec.Revision;
-                                entry.Status   = rec.Status;
-                            }
+                            entry.PartNo   = rec.PartNumber;
+                            entry.Revision = rec.Revision;
+                            entry.Status   = rec.Status;
                         }
-                        catch { }
                     }
 
                     List<WhereUsedEntry> list;
