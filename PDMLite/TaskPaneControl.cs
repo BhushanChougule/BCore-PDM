@@ -76,6 +76,15 @@ namespace PDMLite
             new Dictionary<string, Image>(StringComparer.OrdinalIgnoreCase);
         private const int ThumbCacheCap = 400;
 
+        // Thumbnails load via a SERIALIZED, deferred queue — NEVER inside a paint
+        // (GetPreviewBitmap is a network COM call that pumps the STA loop). Panels
+        // request a load on first paint; DrainThumbs runs them ONE AT A TIME off
+        // the message loop. _thumbLoadsSuspended pauses loading during a doc-open
+        // or large-preview so a heavy SW operation never races a preview read.
+        private readonly Queue<ThumbPanel> _thumbQueue = new Queue<ThumbPanel>();
+        private bool _thumbDraining;
+        private bool _thumbLoadsSuspended;
+
         // Shared hover tooltip (one instance, no per-card alloc) + shared
         // right-click menu for result/recent cards; _menuCard is the card the
         // menu was opened on (captured on right-click).
@@ -164,22 +173,33 @@ namespace PDMLite
         private sealed class ThumbPanel : Panel
         {
             private readonly Func<Image> _loader;
+            private readonly Action<ThumbPanel> _request; // parent queues a load
             private Image _img;     // shared cached image — NOT owned here
-            private bool _loaded;
-            public ThumbPanel(Func<Image> loader)
+            private bool _loaded, _requested;
+            public ThumbPanel(Func<Image> loader, Action<ThumbPanel> request)
             {
                 _loader = loader;
+                _request = request;
                 DoubleBuffered = true;
                 Cursor = Cursors.Hand;
             }
+            // Run the (slow, network, MESSAGE-PUMPING) SOLIDWORKS preview read.
+            // Called ONLY by the parent's serialized drain — on the UI thread but
+            // OUTSIDE any paint. Doing this inside OnPaint (as before) blocked the
+            // UI per card AND let the COM call's STA pump re-dispatch a queued
+            // click mid-paint (a preview click landed as an Open) and re-enter SW
+            // while it was opening a doc (crash). _loaded set FIRST so a re-entrant
+            // paint during the read neither re-requests nor reloads.
+            public void LoadNow()
+            {
+                if (_loaded) return;
+                _loaded = true;
+                try { _img = _loader == null ? null : _loader(); }
+                catch { _img = null; }
+                if (!IsDisposed) Invalidate();
+            }
             protected override void OnPaint(PaintEventArgs e)
             {
-                if (!_loaded)
-                {
-                    _loaded = true; // set FIRST — guards re-entrant paint
-                    try { _img = _loader == null ? null : _loader(); }
-                    catch { _img = null; }
-                }
                 var g = e.Graphics;
                 g.Clear(Color.White);
                 if (_img != null)
@@ -205,6 +225,14 @@ namespace PDMLite
                     g.DrawRectangle(Pens.Silver, page);
                 }
                 g.DrawRectangle(Pens.Gainsboro, 0, 0, Width - 1, Height - 1);
+                // Request the preview load OFF the paint path (see LoadNow). The
+                // placeholder shows instantly; the image fills in when the drain
+                // reaches this panel.
+                if (!_loaded && !_requested)
+                {
+                    _requested = true;
+                    _request?.Invoke(this);
+                }
             }
         }
 
@@ -351,6 +379,7 @@ namespace PDMLite
                 {
                     ClearAndDispose(_resultsPanel);
                     _cardTip.RemoveAll(); // clearing the box is a rebuild too
+                    _thumbQueue.Clear();
                     _resultsPanel.Height = 0;
                 }
             };
@@ -784,6 +813,7 @@ namespace PDMLite
             // does NOT remove it. Done here (not in RenderCards) so the empty /
             // no-results / DB-error paths reset it too, not just populated renders.
             _cardTip.RemoveAll();
+            _thumbQueue.Clear(); // discard pending preview loads for the old cards
 
             if (string.IsNullOrEmpty(term))
             {
@@ -952,7 +982,8 @@ namespace PDMLite
                 // Use the model's preview when there is one, else the drawing's.
                 string thumbPath = hasModel ? modelPath : drawingPath;
                 string thumbCfg = configName;
-                var thumb = new ThumbPanel(() => GetThumbnail(thumbPath, thumbCfg))
+                var thumb = new ThumbPanel(
+                    () => GetThumbnail(thumbPath, thumbCfg), QueueThumbLoad)
                 {
                     Location = new Point(thumbX, thumbY),
                     Width = thumbW,
@@ -1290,12 +1321,57 @@ namespace PDMLite
             }
         }
 
+        // A ThumbPanel asks (on its first paint) for its preview to be loaded.
+        // We enqueue and kick the serialized drain — the actual COM read happens
+        // in DrainThumbs, off the paint path.
+        private void QueueThumbLoad(ThumbPanel p)
+        {
+            if (p == null || p.IsDisposed) return;
+            _thumbQueue.Enqueue(p);
+            if (!_thumbDraining && !_thumbLoadsSuspended)
+                try { BeginInvoke((Action)DrainThumbs); } catch { }
+        }
+
+        // Load exactly ONE queued thumbnail, then post itself for the next — so
+        // the network preview reads run strictly one at a time on the message
+        // loop. The re-entrancy guard matters: a load's COM call pumps the STA
+        // loop, which can re-dispatch this posted delegate; the guard makes that
+        // nested call a no-op and the in-flight load's finally posts the next.
+        private void DrainThumbs()
+        {
+            if (_thumbDraining || _thumbLoadsSuspended) return;
+            _thumbDraining = true;
+            try
+            {
+                if (_thumbQueue.Count == 0) return;
+                ThumbPanel p = _thumbQueue.Dequeue();
+                if (p != null && !p.IsDisposed) p.LoadNow();
+            }
+            catch { }
+            finally
+            {
+                _thumbDraining = false;
+                if (!_thumbLoadsSuspended && _thumbQueue.Count > 0)
+                    try { BeginInvoke((Action)DrainThumbs); } catch { }
+            }
+        }
+
+        // Pause/resume preview loading around a heavy SW operation (doc open,
+        // large preview) so a queued read never races it. On resume, restart the
+        // drain for any panels that requested while paused.
+        private void SuspendThumbLoads(bool suspend)
+        {
+            _thumbLoadsSuspended = suspend;
+            if (!suspend && !_thumbDraining && _thumbQueue.Count > 0)
+                try { BeginInvoke((Action)DrainThumbs); } catch { }
+        }
+
         // Get a small cached thumbnail for a file's SOLIDWORKS preview (null on
         // failure → the card draws a placeholder). MUST run on the UI thread
-        // (the SOLIDWORKS API is not thread-safe — ThumbPanel only calls this
-        // from its paint, which is the UI thread). Caches the result (INCLUDING
-        // null, so a preview-less file is read at most once); caps the cache to
-        // bound GDI handles.
+        // (the SOLIDWORKS API is not thread-safe — reached only via the serialized
+        // DrainThumbs, which runs on the UI thread, NEVER inside a paint). Caches
+        // the result (INCLUDING null, so a preview-less file is read at most once);
+        // caps the cache to bound GDI handles.
         private Image GetThumbnail(string filePath, string config)
         {
             if (string.IsNullOrEmpty(filePath)) return null;
@@ -1454,6 +1530,11 @@ namespace PDMLite
             // whose Click is on the stack (ObjectDisposedException, audit-M8). Stop
             // it, exactly like the context-menu / Open-button paths.
             _searchTimer.Stop();
+            // Pause background card-thumbnail loads while we do our own preview
+            // read + modal, so two SOLIDWORKS preview reads never overlap.
+            SuspendThumbLoads(true);
+            try
+            {
 
             Image full = null;
             try
@@ -1504,12 +1585,26 @@ namespace PDMLite
                 }
             }
             finally { full.Dispose(); }
+
+            }
+            finally { SuspendThumbLoads(false); }
         }
 
         private void OpenFile(string filePath)
         {
+            // If a thumbnail preview read is on the stack (its COM call pumped the
+            // loop and dispatched this click), don't open the doc NESTED inside
+            // that read — re-post so the open runs once the read unwinds. The
+            // re-posted call sees _thumbDraining=false and proceeds normally.
+            if (_thumbDraining)
+            {
+                try { BeginInvoke((Action)(() => OpenFile(filePath))); return; }
+                catch { /* no handle — fall through and open inline */ }
+            }
+
             _searchBox.Text = "";
             ClearAndDispose(_resultsPanel);
+            _thumbQueue.Clear(); // the cards (and any pending preview reads) are gone
             _resultsPanel.Height = 0;
 
             if (!File.Exists(filePath))
