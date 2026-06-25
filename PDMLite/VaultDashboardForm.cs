@@ -241,8 +241,11 @@ namespace PDMLite
         private void PrintDrawings()
         {
             // Scope: explicit selection (current page) wins; else the filtered view.
+            // NOTE: VirtualMode clears selection on every page move, so a selection
+            // is always current-page only — the confirm states the scope explicitly.
+            bool fromSelection = _grid.SelectedRows.Count > 0;
             var scope = new List<VaultFile>();
-            if (_grid.SelectedRows.Count > 0)
+            if (fromSelection)
             {
                 foreach (DataGridViewRow row in _grid.SelectedRows)
                 {
@@ -281,31 +284,59 @@ namespace PDMLite
                 return;
             }
 
-            // Index the PDFs currently in EXPORTS\PDF (filename → full path).
-            var pdfByName = new Dictionary<string, string>(
-                StringComparer.OrdinalIgnoreCase);
-            try
-            {
-                if (Directory.Exists(PdfExportFolder))
-                    foreach (string p in Directory.GetFiles(PdfExportFolder, "*.pdf"))
-                        pdfByName[Path.GetFileName(p)] = p;
-            }
-            catch { /* share unreachable → everything reports as missing */ }
-
             var toPrint = new List<string>();                 // full paths, deduped
             var toPrintRefs = new List<DrawingExportRef>();   // parallel: which drawing each path is (confirm list + audit log)
             var seenPdf = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             var missing = new List<string>();                 // no current PDF
+
+            // FAST PATH: probe the exact "{DrawingNo} REV {storedRev}.pdf" via
+            // File.Exists — no folder enumeration when the on-disk rev matches the
+            // stored rev (the norm), so a 1-row print never lists tens of thousands
+            // of PDFs. Only refs whose exact PDF is absent fall through to the
+            // prefix scan below, which enumerates EXPORTS\PDF ONCE.
+            var needFallback = new List<DrawingExportRef>();
             foreach (var r in refs)
             {
-                string found = ResolvePdf(r, pdfByName);
-                if (found == null)
+                if (r == null || string.IsNullOrEmpty(r.DrawingNo)) continue;
+                string exactPath = null;
+                try
                 {
-                    missing.Add(r.DrawingNo + (string.IsNullOrEmpty(r.Revision)
-                        ? "" : " REV " + r.Revision));
-                    continue;
+                    exactPath = Path.Combine(PdfExportFolder,
+                        r.DrawingNo + " REV " + (r.Revision ?? "") + ".pdf");
                 }
-                if (seenPdf.Add(found)) { toPrint.Add(found); toPrintRefs.Add(r); }
+                catch { exactPath = null; }
+                if (exactPath != null && File.Exists(exactPath))
+                {
+                    if (seenPdf.Add(exactPath)) { toPrint.Add(exactPath); toPrintRefs.Add(r); }
+                }
+                else needFallback.Add(r);
+            }
+
+            // SLOW PATH (only when a stored rev drifted from disk): index
+            // EXPORTS\PDF ONCE (streaming) and prefix-match deterministically.
+            if (needFallback.Count > 0)
+            {
+                var pdfByName = new Dictionary<string, string>(
+                    StringComparer.OrdinalIgnoreCase);
+                try
+                {
+                    if (Directory.Exists(PdfExportFolder))
+                        foreach (string p in Directory.EnumerateFiles(PdfExportFolder, "*.pdf"))
+                            pdfByName[Path.GetFileName(p)] = p;
+                }
+                catch { /* share unreachable → these refs report as missing */ }
+
+                foreach (var r in needFallback)
+                {
+                    string found = ResolvePdfPrefix(r, pdfByName);
+                    if (found == null)
+                    {
+                        missing.Add(r.DrawingNo + (string.IsNullOrEmpty(r.Revision)
+                            ? "" : " REV " + r.Revision));
+                        continue;
+                    }
+                    if (seenPdf.Add(found)) { toPrint.Add(found); toPrintRefs.Add(r); }
+                }
             }
 
             if (toPrint.Count == 0)
@@ -325,7 +356,10 @@ namespace PDMLite
             // not just a count — the Master verifies scope before sending.
             var confirmSb = new StringBuilder();
             confirmSb.Append("Print these ").Append(toPrint.Count)
-                     .Append(" released drawing(s) to the default printer?\n");
+                     .Append(fromSelection
+                         ? " released drawing(s) from the selected rows (current page)"
+                         : " released drawing(s) from the whole filtered view")
+                     .Append(" to the default printer?\n");
             for (int i = 0; i < toPrintRefs.Count && i < 20; i++)
                 confirmSb.Append("\n  • ").Append(toPrintRefs[i].DrawingNo)
                          .Append(string.IsNullOrEmpty(toPrintRefs[i].Revision)
@@ -341,25 +375,34 @@ namespace PDMLite
                 != DialogResult.Yes)
                 return;
 
-            // Print each, and LOG every successful print as a controlled-
-            // distribution event (who printed which drawing/rev, when) — the
-            // ISO-9001/AS9100 "who has a copy" trail, visible in the Audit Report.
-            // PrintPdf returns true when the print verb LAUNCHED (spooling is the
-            // handler's job), so "Printed" means sent-to-printer. AuditLogger is
-            // non-fatal, so a logging hiccup never affects the print.
+            // Print each; collect a "Printed" controlled-distribution row per
+            // success (who printed which drawing/rev, when — the ISO-9001/AS9100
+            // "who has a copy" trail, visible in the Audit Report) and write them
+            // ALL in ONE batched append AFTER the loop. The Rev logged is parsed
+            // from the PDF actually printed (RevFromPdfName), not the stored config
+            // rev, which can differ when the resolve fell back. Batching pays the
+            // audit file-lock/retry cost ONCE, so an Excel-locked audit.csv can't
+            // turn N prints into N × the retry stall. PrintPdf true = the print
+            // verb LAUNCHED (spooling is the handler's job); non-fatal throughout.
             int ok = 0;
             var failed = new List<string>();
+            var printedRows = new List<AuditLogger.AuditRow>();
             for (int i = 0; i < toPrint.Count; i++)
             {
+                string pdfName = Path.GetFileName(toPrint[i]);
                 if (ExportManager.PrintPdf(toPrint[i]))
                 {
                     ok++;
-                    AuditLogger.Log("Printed", _me, Path.GetFileName(toPrint[i]),
-                        "", toPrintRefs[i].Revision ?? "",
-                        "Printed to default printer");
+                    printedRows.Add(new AuditLogger.AuditRow
+                    {
+                        Action = "Printed", User = _me, FileName = pdfName,
+                        Revision = RevFromPdfName(pdfName),
+                        Note = "Printed to default printer"
+                    });
                 }
-                else failed.Add(Path.GetFileName(toPrint[i]));
+                else failed.Add(pdfName);
             }
+            if (printedRows.Count > 0) AuditLogger.LogBatch(printedRows);
 
             var sb = new StringBuilder();
             sb.Append("Sent ").Append(ok).Append(" of ").Append(toPrint.Count)
@@ -374,21 +417,45 @@ namespace PDMLite
                 MessageBoxButtons.OK, MessageBoxIcon.Information);
         }
 
-        // Find the current released PDF for a drawing ref. Exact name first
-        // ("{DrawingNo} REV {Rev}.pdf"), then any current PDF for that drawing
-        // number (the rev may differ from the stored config rev). null = none.
-        private static string ResolvePdf(DrawingExportRef r,
+        // Among the current PDFs whose name starts with "{DrawingNo} REV " pick
+        // the NEWEST by write time — DETERMINISTIC, and lands on the latest
+        // release when the stored rev drifted or a stale same-DrawingNo PDF
+        // lingers. (The exact "{DrawingNo} REV {storedRev}.pdf" is probed first by
+        // File.Exists in the caller; this is the fallback only.) A plain first-hit
+        // over an unordered dictionary was nondeterministic; a lexical pick breaks
+        // past rev Z (AA sorts before Z), so write time is the robust key. The
+        // " REV " token keeps it within this exact DrawingNo (TEST-02 ≠ TEST-021).
+        // null = no current PDF.
+        private static string ResolvePdfPrefix(DrawingExportRef r,
             Dictionary<string, string> pdfByName)
         {
             if (r == null || string.IsNullOrEmpty(r.DrawingNo)) return null;
-            string exact = r.DrawingNo + " REV " + (r.Revision ?? "") + ".pdf";
-            string full;
-            if (pdfByName.TryGetValue(exact, out full)) return full;
             string prefix = r.DrawingNo + " REV ";
+            string best = null;
+            DateTime bestTime = DateTime.MinValue;
             foreach (var kv in pdfByName)
-                if (kv.Key.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
-                    return kv.Value;
-            return null;
+            {
+                if (!kv.Key.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
+                    continue;
+                DateTime t;
+                try { t = File.GetLastWriteTimeUtc(kv.Value); }
+                catch { t = DateTime.MinValue; }
+                if (best == null || t > bestTime) { best = kv.Value; bestTime = t; }
+            }
+            return best;
+        }
+
+        // Parse the rev token from a "{DrawingNo} REV {rev}.pdf" export name so the
+        // audit "Printed" Rev matches the PDF actually printed (the resolve may
+        // have fallen back to a rev different from the stored config rev). "" when
+        // unparseable.
+        private static string RevFromPdfName(string fileName)
+        {
+            if (string.IsNullOrEmpty(fileName)) return "";
+            string name = Path.GetFileNameWithoutExtension(fileName);
+            const string sep = " REV ";
+            int i = name.LastIndexOf(sep, StringComparison.OrdinalIgnoreCase);
+            return i < 0 ? "" : name.Substring(i + sep.Length).Trim();
         }
 
         // ── Win32 cue banner (placeholder text — not available on .NET 4.8) ──

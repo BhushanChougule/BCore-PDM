@@ -64,6 +64,54 @@ namespace PDMLite
             catch { } // logging must never break a workflow
         }
 
+        // One row for LogBatch — same six fields as Log's parameters (null → "").
+        public sealed class AuditRow
+        {
+            public string Action;
+            public string User;
+            public string FileName;
+            public string PartNo;
+            public string Revision;
+            public string Note;
+        }
+
+        // Append SEVERAL audit rows under ONE exclusive file open. Same per-row
+        // CSV format + non-fatal contract as Log, but the sharing-violation
+        // retry / spill cost is paid ONCE for the whole batch instead of per row
+        // — so a batch action (the dashboard's batch print writes one "Printed"
+        // row per drawing) can't turn N rows into N × the AppendWithRetry stall
+        // when audit.csv is held open in Excel. All rows share one timestamp (the
+        // batch instant); the Audit Report sorts by Timestamp regardless.
+        public static void LogBatch(
+            System.Collections.Generic.IEnumerable<AuditRow> rows)
+        {
+            if (rows == null) return;
+            try
+            {
+                string ts = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss");
+                var sb = new StringBuilder();
+                int n = 0;
+                foreach (var r in rows)
+                {
+                    if (r == null) continue;
+                    sb.Append(string.Join(",", ts,
+                        Csv(r.User), Csv(r.Action), Csv(r.FileName),
+                        Csv(r.PartNo), Csv(r.Revision), Csv(r.Note)));
+                    sb.Append(Environment.NewLine);
+                    n++;
+                }
+                if (n == 0) return;
+                string block = sb.ToString();
+                lock (_lock)
+                {
+                    EnsureFile();
+                    FlushSpill();
+                    if (!AppendWithRetry(block)) Spill(block);
+                }
+            }
+            catch { } // logging must never break a workflow
+        }
+
         private static void EnsureFile()
         {
             if (File.Exists(LogFile)) return;

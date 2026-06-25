@@ -3086,6 +3086,12 @@ namespace PDMLite
         // A DRAWING path (no DrawingNo of its own) resolves to the MODEL it
         // references and yields the model's config DrawingNos. Deduped by
         // DrawingNo+Revision (case-insensitive). READ-ONLY (never writes/purges).
+        // LIMITATION: a LEGACY record saved before the <Configurations> block
+        // existed has no per-config DrawingNo, so it yields no ref and the batch
+        // print reports it as "no current PDF (skipped)" even if a PDF is on
+        // disk. Self-healing — any save / New Revision by the current add-in
+        // writes <Configurations> (UpsertFile), permanently fixing the record;
+        // the PR deliberately avoids opening the doc to recover it.
         public static List<DrawingExportRef> GetDrawingExportRefs(
             IEnumerable<string> filePaths)
         {
