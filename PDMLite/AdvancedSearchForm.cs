@@ -1257,8 +1257,8 @@ namespace PDMLite
             if (_thumbCache.TryGetValue(key, out cached)) { p.SetImage(cached); return; }
             try
             {
-                ShellThumbnailLoader.Request(this, p.FilePath, ShellThumbPx,
-                    raw => OnShellThumb(p, key, raw));
+                ShellThumbnailLoader.Request(this, () => p != null && !p.IsDisposed,
+                    p.FilePath, ShellThumbPx, raw => OnShellThumb(p, key, raw));
             }
             catch { QueueThumbLoad(p); }
         }

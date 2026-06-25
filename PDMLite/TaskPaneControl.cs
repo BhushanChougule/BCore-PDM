@@ -1356,8 +1356,8 @@ namespace PDMLite
             if (_thumbCache.TryGetValue(key, out cached)) { p.SetImage(cached); return; }
             try
             {
-                ShellThumbnailLoader.Request(this, p.FilePath, ShellThumbPx,
-                    raw => OnShellThumb(p, key, raw));
+                ShellThumbnailLoader.Request(this, () => p != null && !p.IsDisposed,
+                    p.FilePath, ShellThumbPx, raw => OnShellThumb(p, key, raw));
             }
             catch { QueueThumbLoad(p); } // loader unavailable → SW fallback
         }
@@ -2625,9 +2625,14 @@ namespace PDMLite
         private static readonly Guid IID_IShellItemImageFactory =
             new Guid("bcc18b79-ba16-442f-80c4-8a59c30c463b");
 
-        // HandleProcessCorruptedStateExceptions so the catch below also swallows an
-        // AccessViolation from a hypothetical bad P/Invoke signature — a failed
-        // thumbnail (→ SW-API fallback) must never be able to crash SOLIDWORKS.
+        // HandleProcessCorruptedStateExceptions + SecurityCritical opt THIS method
+        // in to catching corrupted-state exceptions (a valid per-method opt-in in
+        // full-trust .NET 4.x — the legacy config switch is an alternative, not a
+        // requirement), so an AccessViolation from a hypothetical bad P/Invoke is
+        // caught by the catch below → null → SW-API fallback instead of tearing
+        // down SOLIDWORKS. A BEST-EFFORT backstop, NOT an absolute guarantee (some
+        // CSE kinds, e.g. StackOverflow, are never catchable); the signatures are
+        // standard, so this path isn't expected to fire.
         [System.Runtime.ExceptionServices.HandleProcessCorruptedStateExceptions]
         [System.Security.SecurityCritical]
         public static Bitmap TryGet(string path, int size)
@@ -2661,13 +2666,22 @@ namespace PDMLite
     // marshals each result back to the requesting control's UI thread — so card
     // preview reads never touch the UI thread. IsBackground, so it dies with the
     // process (no shutdown needed). Best-effort: a disposed owner / failed marshal
-    // just drops the bitmap. Shared by TaskPaneControl + AdvancedSearchForm.
+    // just drops the bitmap, and a card whose Alive() probe is false is skipped
+    // before the read. Shared by TaskPaneControl + AdvancedSearchForm.
+    // LIMITATIONS (accepted — both low-risk, see PR review): (1) ONE worker with
+    // no per-read timeout, so a pathological/wedged thumbnail handler could stall
+    // the queue (SW's handler is in-proc/well-behaved and GetImage is an OUTGOING
+    // COM call, which the STA's own call machinery pumps, so no Application.Run
+    // pump is needed); (2) if the owner is disposed in the microsecond window
+    // AFTER the IsDisposed check but BEFORE the posted BeginInvoke is pumped, that
+    // one bitmap leaks (WinForms drops the undelivered post) — at most one per
+    // teardown-race, negligible.
     internal static class ShellThumbnailLoader
     {
         private sealed class Req
         {
-            public Control Owner; public string Path; public int Size;
-            public Action<Bitmap> Done;
+            public Control Owner; public Func<bool> Alive; public string Path;
+            public int Size; public Action<Bitmap> Done;
         }
         private static readonly object _gate = new object();
         private static readonly Queue<Req> _q = new Queue<Req>();
@@ -2675,14 +2689,17 @@ namespace PDMLite
             new System.Threading.AutoResetEvent(false);
         private static System.Threading.Thread _worker;
 
-        public static void Request(Control owner, string path, int size,
-            Action<Bitmap> done)
+        // owner = the control to marshal the result back through (stable for the
+        // session); alive = a cheap liveness probe for the actual card, so a read
+        // is SKIPPED when the card is already gone (see WorkerLoop).
+        public static void Request(Control owner, Func<bool> alive, string path,
+            int size, Action<Bitmap> done)
         {
             if (owner == null || string.IsNullOrEmpty(path) || done == null) return;
             lock (_gate)
             {
-                _q.Enqueue(new Req { Owner = owner, Path = path, Size = size,
-                                     Done = done });
+                _q.Enqueue(new Req { Owner = owner, Alive = alive, Path = path,
+                                     Size = size, Done = done });
                 if (_worker == null)
                 {
                     _worker = new System.Threading.Thread(WorkerLoop)
@@ -2701,6 +2718,11 @@ namespace PDMLite
                 Req r = null;
                 lock (_gate) { if (_q.Count > 0) r = _q.Dequeue(); }
                 if (r == null) { _signal.WaitOne(); continue; }
+                // Skip the (network) shell read if the requesting card is already
+                // gone — under fast typing the old card set is disposed while its
+                // requests sit here, so reading them is wasted N: I/O whose result
+                // would be dropped anyway. Cuts the churn + transient retention.
+                if (r.Alive != null) { try { if (!r.Alive()) continue; } catch { } }
 
                 Bitmap bmp = null;
                 try { bmp = ShellThumbnail.TryGet(r.Path, r.Size); }
