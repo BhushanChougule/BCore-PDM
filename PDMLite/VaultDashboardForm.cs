@@ -1548,9 +1548,13 @@ namespace PDMLite
             int panelW = _topPanel.ClientSize.Width;
             int gap = S(10);
 
+            // Print Drawings is NOT in this row (it stacks under Audit Report
+            // below) so the control row stays narrow enough to keep the status
+            // doughnut visible — adding a 6th button widened the row past the
+            // chart-reserve threshold and hid the chart.
             int rowW = _search.Width + gap + _btnRefresh.Width + gap
                      + _btnExport.Width + gap + _btnClear.Width
-                     + gap + _btnPrint.Width + gap + _btnAudit.Width;
+                     + gap + _btnAudit.Width;
 
             // Natural minimum width of the count strip (sum of the 8 labels + the
             // tightest S(6) gaps). Folded into 'widest' below so the chart hides /
@@ -1593,34 +1597,39 @@ namespace PDMLite
             _btnRefresh.Left = _search.Right + gap;
             _btnExport.Left  = _btnRefresh.Right + gap;
             _btnClear.Left   = _btnExport.Right + gap;
-            _btnPrint.Left   = _btnClear.Right + gap;
-            _btnAudit.Left   = _btnPrint.Right + gap;
+            _btnAudit.Left   = _btnClear.Right + gap;
 
-            // JUSTIFY the count quick-filters across the SAME span as the control
-            // row above (search.Left → btnAudit.Right), space-between: first flush
-            // left, last flush right, equal gaps — so the strip lines up with the
-            // row above at any width. If the labels can't fit that span (large-vault
-            // counts), centre the natural-width strip in centerW instead (the chart
-            // is already hidden / centerW widened via 'widest'), so they never spill
-            // into the reserved chart column.
+            // Print Drawings is STACKED directly beneath Audit Report (right edges
+            // flush), in the band between the control row and the KPI strip — kept
+            // OUT of the control row so the row stays narrow and the status chart
+            // stays visible. The count strip below shortens to clear its column.
+            _btnPrint.Left = _btnAudit.Right - _btnPrint.Width;
+            _btnPrint.Top  = _btnAudit.Bottom + S(6);
+
+            // JUSTIFY the count quick-filters across the span from the control
+            // row's left (search.Left) to JUST LEFT of the stacked Print Drawings
+            // button (space-between: first flush left, last flush right, equal
+            // gaps). If the labels can't fit that (now narrower) span, pack them
+            // from the left at the tight S(6) gap — LEFT-ANCHORED so they never run
+            // under the Print button or the reserved chart column (centring in
+            // centerW would overlap the stacked button).
             if (nCounts > 0)
             {
                 int left = _search.Left;
-                int right = _btnAudit.Right;
+                int right = _btnPrint.Left - gap;   // stop before the stacked Print button
                 bool fits = countsMinW <= right - left;
                 int gapC = fits
                     ? (nCounts > 1 ? (right - left - countsSumW) / (nCounts - 1) : 0)
                     : S(6);
-                int cx = fits ? left
-                              : Math.Max(S(14), (centerW - countsMinW) / 2);
+                int cx = left;   // left-anchored for both fit + overflow
                 for (int i = 0; i < nCounts; i++)
                 {
                     _countLabels[i].Left = cx;
                     cx += _countLabels[i].Width + gapC;
                 }
-                // Land the LAST count's right edge EXACTLY on btnAudit.Right (the
-                // strip must span to the Audit Report button) — absorbs the gap
-                // integer-division remainder; only in the fits case.
+                // Land the LAST count's right edge EXACTLY on the strip's right
+                // bound (just left of the stacked Print Drawings button) — absorbs
+                // the gap integer-division remainder; only in the fits case.
                 if (fits)
                     _countLabels[nCounts - 1].Left =
                         right - _countLabels[nCounts - 1].Width;
