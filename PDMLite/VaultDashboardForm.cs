@@ -63,6 +63,9 @@ namespace PDMLite
         private Button _btnAudit;   // switch to the Audit Report (single-window nav)
         // Current released drawing PDFs live here ({DrawingNo} REV {Rev}.pdf).
         private const string PdfExportFolder = @"N:\PDM-SolidWorks\EXPORTS\PDF";
+        // Above this many drawings, ONE EXPORTS\PDF enumeration beats N network
+        // File.Exists probes; at or below it, probe exact names with no listing.
+        private const int FastProbeMax = 50;
         private Panel _topPanel;
         private Panel _bottomPanel;
         private System.Windows.Forms.Timer _searchTimer;
@@ -249,6 +252,7 @@ namespace PDMLite
             {
                 foreach (DataGridViewRow row in _grid.SelectedRows)
                 {
+                    if (row.Index < 0) continue;   // defensive: a shared VirtualMode row
                     int idx = PageStart + row.Index;
                     if (idx >= 0 && idx < _view.Count) scope.Add(_view[idx]);
                 }
@@ -273,11 +277,14 @@ namespace PDMLite
             }
 
             // Resolve each released file's drawing identity (DrawingNo + Rev) in
-            // ONE vault.xml load, then locate the current PDF in EXPORTS\PDF.
+            // ONE vault.xml load, then locate the current PDF in EXPORTS\PDF. The
+            // network I/O below runs under a wait cursor.
+            Cursor.Current = Cursors.WaitCursor;
             List<DrawingExportRef> refs;
             try { refs = DatabaseManager.GetDrawingExportRefs(releasedPaths); }
             catch (Exception ex)
             {
+                Cursor.Current = Cursors.Default;
                 MessageBox.Show("Could not read drawing numbers.\n\n" + ex.Message,
                     "BCore PDM — Print Drawings",
                     MessageBoxButtons.OK, MessageBoxIcon.Warning);
@@ -288,47 +295,47 @@ namespace PDMLite
             var toPrintRefs = new List<DrawingExportRef>();   // parallel: which drawing each path is (confirm list + audit log)
             var seenPdf = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             var missing = new List<string>();                 // no current PDF
-
-            // FAST PATH: probe the exact "{DrawingNo} REV {storedRev}.pdf" via
-            // File.Exists — no folder enumeration when the on-disk rev matches the
-            // stored rev (the norm), so a 1-row print never lists tens of thousands
-            // of PDFs. Only refs whose exact PDF is absent fall through to the
-            // prefix scan below, which enumerates EXPORTS\PDF ONCE.
             var needFallback = new List<DrawingExportRef>();
+
+            // For a LARGE scope, ONE EXPORTS\PDF enumeration beats N network
+            // File.Exists stats; for a small scope (the typical selection), probe
+            // each exact "{DrawingNo} REV {storedRev}.pdf" by File.Exists with NO
+            // folder listing (a 1-row print never lists tens of thousands of PDFs).
+            // Either way a missed exact name falls to the prefix scan below.
+            var pdfIndex = refs.Count > FastProbeMax ? BuildPdfIndex() : null;
             foreach (var r in refs)
             {
                 if (r == null || string.IsNullOrEmpty(r.DrawingNo)) continue;
-                string exactPath = null;
-                try
+                string exactName = r.DrawingNo + " REV " + (r.Revision ?? "") + ".pdf";
+                string found = null;
+                if (pdfIndex != null)
                 {
-                    exactPath = Path.Combine(PdfExportFolder,
-                        r.DrawingNo + " REV " + (r.Revision ?? "") + ".pdf");
+                    string p;
+                    if (pdfIndex.TryGetValue(exactName, out p)) found = p;
                 }
-                catch { exactPath = null; }
-                if (exactPath != null && File.Exists(exactPath))
+                else
                 {
-                    if (seenPdf.Add(exactPath)) { toPrint.Add(exactPath); toPrintRefs.Add(r); }
+                    string exactPath = null;
+                    try { exactPath = Path.Combine(PdfExportFolder, exactName); }
+                    catch { exactPath = null; }
+                    if (exactPath != null && File.Exists(exactPath)) found = exactPath;
+                }
+                if (found != null)
+                {
+                    if (seenPdf.Add(found)) { toPrint.Add(found); toPrintRefs.Add(r); }
                 }
                 else needFallback.Add(r);
             }
 
-            // SLOW PATH (only when a stored rev drifted from disk): index
-            // EXPORTS\PDF ONCE (streaming) and prefix-match deterministically.
+            // Prefix fallback (a stored rev drifted from disk, or a stale same-
+            // DrawingNo PDF lingers): build the folder index ONCE if we haven't
+            // already, then prefix-match each leftover deterministically.
             if (needFallback.Count > 0)
             {
-                var pdfByName = new Dictionary<string, string>(
-                    StringComparer.OrdinalIgnoreCase);
-                try
-                {
-                    if (Directory.Exists(PdfExportFolder))
-                        foreach (string p in Directory.EnumerateFiles(PdfExportFolder, "*.pdf"))
-                            pdfByName[Path.GetFileName(p)] = p;
-                }
-                catch { /* share unreachable → these refs report as missing */ }
-
+                if (pdfIndex == null) pdfIndex = BuildPdfIndex();
                 foreach (var r in needFallback)
                 {
-                    string found = ResolvePdfPrefix(r, pdfByName);
+                    string found = ResolvePdfPrefix(r, pdfIndex);
                     if (found == null)
                     {
                         missing.Add(r.DrawingNo + (string.IsNullOrEmpty(r.Revision)
@@ -338,6 +345,7 @@ namespace PDMLite
                     if (seenPdf.Add(found)) { toPrint.Add(found); toPrintRefs.Add(r); }
                 }
             }
+            Cursor.Current = Cursors.Default;
 
             if (toPrint.Count == 0)
             {
@@ -384,6 +392,7 @@ namespace PDMLite
             // audit file-lock/retry cost ONCE, so an Excel-locked audit.csv can't
             // turn N prints into N × the retry stall. PrintPdf true = the print
             // verb LAUNCHED (spooling is the handler's job); non-fatal throughout.
+            Cursor.Current = Cursors.WaitCursor;
             int ok = 0;
             var failed = new List<string>();
             var printedRows = new List<AuditLogger.AuditRow>();
@@ -403,6 +412,7 @@ namespace PDMLite
                 else failed.Add(pdfName);
             }
             if (printedRows.Count > 0) AuditLogger.LogBatch(printedRows);
+            Cursor.Current = Cursors.Default;
 
             var sb = new StringBuilder();
             sb.Append("Sent ").Append(ok).Append(" of ").Append(toPrint.Count)
@@ -417,21 +427,36 @@ namespace PDMLite
                 MessageBoxButtons.OK, MessageBoxIcon.Information);
         }
 
+        // Build a filename → full-path index of EXPORTS\PDF in ONE enumeration.
+        private static Dictionary<string, string> BuildPdfIndex()
+        {
+            var idx = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            try
+            {
+                if (Directory.Exists(PdfExportFolder))
+                    foreach (string p in Directory.EnumerateFiles(PdfExportFolder, "*.pdf"))
+                        idx[Path.GetFileName(p)] = p;
+            }
+            catch { /* share unreachable → empty index, everything reports missing */ }
+            return idx;
+        }
+
         // Among the current PDFs whose name starts with "{DrawingNo} REV " pick
         // the NEWEST by write time — DETERMINISTIC, and lands on the latest
         // release when the stored rev drifted or a stale same-DrawingNo PDF
         // lingers. (The exact "{DrawingNo} REV {storedRev}.pdf" is probed first by
-        // File.Exists in the caller; this is the fallback only.) A plain first-hit
-        // over an unordered dictionary was nondeterministic; a lexical pick breaks
-        // past rev Z (AA sorts before Z), so write time is the robust key. The
-        // " REV " token keeps it within this exact DrawingNo (TEST-02 ≠ TEST-021).
-        // null = no current PDF.
+        // the caller; this is the fallback only.) A plain first-hit over an
+        // unordered dictionary was nondeterministic; a lexical pick breaks past
+        // rev Z (AA sorts before Z), so write time is the key — with the FILENAME
+        // (ordinal) as a stable tie-break so an exact write-time collision still
+        // resolves the SAME way every run. The " REV " token keeps it within this
+        // exact DrawingNo (TEST-02 ≠ TEST-021). null = no current PDF.
         private static string ResolvePdfPrefix(DrawingExportRef r,
             Dictionary<string, string> pdfByName)
         {
             if (r == null || string.IsNullOrEmpty(r.DrawingNo)) return null;
             string prefix = r.DrawingNo + " REV ";
-            string best = null;
+            string best = null, bestKey = null;
             DateTime bestTime = DateTime.MinValue;
             foreach (var kv in pdfByName)
             {
@@ -440,7 +465,11 @@ namespace PDMLite
                 DateTime t;
                 try { t = File.GetLastWriteTimeUtc(kv.Value); }
                 catch { t = DateTime.MinValue; }
-                if (best == null || t > bestTime) { best = kv.Value; bestTime = t; }
+                if (best == null || t > bestTime ||
+                    (t == bestTime && string.CompareOrdinal(kv.Key, bestKey) > 0))
+                {
+                    best = kv.Value; bestKey = kv.Key; bestTime = t;
+                }
             }
             return best;
         }
