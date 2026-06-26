@@ -6,18 +6,25 @@ using System.Xml.Linq;
 
 namespace PDMLite
 {
-    // Per-user, per-machine UI preferences: saved (named) quick searches and
-    // starred favourites. Stored LOCALLY at %LOCALAPPDATA%\BCorePDM\prefs.xml
-    // (NOT vault.xml) — these are personal, so they must never contend for the
-    // cross-machine vault lock or bloat the shared DB. Mirrors the audit spill's
-    // local-folder choice. Every operation is NON-FATAL (swallows IO errors) — a
-    // preferences hiccup must never disrupt a workflow.
+    // Per-user, per-machine UI preferences: saved (named) quick searches,
+    // recent search TERMS (query history), and starred favourites. Stored
+    // LOCALLY at %LOCALAPPDATA%\BCorePDM\prefs.xml (NOT vault.xml) — these are
+    // personal, so they must never contend for the cross-machine vault lock or
+    // bloat the shared DB. Mirrors the audit spill's local-folder choice. Every
+    // operation is NON-FATAL (swallows IO errors) — a preferences hiccup must
+    // never disrupt a workflow.
     // NOTE: the "Recent files" list is NOT here — it's the shared RecentFiles
     // store (recent.txt, populated on every doc activation), which both Quick
     // Access and Advanced Search read, so there is ONE recent list, not two.
+    // Recent SEARCHES (the query strings) ARE here: they're personal and don't
+    // need cross-instance sharing the way opened files do.
     public static class UserPrefs
     {
         public class SavedSearch { public string Name; public string Term; }
+
+        // How many recent search terms to keep (query history, like the search
+        // field of every PDM/browser).
+        private const int RecentSearchCap = 10;
 
         private static readonly object _lock = new object();
 
@@ -32,6 +39,7 @@ namespace PDMLite
             catch { }
             return new XDocument(new XElement("Prefs",
                 new XElement("SavedSearches"),
+                new XElement("RecentSearches"),
                 new XElement("Favorites")));
         }
 
@@ -155,6 +163,71 @@ namespace PDMLite
                     var d = Load();
                     Section(d, "SavedSearches").Elements("Search")
                         .Where(e => Eq((string)e.Attribute("Name"), name))
+                        .ToList().ForEach(e => e.Remove());
+                    Save(d);
+                }
+                catch { }
+            }
+        }
+
+        // ── Recent search TERMS (query history) ─────────────────────────
+        // Records a search the user actually ran, most-recent first, capped.
+        public static void AddRecentSearch(string term)
+        {
+            if (string.IsNullOrWhiteSpace(term)) return;
+            term = term.Trim();
+            if (term.Length < 2) return;   // mirrors the search box's 2-char floor
+            lock (_lock)
+            {
+                try
+                {
+                    var d = Load();
+                    var rs = Section(d, "RecentSearches");
+                    // Collapse the incremental-typing chain: drop any existing term
+                    // that is an exact (case-insensitive) duplicate OR a PREFIX of
+                    // this one ("ste","stee" when "steel" lands), so the list holds
+                    // the final queries rather than every keystroke. The floor keeps
+                    // the shortest stored term at 2 chars.
+                    rs.Elements("Search")
+                      .Where(e =>
+                      {
+                          string t = (string)e.Attribute("Term") ?? "";
+                          return Eq(t, term) ||
+                                 (t.Length > 0 &&
+                                  term.StartsWith(t, StringComparison.OrdinalIgnoreCase));
+                      })
+                      .ToList().ForEach(e => e.Remove());
+                    rs.AddFirst(new XElement("Search", new XAttribute("Term", term)));
+                    rs.Elements("Search").Skip(RecentSearchCap)
+                      .ToList().ForEach(e => e.Remove());
+                    Save(d);
+                }
+                catch { }
+            }
+        }
+
+        public static List<string> GetRecentSearches()
+        {
+            lock (_lock)
+            {
+                try
+                {
+                    return Section(Load(), "RecentSearches").Elements("Search")
+                        .Select(e => (string)e.Attribute("Term"))
+                        .Where(t => !string.IsNullOrEmpty(t)).ToList();
+                }
+                catch { return new List<string>(); }
+            }
+        }
+
+        public static void ClearRecentSearches()
+        {
+            lock (_lock)
+            {
+                try
+                {
+                    var d = Load();
+                    Section(d, "RecentSearches").Elements("Search")
                         .ToList().ForEach(e => e.Remove());
                     Save(d);
                 }

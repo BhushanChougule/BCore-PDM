@@ -891,6 +891,11 @@ namespace PDMLite
                 return;
             }
 
+            // Remember the query (history), but only a SUCCESSFUL one — we're past
+            // the no-results return, so this term actually found files. The store
+            // collapses the typing chain ("ste"→"steel") and caps the list.
+            try { UserPrefs.AddRecentSearch(term); } catch { }
+
             // Build ONE card per matching configuration. Config name = Part No by
             // convention, so a multi-config part yields a card per config, each
             // showing THAT config's own PartNo / Description / Revision (never the
@@ -1689,6 +1694,8 @@ namespace PDMLite
                     if (f.ShowDialog(this) != DialogResult.OK) return;
                     if (!string.IsNullOrEmpty(f.FileToOpen))
                         OpenFile(f.FileToOpen);
+                    else if (!string.IsNullOrEmpty(f.WhereUsedPath))
+                        OpenWhereUsedForPath(f.WhereUsedPath);
                     else if (!string.IsNullOrEmpty(f.TermToRun))
                     {
                         _searchBox.Text = f.TermToRun;
@@ -1700,6 +1707,48 @@ namespace PDMLite
             catch (Exception ex)
             {
                 MessageBox.Show("Quick access could not open:\n" + ex.Message,
+                    "BCore PDM", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            }
+        }
+
+        // Trace where-used for a path chosen via the Quick Access right-click menu
+        // (deferred — run AFTER the popup modal closes, like OpenFile). A drawing
+        // is never a component, so resolve it to the model it documents first;
+        // mirrors CardWhereUsed.
+        private void OpenWhereUsedForPath(string filePath)
+        {
+            if (string.IsNullOrEmpty(filePath)) return;
+            string path = filePath, partNo = "";
+            if (filePath.EndsWith(".slddrw", StringComparison.OrdinalIgnoreCase))
+            {
+                VaultFile model = null;
+                try { model = DatabaseManager.GetModelForDrawing(filePath); }
+                catch { }
+                if (model == null || string.IsNullOrEmpty(model.FilePath))
+                {
+                    MessageBox.Show(
+                        "No part/assembly is linked to this drawing, so Where Used " +
+                        "has nothing to trace.",
+                        "BCore PDM", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                    return;
+                }
+                path   = model.FilePath;
+                partNo = model.PartNumber;
+            }
+            try
+            {
+                string toOpen = null;
+                using (var v = new WhereUsedForm(path, Path.GetFileName(path),
+                    partNo, null))
+                {
+                    v.ShowDialog(this);
+                    toOpen = v.FileToOpen;
+                }
+                if (!string.IsNullOrEmpty(toOpen)) OpenFile(toOpen);
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show("Could not open Where Used:\n" + ex.Message,
                     "BCore PDM", MessageBoxButtons.OK, MessageBoxIcon.Warning);
             }
         }

@@ -34,15 +34,23 @@ namespace PDMLite
         private Font _fTitle, _fHdr, _fList, _fBtn;
 
         private readonly string _currentTerm;
-        private ListBox _lbSaved, _lbRecent, _lbFav;
+        private ListBox _lbSaved, _lbRecentSearch, _lbRecent, _lbFav;
         private List<UserPrefs.SavedSearch> _saved = new List<UserPrefs.SavedSearch>();
+        private List<string> _recentSearches = new List<string>();
         private List<string> _recentPaths = new List<string>();
         private List<string> _favPaths = new List<string>();
 
-        // Set on close: run this saved-search term, or open this file (one or
-        // neither). The caller checks both.
-        public string TermToRun  { get; private set; }
-        public string FileToOpen { get; private set; }
+        // Shared right-click menu for the file lists (Recent + Favorites) — one
+        // menu, not one per row; _menuPath holds the right-clicked file.
+        private ContextMenuStrip _listMenu;
+        private ToolStripMenuItem _miFav;   // relabelled ★ Favorite / Remove ★ per list
+        private string _menuPath;
+
+        // Set on close: run this search term, open this file, or trace this
+        // file's where-used (one or none). The caller checks each.
+        public string TermToRun     { get; private set; }
+        public string FileToOpen    { get; private set; }
+        public string WhereUsedPath { get; private set; }
 
         public QuickAccessPopup(string currentTerm)
         {
@@ -60,9 +68,11 @@ namespace PDMLite
             MaximizeBox     = false;
             MinimizeBox     = false;
             BackColor       = cBg;
-            ClientSize      = new Size(S(420), S(560));
+            ClientSize      = new Size(S(420), S(648));
 
             int cW = ClientSize.Width;
+
+            BuildListMenu();
 
             Panel titleBar = new Panel
             {
@@ -93,9 +103,11 @@ namespace PDMLite
             Controls.Add(btnSaveCur);
             y += S(34);
 
+            int listH = S(74);
+
             // ── Saved searches ─────────────────────────────────────────
             y = AddHeader("SAVED SEARCHES", x, y);
-            _lbSaved = MakeList(x, y, listW, S(92));
+            _lbSaved = MakeList(x, y, listW, listH);
             _lbSaved.DoubleClick += (s, e) => RunSelectedSaved();
             Controls.Add(_lbSaved);
             y += _lbSaved.Height + S(4);
@@ -103,10 +115,21 @@ namespace PDMLite
                 "Run", (s, e) => RunSelectedSaved(),
                 "Delete", cRed, (s, e) => DeleteSelectedSaved());
 
-            // ── Recent ─────────────────────────────────────────────────
+            // ── Recent searches (query history) ─────────────────────────
+            y = AddHeader("RECENT SEARCHES", x, y);
+            _lbRecentSearch = MakeList(x, y, listW, listH);
+            _lbRecentSearch.DoubleClick += (s, e) => RunSelectedRecentSearch();
+            Controls.Add(_lbRecentSearch);
+            y += _lbRecentSearch.Height + S(4);
+            y = AddRowButtons(x, y, listW,
+                "Run", (s, e) => RunSelectedRecentSearch(),
+                "Clear", cDark, (s, e) => { UserPrefs.ClearRecentSearches(); RebuildLists(); });
+
+            // ── Recent files ────────────────────────────────────────────
             y = AddHeader("RECENT", x, y);
-            _lbRecent = MakeList(x, y, listW, S(92));
+            _lbRecent = MakeList(x, y, listW, listH);
             _lbRecent.DoubleClick += (s, e) => OpenSelected(_lbRecent, _recentPaths);
+            _lbRecent.MouseDown += (s, e) => ListMouseDown(_lbRecent, _recentPaths, false, e);
             Controls.Add(_lbRecent);
             y += _lbRecent.Height + S(4);
             y = AddRowButtons(x, y, listW,
@@ -115,8 +138,9 @@ namespace PDMLite
 
             // ── Favorites ───────────────────────────────────────────────
             y = AddHeader("FAVORITES", x, y);
-            _lbFav = MakeList(x, y, listW, S(92));
+            _lbFav = MakeList(x, y, listW, listH);
             _lbFav.DoubleClick += (s, e) => OpenSelected(_lbFav, _favPaths);
+            _lbFav.MouseDown += (s, e) => ListMouseDown(_lbFav, _favPaths, true, e);
             Controls.Add(_lbFav);
             y += _lbFav.Height + S(4);
             y = AddRowButtons(x, y, listW,
@@ -180,6 +204,7 @@ namespace PDMLite
         private void RebuildLists()
         {
             _saved = UserPrefs.GetSavedSearches();
+            _recentSearches = UserPrefs.GetRecentSearches();
             // Recents come from the SHARED store (RecentFiles → recent.txt,
             // populated on every doc activation in TaskPaneControl.Refresh) so
             // Quick Access and Advanced Search show ONE consistent Recent list.
@@ -191,15 +216,39 @@ namespace PDMLite
                 _lbSaved.Items.Add(s.Name + "   —   \"" + s.Term + "\"");
             if (_lbSaved.Items.Count == 0) _lbSaved.Items.Add("(none yet)");
 
+            _lbRecentSearch.Items.Clear();
+            foreach (var t in _recentSearches)
+                _lbRecentSearch.Items.Add(t);
+            if (_lbRecentSearch.Items.Count == 0) _lbRecentSearch.Items.Add("(none yet)");
+
             _lbRecent.Items.Clear();
             foreach (var p in _recentPaths)
-                _lbRecent.Items.Add(Display(p));
+                _lbRecent.Items.Add(DisplayFile(p));
             if (_lbRecent.Items.Count == 0) _lbRecent.Items.Add("(none yet)");
 
             _lbFav.Items.Clear();
             foreach (var p in _favPaths)
-                _lbFav.Items.Add(Display(p));
+                _lbFav.Items.Add(DisplayFile(p));
             if (_lbFav.Items.Count == 0) _lbFav.Items.Add("(none yet)");
+        }
+
+        // File-list label: basename + friendly type word, with a "(missing)"
+        // flag when the file is genuinely gone (the parent folder is reachable
+        // but the file is not — File.Exists is ALSO false when the network is
+        // down, which would falsely flag everything, so the parent-folder probe
+        // is the network-down guard, mirroring the orphan-purge discipline).
+        private static string DisplayFile(string path)
+        {
+            string text = Display(path);
+            try
+            {
+                string dir = Path.GetDirectoryName(path);
+                if (!string.IsNullOrEmpty(dir) && Directory.Exists(dir) &&
+                    !File.Exists(path))
+                    return text + "   (missing)";
+            }
+            catch { }
+            return text;
         }
 
         private static string Display(string path)
@@ -278,6 +327,93 @@ namespace PDMLite
             RebuildLists();
         }
 
+        private void RunSelectedRecentSearch()
+        {
+            int i = _lbRecentSearch.SelectedIndex;
+            if (i < 0 || i >= _recentSearches.Count) return;  // guards "(none yet)"
+            TermToRun = _recentSearches[i];
+            DialogResult = DialogResult.OK;
+            Close();
+        }
+
+        // ── Right-click menu (Recent + Favorites file lists) ────────────
+        private void BuildListMenu()
+        {
+            _listMenu = new ContextMenuStrip();
+            _miFav = new ToolStripMenuItem("★ Favorite", null, (s, e) => MenuToggleFav());
+            _listMenu.Items.AddRange(new ToolStripItem[]
+            {
+                new ToolStripMenuItem("Open", null, (s, e) => MenuOpen()),
+                new ToolStripMenuItem("Copy File Path", null, (s, e) => MenuCopyPath()),
+                new ToolStripMenuItem("Open Containing Folder", null, (s, e) => MenuOpenFolder()),
+                new ToolStripMenuItem("Where Used…", null, (s, e) => MenuWhereUsed()),
+                new ToolStripSeparator(),
+                _miFav
+            });
+        }
+
+        private void ListMouseDown(ListBox lb, List<string> paths, bool isFav,
+            MouseEventArgs e)
+        {
+            if (e.Button != MouseButtons.Right) return;
+            int i = lb.IndexFromPoint(e.Location);
+            if (i < 0 || i >= paths.Count) return;   // empty / "(none yet)" row
+            lb.SelectedIndex = i;
+            _menuPath = paths[i];
+            _miFav.Text = isFav ? "Remove ★" : "★ Favorite";
+            _listMenu.Show(lb, e.Location);
+        }
+
+        private void MenuOpen()
+        {
+            if (string.IsNullOrEmpty(_menuPath)) return;
+            FileToOpen = _menuPath;
+            DialogResult = DialogResult.OK;
+            Close();
+        }
+
+        private void MenuCopyPath()
+        {
+            if (string.IsNullOrEmpty(_menuPath)) return;
+            try { Clipboard.SetText(_menuPath); } catch { /* clipboard busy */ }
+        }
+
+        private void MenuOpenFolder()
+        {
+            string p = _menuPath;
+            if (string.IsNullOrEmpty(p)) return;
+            try
+            {
+                if (File.Exists(p))
+                    System.Diagnostics.Process.Start(
+                        "explorer.exe", "/select,\"" + p + "\"");
+                else
+                {
+                    string dir = Path.GetDirectoryName(p);
+                    if (Directory.Exists(dir))
+                        System.Diagnostics.Process.Start("explorer.exe", "\"" + dir + "\"");
+                }
+            }
+            catch { }
+        }
+
+        // Where-used is traced by the CALLER after this popup closes (deferred,
+        // like FileToOpen) — the popup stays decoupled from SwApp / WhereUsedForm.
+        private void MenuWhereUsed()
+        {
+            if (string.IsNullOrEmpty(_menuPath)) return;
+            WhereUsedPath = _menuPath;
+            DialogResult = DialogResult.OK;
+            Close();
+        }
+
+        private void MenuToggleFav()
+        {
+            if (string.IsNullOrEmpty(_menuPath)) return;
+            UserPrefs.ToggleFavorite(_menuPath);   // adds from Recent, removes from Favorites
+            RebuildLists();
+        }
+
         // Minimal name prompt (.NET has no InputBox). House-styled, modal.
         private string Prompt(string title, string prompt, string def)
         {
@@ -324,6 +460,7 @@ namespace PDMLite
                 _fHdr?.Dispose();
                 _fList?.Dispose();
                 _fBtn?.Dispose();
+                _listMenu?.Dispose();
             }
         }
     }
