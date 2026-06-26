@@ -433,6 +433,118 @@ namespace PDMLite
             File.WriteAllBytes(pdfPath, outBytes);
         }
 
+        // ── "UNCONTROLLED WHEN PRINTED" hardcopy stamp ──────────────────────
+        // A printed copy of a controlled released drawing is, by ISO-9001/AS9100
+        // convention, UNCONTROLLED — it won't track future revisions — so the
+        // hardcopy is stamped to warn the reader. We stamp a THROWAWAY COPY and
+        // print that; the controlled master in EXPORTS\PDF is never modified (only
+        // the physical print is uncontrolled). Distinct from the faint diagonal
+        // RELEASED watermark baked into the master: this is a VISIBLE red top-of-
+        // page warning carrying who/when printed.
+
+        // Thin wrapper referencing NO PdfSharp types directly, so a missing
+        // PdfSharp.dll is caught HERE (same reason as StampWatermark) instead of
+        // propagating. Stamps srcPdf into destPdf; returns false on any failure
+        // (PdfSharp absent / read / write) — the caller then prints the controlled
+        // master un-stamped rather than not printing at all.
+        public static bool StampUncontrolledCopy(string srcPdf, string destPdf,
+            string subLine)
+        {
+            try
+            {
+                if (string.IsNullOrEmpty(srcPdf) || string.IsNullOrEmpty(destPdf) ||
+                    !File.Exists(srcPdf)) return false;
+                StampUncontrolledCopyCore(srcPdf, destPdf, subLine);
+                return File.Exists(destPdf);
+            }
+            catch { return false; }
+        }
+
+        private static void StampUncontrolledCopyCore(string srcPdf, string destPdf,
+            string subLine)
+        {
+            byte[] srcBytes = File.ReadAllBytes(srcPdf);   // release the handle at once
+            using (var inMs = new MemoryStream(srcBytes))
+            using (PdfDocument pdf = PdfReader.Open(inMs, PdfDocumentOpenMode.Modify))
+            {
+                // Red at alpha 64/255 ≈ 25% — clearly readable (the stamp MUST be
+                // noticed, unlike the 4.5% RELEASED watermark) yet translucent enough
+                // not to fully hide drawing content beneath it.
+                XBrush brush = new XSolidBrush(XColor.FromArgb(64, 200, 40, 40));
+                const string banner = "UNCONTROLLED WHEN PRINTED";
+
+                foreach (PdfPage page in pdf.Pages)
+                {
+                    double w = page.Width.Point;
+                    double h = page.Height.Point;
+                    using (XGraphics gfx = XGraphics.FromPdfPage(
+                        page, XGraphicsPdfPageOptions.Append))
+                    {
+                        // Size the banner to ~32% of the page WIDTH so it scales with
+                        // any sheet size (A → E); top-centre, clear of the bottom-
+                        // right title block.
+                        XFont trial = new XFont("Arial", 100, XFontStyle.Bold);
+                        XSize ts = gfx.MeasureString(banner, trial);
+                        double size = ts.Width > 1
+                            ? 100.0 * (w * 0.32) / ts.Width : 22.0;
+                        XFont font = new XFont("Arial", size, XFontStyle.Bold);
+
+                        double top = h * 0.02;   // just inside the top edge
+                        gfx.DrawString(banner, font, brush,
+                            new XRect(0, top, w, size * 1.4), XStringFormats.TopCenter);
+
+                        // Print provenance (who/when) beneath the banner, smaller.
+                        if (!string.IsNullOrEmpty(subLine))
+                        {
+                            XFont subFont = new XFont(
+                                "Arial", size * 0.34, XFontStyle.Regular);
+                            gfx.DrawString(subLine, subFont, brush,
+                                new XRect(0, top + size * 1.25, w, size * 0.7),
+                                XStringFormats.TopCenter);
+                        }
+                    }
+                }
+
+                Directory.CreateDirectory(Path.GetDirectoryName(destPdf));
+                pdf.Save(destPdf);
+            }
+        }
+
+        // Create a fresh per-run temp folder for the stamped print copies, and
+        // best-effort sweep PRIOR run folders older than an hour. The shell "print"
+        // verb is ASYNC (the handler reads the file over the next few seconds), so we
+        // must NOT delete this run's copies in-run — the next run's sweep reclaims
+        // them, the same discipline as the prefs/vault temp sweeps. Returns the new
+        // folder, or null if it can't be created (caller then prints the controlled
+        // master directly, un-stamped).
+        public static string NewPrintTempDir()
+        {
+            try
+            {
+                string root = Path.Combine(Path.GetTempPath(), "BCorePDM", "PrintTmp");
+                Directory.CreateDirectory(root);
+                try
+                {
+                    System.DateTime cutoff = System.DateTime.UtcNow.AddHours(-1);
+                    foreach (string d in Directory.GetDirectories(root))
+                    {
+                        try
+                        {
+                            if (Directory.GetLastWriteTimeUtc(d) < cutoff)
+                                Directory.Delete(d, true);
+                        }
+                        catch { }
+                    }
+                }
+                catch { }
+                string runDir = Path.Combine(
+                    root, System.Guid.NewGuid().ToString("N"));
+                Directory.CreateDirectory(runDir);
+                return runDir;
+            }
+            catch { return null; }
+        }
+
         // Universal export — SOLIDWORKS picks format from file extension.
         // Success = SaveAs returned true, reported no errors, AND the file is
         // actually on disk. The return value was previously discarded, so a
