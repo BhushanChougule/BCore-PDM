@@ -376,7 +376,7 @@ namespace PDMLite
             // button. S(2) margins each side inside searchCard.
             _searchBox = new TextBox
             {
-                Font = new Font("Segoe UI", 3.5f * _scale),  // moderate — 4f (fLabel) read too big for the box/placeholder
+                Font = new Font("Segoe UI", 3.8f * _scale),  // matches the section-header size
                 Width = w - S(4),
                 Height = S(22),
                 Location = new Point(S(2), S(2)),
@@ -418,7 +418,7 @@ namespace PDMLite
             var hintLink = new Label
             {
                 Text = "★ Saved · Recent · Favorites",
-                Font = new Font("Segoe UI", 3.3f * _scale),   // subtext: a touch smaller than the box, still readable
+                Font = new Font("Segoe UI", 3.8f * _scale),   // matches the search box size for a balanced look
                 ForeColor = cBrand,
                 Location = new Point(x, y),
                 AutoSize = true,                              // sizes to its text — never clipped/hidden
