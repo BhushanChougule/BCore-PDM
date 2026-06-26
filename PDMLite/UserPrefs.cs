@@ -58,9 +58,12 @@ namespace PDMLite
 
         private static void Save(XDocument d)
         {
+            string tmp = PrefsPath + "." +
+                System.Diagnostics.Process.GetCurrentProcess().Id + ".tmp";
             try
             {
                 Directory.CreateDirectory(Dir);
+                SweepStaleTemps();   // once per process, before we add a temp
                 // ATOMIC write: serialise to a per-process temp then swap it into
                 // place, so a concurrent reader in another SOLIDWORKS instance never
                 // sees a TRUNCATED prefs.xml. A partial read would XmlException →
@@ -69,25 +72,44 @@ namespace PDMLite
                 // NTFS; the per-process temp name keeps two instances from sharing one
                 // temp even if the cross-process mutex wait timed out. Mirrors
                 // DatabaseManager's vault.xml temp-then-replace.
-                string tmp = PrefsPath + "." +
-                    System.Diagnostics.Process.GetCurrentProcess().Id + ".tmp";
                 d.Save(tmp);
                 if (File.Exists(PrefsPath)) File.Replace(tmp, PrefsPath, null);
                 else File.Move(tmp, PrefsPath);
             }
             catch
             {
-                // Best-effort fallback: a direct (non-atomic) save still beats losing
-                // the write; clean up any stray temp from a failed swap.
-                try { d.Save(PrefsPath); } catch { }
-                try
-                {
-                    string tmp = PrefsPath + "." +
-                        System.Diagnostics.Process.GetCurrentProcess().Id + ".tmp";
-                    if (File.Exists(tmp)) File.Delete(tmp);
-                }
-                catch { }
+                // The swap failed — but File.Replace/File.Move (and a failed d.Save to
+                // the temp) ALL leave the existing prefs.xml UNCHANGED, so the old data
+                // survives. We deliberately do NOT fall back to a truncating in-place
+                // d.Save(PrefsPath): that would re-introduce the exact torn-write this
+                // method exists to prevent. The lost write is re-attempted on the next
+                // mutation (best-effort, non-fatal); just clear the stray temp.
+                try { if (File.Exists(tmp)) File.Delete(tmp); } catch { }
             }
+        }
+
+        // One-time best-effort sweep of temps stranded by a crash/kill between the
+        // temp write and the swap (the success and catch paths both consume/delete
+        // their own temp, so only a hard crash leaks one, and the per-PID name means
+        // a dead process's temp is never reclaimed otherwise). Mirrors the vault.xml
+        // temp sweep in DatabaseManager.Initialize. Runs under Save's _lock, so the
+        // flag check/set is process-safe; >1-day age guard never touches a live
+        // instance's in-flight temp.
+        private static bool _sweptTemps;
+        private static void SweepStaleTemps()
+        {
+            if (_sweptTemps) return;
+            _sweptTemps = true;   // set first so a failing scan never re-runs every Save
+            try
+            {
+                DateTime cutoff = DateTime.UtcNow.AddDays(-1);
+                foreach (var f in Directory.GetFiles(Dir, "prefs.xml.*.tmp"))
+                {
+                    try { if (File.GetLastWriteTimeUtc(f) < cutoff) File.Delete(f); }
+                    catch { }
+                }
+            }
+            catch { }
         }
 
         // Runs a read-modify-write of prefs.xml under BOTH the in-process _lock AND
@@ -98,22 +120,31 @@ namespace PDMLite
         // result (default(T) on any failure).
         private static T Mutate<T>(Func<XDocument, T> change)
         {
-            lock (_lock)
-            using (var mtx = new System.Threading.Mutex(false, MutexName))
+            // WHOLE body non-fatal (mirrors RecentFiles.Add): even the Mutex ctor and
+            // lock acquisition can throw (WaitHandleCannotBeOpenedException on a
+            // session-name collision, ACL/IO), and the mutator callers run inside
+            // WinForms Click handlers with NO try/catch — an escape here would be an
+            // unhandled exception on SOLIDWORKS' UI thread. The inner finally still
+            // releases the mutex before this outer catch returns.
+            try
             {
-                bool held = false;
-                try { held = mtx.WaitOne(50); }
-                catch (System.Threading.AbandonedMutexException) { held = true; }
-                try
+                lock (_lock)
+                using (var mtx = new System.Threading.Mutex(false, MutexName))
                 {
-                    var d = Load();
-                    T result = change(d);
-                    Save(d);
-                    return result;
+                    bool held = false;
+                    try { held = mtx.WaitOne(50); }
+                    catch (System.Threading.AbandonedMutexException) { held = true; }
+                    try
+                    {
+                        var d = Load();
+                        T result = change(d);
+                        Save(d);
+                        return result;
+                    }
+                    finally { if (held) try { mtx.ReleaseMutex(); } catch { } }
                 }
-                catch { return default(T); }
-                finally { if (held) try { mtx.ReleaseMutex(); } catch { } }
             }
+            catch { return default(T); }
         }
 
         private static void Mutate(Action<XDocument> change)

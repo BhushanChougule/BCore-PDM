@@ -132,7 +132,7 @@ namespace PDMLite
             y = AddHeader("RECENT", x, y);
             _lbRecent = MakeList(x, y, listW, listH);
             _lbRecent.DoubleClick += (s, e) => OpenSelected(_lbRecent, _recentPaths);
-            _lbRecent.MouseDown += (s, e) => ListMouseDown(_lbRecent, _recentPaths, false, e);
+            _lbRecent.MouseDown += (s, e) => ListMouseDown(_lbRecent, _recentPaths, e);
             Controls.Add(_lbRecent);
             y += _lbRecent.Height + S(4);
             y = AddRowButtons(x, y, listW,
@@ -143,7 +143,7 @@ namespace PDMLite
             y = AddHeader("FAVORITES", x, y);
             _lbFav = MakeList(x, y, listW, listH);
             _lbFav.DoubleClick += (s, e) => OpenSelected(_lbFav, _favPaths);
-            _lbFav.MouseDown += (s, e) => ListMouseDown(_lbFav, _favPaths, true, e);
+            _lbFav.MouseDown += (s, e) => ListMouseDown(_lbFav, _favPaths, e);
             Controls.Add(_lbFav);
             y += _lbFav.Height + S(4);
             y = AddRowButtons(x, y, listW,
@@ -318,7 +318,13 @@ namespace PDMLite
         {
             int i = _lbRecent.SelectedIndex;
             if (i < 0 || i >= _recentPaths.Count) return;
-            UserPrefs.ToggleFavorite(_recentPaths[i]);
+            // ADD-ONLY: the button's label is the static "★ Favorite", so it must
+            // never silently un-favourite a recent that is already a favourite — a
+            // no-op in that case (the right-click menu, whose label tracks live state,
+            // is the way to Remove). Removing from the Favorites list stays in
+            // RemoveSelectedFavorite.
+            if (!UserPrefs.IsFavorite(_recentPaths[i]))
+                UserPrefs.ToggleFavorite(_recentPaths[i]);
             RebuildLists();
         }
 
@@ -355,15 +361,17 @@ namespace PDMLite
             });
         }
 
-        private void ListMouseDown(ListBox lb, List<string> paths, bool isFav,
-            MouseEventArgs e)
+        private void ListMouseDown(ListBox lb, List<string> paths, MouseEventArgs e)
         {
             if (e.Button != MouseButtons.Right) return;
             int i = lb.IndexFromPoint(e.Location);
             if (i < 0 || i >= paths.Count) return;   // empty / "(none yet)" row
             lb.SelectedIndex = i;
             _menuPath = paths[i];
-            _miFav.Text = isFav ? "Remove ★" : "★ Favorite";
+            // Label from LIVE favourite state, NOT which list was clicked: a Recent
+            // row can already be a favourite, and MenuToggleFav would then REMOVE it —
+            // so show "Remove ★" whenever the file is already a favourite.
+            _miFav.Text = UserPrefs.IsFavorite(_menuPath) ? "Remove ★" : "★ Favorite";
             _listMenu.Show(lb, e.Location);
         }
 
