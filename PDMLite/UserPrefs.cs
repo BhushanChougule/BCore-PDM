@@ -27,6 +27,12 @@ namespace PDMLite
         private const int RecentSearchCap = 10;
 
         private static readonly object _lock = new object();
+        // prefs.xml is per-user but SHARED across every SOLIDWORKS instance that
+        // user runs in one session, so the in-process _lock alone can't stop two
+        // instances clobbering each other's read-modify-write — a session-local
+        // named Mutex serialises the writers cross-process (same discipline as the
+        // sibling RecentFiles store's "BCorePDM.RecentFiles" mutex).
+        private const string MutexName = "BCorePDM.UserPrefs";
 
         private static string Dir => Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
@@ -52,8 +58,67 @@ namespace PDMLite
 
         private static void Save(XDocument d)
         {
-            try { Directory.CreateDirectory(Dir); d.Save(PrefsPath); }
-            catch { }
+            try
+            {
+                Directory.CreateDirectory(Dir);
+                // ATOMIC write: serialise to a per-process temp then swap it into
+                // place, so a concurrent reader in another SOLIDWORKS instance never
+                // sees a TRUNCATED prefs.xml. A partial read would XmlException →
+                // Load's empty-doc fallback → the next Save persisting that empty doc,
+                // wiping ALL saved searches + favourites. File.Replace is atomic on
+                // NTFS; the per-process temp name keeps two instances from sharing one
+                // temp even if the cross-process mutex wait timed out. Mirrors
+                // DatabaseManager's vault.xml temp-then-replace.
+                string tmp = PrefsPath + "." +
+                    System.Diagnostics.Process.GetCurrentProcess().Id + ".tmp";
+                d.Save(tmp);
+                if (File.Exists(PrefsPath)) File.Replace(tmp, PrefsPath, null);
+                else File.Move(tmp, PrefsPath);
+            }
+            catch
+            {
+                // Best-effort fallback: a direct (non-atomic) save still beats losing
+                // the write; clean up any stray temp from a failed swap.
+                try { d.Save(PrefsPath); } catch { }
+                try
+                {
+                    string tmp = PrefsPath + "." +
+                        System.Diagnostics.Process.GetCurrentProcess().Id + ".tmp";
+                    if (File.Exists(tmp)) File.Delete(tmp);
+                }
+                catch { }
+            }
+        }
+
+        // Runs a read-modify-write of prefs.xml under BOTH the in-process _lock AND
+        // the cross-process MutexName, so concurrent SOLIDWORKS instances can't
+        // interleave their Load→change→Save. Best-effort 50ms wait (mirrors
+        // RecentFiles): if a peer holds it, proceed unsynchronised rather than stall
+        // a UI click — the write is best-effort and non-fatal. Returns the change's
+        // result (default(T) on any failure).
+        private static T Mutate<T>(Func<XDocument, T> change)
+        {
+            lock (_lock)
+            using (var mtx = new System.Threading.Mutex(false, MutexName))
+            {
+                bool held = false;
+                try { held = mtx.WaitOne(50); }
+                catch (System.Threading.AbandonedMutexException) { held = true; }
+                try
+                {
+                    var d = Load();
+                    T result = change(d);
+                    Save(d);
+                    return result;
+                }
+                catch { return default(T); }
+                finally { if (held) try { mtx.ReleaseMutex(); } catch { } }
+            }
+        }
+
+        private static void Mutate(Action<XDocument> change)
+        {
+            Mutate<object>(d => { change(d); return null; });
         }
 
         private static bool Eq(string a, string b) =>
@@ -78,24 +143,18 @@ namespace PDMLite
         public static bool ToggleFavorite(string path)
         {
             if (string.IsNullOrEmpty(path)) return false;
-            lock (_lock)
+            return Mutate(d =>
             {
-                try
-                {
-                    var d = Load();
-                    var fav = Section(d, "Favorites");
-                    var existing = fav.Elements("Item")
-                        .Where(e => Eq((string)e.Attribute("Path"), path)).ToList();
-                    bool nowFav;
-                    if (existing.Count > 0)
-                    { existing.ForEach(e => e.Remove()); nowFav = false; }
-                    else
-                    { fav.Add(new XElement("Item", new XAttribute("Path", path))); nowFav = true; }
-                    Save(d);
-                    return nowFav;
-                }
-                catch { return false; }
-            }
+                var fav = Section(d, "Favorites");
+                var existing = fav.Elements("Item")
+                    .Where(e => Eq((string)e.Attribute("Path"), path)).ToList();
+                bool nowFav;
+                if (existing.Count > 0)
+                { existing.ForEach(e => e.Remove()); nowFav = false; }
+                else
+                { fav.Add(new XElement("Item", new XAttribute("Path", path))); nowFav = true; }
+                return nowFav;
+            });
         }
 
         public static List<string> GetFavorites()
@@ -117,22 +176,16 @@ namespace PDMLite
         {
             if (string.IsNullOrWhiteSpace(name) ||
                 string.IsNullOrWhiteSpace(term)) return;
-            lock (_lock)
+            Mutate(d =>
             {
-                try
-                {
-                    var d = Load();
-                    var ss = Section(d, "SavedSearches");
-                    ss.Elements("Search")
-                      .Where(e => Eq((string)e.Attribute("Name"), name.Trim()))
-                      .ToList().ForEach(e => e.Remove());
-                    ss.Add(new XElement("Search",
-                        new XAttribute("Name", name.Trim()),
-                        new XAttribute("Term", term.Trim())));
-                    Save(d);
-                }
-                catch { }
-            }
+                var ss = Section(d, "SavedSearches");
+                ss.Elements("Search")
+                  .Where(e => Eq((string)e.Attribute("Name"), name.Trim()))
+                  .ToList().ForEach(e => e.Remove());
+                ss.Add(new XElement("Search",
+                    new XAttribute("Name", name.Trim()),
+                    new XAttribute("Term", term.Trim())));
+            });
         }
 
         public static List<SavedSearch> GetSavedSearches()
@@ -156,18 +209,10 @@ namespace PDMLite
         public static void DeleteSavedSearch(string name)
         {
             if (string.IsNullOrEmpty(name)) return;
-            lock (_lock)
-            {
-                try
-                {
-                    var d = Load();
-                    Section(d, "SavedSearches").Elements("Search")
-                        .Where(e => Eq((string)e.Attribute("Name"), name))
-                        .ToList().ForEach(e => e.Remove());
-                    Save(d);
-                }
-                catch { }
-            }
+            Mutate(d =>
+                Section(d, "SavedSearches").Elements("Search")
+                    .Where(e => Eq((string)e.Attribute("Name"), name))
+                    .ToList().ForEach(e => e.Remove()));
         }
 
         // ── Recent search TERMS (query history) ─────────────────────────
@@ -177,33 +222,27 @@ namespace PDMLite
             if (string.IsNullOrWhiteSpace(term)) return;
             term = term.Trim();
             if (term.Length < 2) return;   // mirrors the search box's 2-char floor
-            lock (_lock)
+            Mutate(d =>
             {
-                try
-                {
-                    var d = Load();
-                    var rs = Section(d, "RecentSearches");
-                    // Collapse the incremental-typing chain: drop any existing term
-                    // that is an exact (case-insensitive) duplicate OR a PREFIX of
-                    // this one ("ste","stee" when "steel" lands), so the list holds
-                    // the final queries rather than every keystroke. The floor keeps
-                    // the shortest stored term at 2 chars.
-                    rs.Elements("Search")
-                      .Where(e =>
-                      {
-                          string t = (string)e.Attribute("Term") ?? "";
-                          return Eq(t, term) ||
-                                 (t.Length > 0 &&
-                                  term.StartsWith(t, StringComparison.OrdinalIgnoreCase));
-                      })
-                      .ToList().ForEach(e => e.Remove());
-                    rs.AddFirst(new XElement("Search", new XAttribute("Term", term)));
-                    rs.Elements("Search").Skip(RecentSearchCap)
-                      .ToList().ForEach(e => e.Remove());
-                    Save(d);
-                }
-                catch { }
-            }
+                var rs = Section(d, "RecentSearches");
+                // Collapse the incremental-typing chain: drop any existing term
+                // that is an exact (case-insensitive) duplicate OR a PREFIX of
+                // this one ("ste","stee" when "steel" lands), so the list holds
+                // the final queries rather than every keystroke. The floor keeps
+                // the shortest stored term at 2 chars.
+                rs.Elements("Search")
+                  .Where(e =>
+                  {
+                      string t = (string)e.Attribute("Term") ?? "";
+                      return Eq(t, term) ||
+                             (t.Length > 0 &&
+                              term.StartsWith(t, StringComparison.OrdinalIgnoreCase));
+                  })
+                  .ToList().ForEach(e => e.Remove());
+                rs.AddFirst(new XElement("Search", new XAttribute("Term", term)));
+                rs.Elements("Search").Skip(RecentSearchCap)
+                  .ToList().ForEach(e => e.Remove());
+            });
         }
 
         public static List<string> GetRecentSearches()
@@ -222,17 +261,9 @@ namespace PDMLite
 
         public static void ClearRecentSearches()
         {
-            lock (_lock)
-            {
-                try
-                {
-                    var d = Load();
-                    Section(d, "RecentSearches").Elements("Search")
-                        .ToList().ForEach(e => e.Remove());
-                    Save(d);
-                }
-                catch { }
-            }
+            Mutate(d =>
+                Section(d, "RecentSearches").Elements("Search")
+                    .ToList().ForEach(e => e.Remove()));
         }
     }
 }

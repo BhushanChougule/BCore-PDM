@@ -1688,6 +1688,12 @@ namespace PDMLite
         {
             try
             {
+                // Stop the armed debounce before the modal: ShowDialog pumps the
+                // message loop, so a queued tick would re-enter RunSearch and rebuild
+                // the result cards behind the popup (and behind the nested Where Used
+                // modal reached via WhereUsedPath). Same guard as CardWhereUsed /
+                // ShowLargePreview.
+                _searchTimer.Stop();
                 string term = (_searchBox.Text ?? "").Trim();
                 using (var f = new QuickAccessPopup(term))
                 {
