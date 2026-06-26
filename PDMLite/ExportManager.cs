@@ -32,12 +32,13 @@ namespace PDMLite
 
             if (docType == (int)swDocumentTypes_e.swDocDRAWING)
             {
-                // Drawing → PDF (all sheets). The released master is NO LONGER
-                // stamped RELEASED (shop decision) — StampWatermark is retained but
-                // unwired in case it is re-enabled; the "UNCONTROLLED WHEN PRINTED"
-                // mark is applied at PRINT time instead (StampUncontrolledCopy).
+                // Drawing → PDF (all sheets), then stamp the green "RELEASED" mark
+                // into the title-block stamp box (per-sheet position — see
+                // StampWatermarkCore).
                 string pdfPath = Path.Combine(pdfFolder, stamp + ".pdf");
-                return ExportDrawingPdf(doc, pdfPath);
+                bool ok = ExportDrawingPdf(doc, pdfPath);
+                if (ok) StampWatermark(pdfPath);
+                return ok;
             }
             if (docType == (int)swDocumentTypes_e.swDocPART)
             {
@@ -337,9 +338,6 @@ namespace PDMLite
             return field;
         }
 
-        // CURRENTLY UNWIRED: the shop decided released masters carry no RELEASED
-        // stamp, so ExportAll no longer calls this. Retained (with StampWatermarkCore)
-        // so re-enabling is a one-line change.
         // Thin wrapper that references NO PdfSharp types directly. If PdfSharp.dll
         // fails to load at runtime, the FileNotFoundException/TypeLoadException is
         // thrown when the JIT enters StampWatermarkCore and is caught HERE —
@@ -373,26 +371,32 @@ namespace PDMLite
                 PdfDocumentOpenMode.Modify))
             {
                 // Solid GREEN "RELEASED" stamp placed in the drawing's designated
-                // stamp box (lower-left of the title block), NOT a faint diagonal
-                // watermark across the sheet — the shop wanted it boxed and green.
-                // Mostly opaque so it reads as a stamp; the template's box is blank,
-                // so it doesn't hide drawing content.
+                // title-block stamp box (position is per-sheet, set below), NOT a
+                // faint diagonal watermark across the sheet — the shop wanted it
+                // boxed and green. Mostly opaque so it reads as a stamp; the
+                // template's box is blank, so it doesn't hide drawing content.
                 XBrush brush = new XSolidBrush(XColor.FromArgb(235, 34, 197, 94));
                 const string text = "RELEASED";
 
+                int pageIndex = 0;
                 foreach (PdfPage page in pdf.Pages)
                 {
                     double w = page.Width.Point;
                     double h = page.Height.Point;
 
-                    // The stamp box as fractions of the sheet (lower-left of the
-                    // title block on the shop template) — the same relative spot on
-                    // every sheet size, so it scales A → E. Tune these four if the
-                    // template's box ever moves.
-                    double bx = w * 0.14;
-                    double by = h * 0.85;
-                    double bw = w * 0.23;
-                    double bh = h * 0.05;
+                    // The designated stamp box differs between the FIRST sheet and
+                    // the continuation sheets (2nd onward) — the title-block layout
+                    // isn't the same — so each uses its own box. Fractions of the
+                    // sheet, so both scale A → E. Tune per the shop template.
+                    double bx, by, bw, bh;
+                    if (pageIndex == 0)
+                    {
+                        bx = w * 0.50; by = h * 0.83; bw = w * 0.13; bh = h * 0.04;
+                    }
+                    else
+                    {
+                        bx = w * 0.78; by = h * 0.88; bw = w * 0.14; bh = h * 0.05;
+                    }
 
                     using (XGraphics gfx = XGraphics.FromPdfPage(
                         page, XGraphicsPdfPageOptions.Append))
@@ -410,6 +414,7 @@ namespace PDMLite
                         gfx.DrawString(text, font, brush,
                             new XRect(bx, by, bw, bh), XStringFormats.Center);
                     }
+                    pageIndex++;
                 }
 
                 using (var outMs = new MemoryStream())
@@ -471,10 +476,11 @@ namespace PDMLite
             using (var inMs = new MemoryStream(srcBytes))
             using (PdfDocument pdf = PdfReader.Open(inMs, PdfDocumentOpenMode.Modify))
             {
-                // Red at alpha 64/255 ≈ 25% — clearly readable (the stamp MUST be
-                // noticed, unlike the 4.5% RELEASED watermark) yet translucent enough
-                // not to fully hide drawing content beneath it.
-                XBrush brush = new XSolidBrush(XColor.FromArgb(64, 200, 40, 40));
+                // Red at alpha 170/255 ≈ 67% — sits in the empty top margin, so it
+                // can be fairly opaque without hiding drawing content. A lighter
+                // value (was 64/255) printed as a near-invisible gray on a B&W
+                // printer; this prints as a clearly-visible medium gray.
+                XBrush brush = new XSolidBrush(XColor.FromArgb(170, 190, 30, 30));
                 const string banner = "UNCONTROLLED WHEN PRINTED";
 
                 foreach (PdfPage page in pdf.Pages)
