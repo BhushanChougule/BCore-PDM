@@ -377,7 +377,7 @@ namespace PDMLite
             if (missing.Count > 0)
                 confirmSb.Append("\n\n(").Append(missing.Count)
                          .Append(" drawing(s) had no current PDF and will be skipped.)");
-            confirmSb.Append("\n\nEach hardcopy is stamped \"UNCONTROLLED WHEN PRINTED\".");
+            confirmSb.Append("\n\nEach hardcopy is stamped \"UNCONTROLLED WHEN PRINTED\" when possible (the controlled master is never modified).");
             if (MessageBox.Show(confirmSb.ToString(),
                     "BCore PDM — Print Drawings",
                     MessageBoxButtons.YesNo, MessageBoxIcon.Question)
@@ -422,13 +422,23 @@ namespace PDMLite
                 if (ExportManager.PrintPdf(toSend))
                 {
                     ok++;
+                    // Record the TRUE reason a copy printed un-stamped — a null temp
+                    // dir (couldn't create the %TEMP% folder) is a different cause
+                    // than StampUncontrolledCopy failing (PdfSharp missing / source
+                    // unreadable). The audit trail is the ISO controlled-distribution
+                    // record, so the parenthetical must not always blame PdfSharp.
+                    string note;
+                    if (stamped)
+                        note = "Printed to default printer — UNCONTROLLED WHEN PRINTED stamp applied";
+                    else if (printTempDir == null)
+                        note = "Printed to default printer — unstamped (temp folder unavailable)";
+                    else
+                        note = "Printed to default printer — unstamped (stamp unavailable — PdfSharp missing or source unreadable)";
                     printedRows.Add(new AuditLogger.AuditRow
                     {
                         Action = "Printed", User = _me, FileName = pdfName,
                         Revision = RevFromPdfName(pdfName),
-                        Note = stamped
-                            ? "Printed to default printer — UNCONTROLLED WHEN PRINTED stamp applied"
-                            : "Printed to default printer — unstamped (PdfSharp unavailable)"
+                        Note = note
                     });
                 }
                 else failed.Add(pdfName);
