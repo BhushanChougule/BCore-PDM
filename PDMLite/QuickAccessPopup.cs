@@ -204,11 +204,27 @@ namespace PDMLite
 
         private static string Display(string path)
         {
-            // Keep the extension so a part and its drawing (same basename, e.g.
-            // TEST 1.sldprt vs TEST 1.slddrw) are distinguishable in the list
-            // instead of rendering as two identical-looking rows.
-            try { return Path.GetFileName(path); }
+            // Append a friendly type word so a part and its drawing (same
+            // basename, e.g. TEST 1.sldprt vs TEST 1.slddrw) are distinguishable
+            // in the list instead of rendering as two identical-looking rows.
+            try
+            {
+                string name = Path.GetFileNameWithoutExtension(path);
+                string type = TypeWord(path);
+                return type.Length > 0 ? name + "  (" + type + ")" : name;
+            }
             catch { return path; }
+        }
+
+        private static string TypeWord(string path)
+        {
+            switch ((Path.GetExtension(path) ?? "").ToLowerInvariant())
+            {
+                case ".sldprt": return "Part";
+                case ".sldasm": return "Assembly";
+                case ".slddrw": return "Drawing";
+                default:        return "";
+            }
         }
 
         private void OnSaveCurrent(object sender, EventArgs e)
