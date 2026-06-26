@@ -489,7 +489,9 @@ namespace PDMLite
                             ? 100.0 * (w * 0.32) / ts.Width : 22.0;
                         XFont font = new XFont("Arial", size, XFontStyle.Bold);
 
-                        double top = h * 0.02;   // just inside the top edge
+                        // High in the top margin, clear of the sheet's zone-number
+                        // row / top border (was h*0.02, which straddled them).
+                        double top = h * 0.005;
                         gfx.DrawString(banner, font, brush,
                             new XRect(0, top, w, size * 1.4), XStringFormats.TopCenter);
 
