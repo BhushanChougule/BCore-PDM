@@ -377,6 +377,10 @@ namespace PDMLite
                 // template's box is blank, so it doesn't hide drawing content.
                 XBrush brush = new XSolidBrush(XColor.FromArgb(235, 34, 197, 94));
                 const string text = "RELEASED";
+                // Stamped during the release operation, so "now" IS the release
+                // date. InvariantCulture per the house date convention.
+                string dateLine = System.DateTime.Now.ToString("MM/dd/yyyy",
+                    System.Globalization.CultureInfo.InvariantCulture);
 
                 int pageIndex = 0;
                 foreach (PdfPage page in pdf.Pages)
@@ -401,18 +405,13 @@ namespace PDMLite
                     using (XGraphics gfx = XGraphics.FromPdfPage(
                         page, XGraphicsPdfPageOptions.Append))
                     {
-                        // Size the text to fit the box in BOTH width and height (the
-                        // box is wide and short, so height usually governs), then
-                        // draw it horizontally centred inside the box.
-                        XFont trial = new XFont("Arial", 100, XFontStyle.Bold);
-                        XSize ts = gfx.MeasureString(text, trial);
-                        double sizeW = ts.Width  > 1 ? 100.0 * (bw * 0.90) / ts.Width  : 24.0;
-                        double sizeH = ts.Height > 1 ? 100.0 * (bh * 0.85) / ts.Height : 24.0;
-                        double size = System.Math.Min(sizeW, sizeH);
-                        XFont font = new XFont("Arial", size, XFontStyle.Bold);
-
-                        gfx.DrawString(text, font, brush,
-                            new XRect(bx, by, bw, bh), XStringFormats.Center);
+                        // "RELEASED" in the top ~62% of the box, the release date in
+                        // the bottom ~38% — each auto-sized to fit its own row in
+                        // both width and height.
+                        double relH = bh * 0.62;
+                        FitCentredText(gfx, text, brush, new XRect(bx, by, bw, relH));
+                        FitCentredText(gfx, dateLine, brush,
+                            new XRect(bx, by + relH, bw, bh - relH));
                     }
                     pageIndex++;
                 }
@@ -440,6 +439,22 @@ namespace PDMLite
                 }
             }
             File.WriteAllBytes(pdfPath, outBytes);
+        }
+
+        // Draw s centred and auto-sized to fit rect in BOTH width and height
+        // (Arial Bold). Shared by the RELEASED line and its date line.
+        private static void FitCentredText(XGraphics gfx, string s, XBrush brush,
+            XRect rect)
+        {
+            if (string.IsNullOrEmpty(s)) return;
+            XFont trial = new XFont("Arial", 100, XFontStyle.Bold);
+            XSize ts = gfx.MeasureString(s, trial);
+            double sizeW = ts.Width  > 1 ? 100.0 * (rect.Width  * 0.90) / ts.Width  : 10.0;
+            double sizeH = ts.Height > 1 ? 100.0 * (rect.Height * 0.85) / ts.Height : 10.0;
+            double size = System.Math.Min(sizeW, sizeH);
+            if (size < 1) size = 1;
+            XFont font = new XFont("Arial", size, XFontStyle.Bold);
+            gfx.DrawString(s, font, brush, rect, XStringFormats.Center);
         }
 
         // ── "UNCONTROLLED WHEN PRINTED" hardcopy stamp ──────────────────────
