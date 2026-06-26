@@ -395,11 +395,15 @@ namespace PDMLite
                     double bx, by, bw, bh;
                     if (pageIndex == 0)
                     {
-                        bx = w * 0.50; by = h * 0.83; bw = w * 0.13; bh = h * 0.04;
+                        // First sheet: the empty cell at the bottom of the sheet,
+                        // between the NOTES block and the title block.
+                        bx = w * 0.35; by = h * 0.92; bw = w * 0.145; bh = h * 0.05;
                     }
                     else
                     {
-                        bx = w * 0.78; by = h * 0.88; bw = w * 0.14; bh = h * 0.05;
+                        // Continuation sheets (2nd onward): the empty description-
+                        // value cell (left portion) under the title block.
+                        bx = w * 0.645; by = h * 0.878; bw = w * 0.14; bh = h * 0.052;
                     }
 
                     using (XGraphics gfx = XGraphics.FromPdfPage(
