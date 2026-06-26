@@ -32,11 +32,12 @@ namespace PDMLite
 
             if (docType == (int)swDocumentTypes_e.swDocDRAWING)
             {
-                // Drawing → PDF (all sheets), then stamp RELEASED watermark
+                // Drawing → PDF (all sheets). The released master is NO LONGER
+                // stamped RELEASED (shop decision) — StampWatermark is retained but
+                // unwired in case it is re-enabled; the "UNCONTROLLED WHEN PRINTED"
+                // mark is applied at PRINT time instead (StampUncontrolledCopy).
                 string pdfPath = Path.Combine(pdfFolder, stamp + ".pdf");
-                bool ok = ExportDrawingPdf(doc, pdfPath);
-                if (ok) StampWatermark(pdfPath);
-                return ok;
+                return ExportDrawingPdf(doc, pdfPath);
             }
             if (docType == (int)swDocumentTypes_e.swDocPART)
             {
@@ -336,6 +337,9 @@ namespace PDMLite
             return field;
         }
 
+        // CURRENTLY UNWIRED: the shop decided released masters carry no RELEASED
+        // stamp, so ExportAll no longer calls this. Retained (with StampWatermarkCore)
+        // so re-enabling is a one-line change.
         // Thin wrapper that references NO PdfSharp types directly. If PdfSharp.dll
         // fails to load at runtime, the FileNotFoundException/TypeLoadException is
         // thrown when the JIT enters StampWatermarkCore and is caught HERE —
@@ -489,9 +493,11 @@ namespace PDMLite
                             ? 100.0 * (w * 0.32) / ts.Width : 22.0;
                         XFont font = new XFont("Arial", size, XFontStyle.Bold);
 
-                        // High in the top margin, clear of the sheet's zone-number
-                        // row / top border (was h*0.02, which straddled them).
-                        double top = h * 0.005;
+                        // In the top margin, clear of the zone-number row / top
+                        // border but not so high the printer's non-printable margin
+                        // clips it (0.02 straddled the row, 0.005 clipped — split
+                        // the difference).
+                        double top = h * 0.0125;
                         gfx.DrawString(banner, font, brush,
                             new XRect(0, top, w, size * 1.4), XStringFormats.TopCenter);
 
