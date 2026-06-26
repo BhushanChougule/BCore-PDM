@@ -403,6 +403,9 @@ namespace PDMLite
                 }
             };
             searchCard.Controls.Add(_searchBox);
+            // Search guidance lives INSIDE the box now (grey placeholder), freeing
+            // the line below to be just the small Quick Access link.
+            SetCueBanner(_searchBox, "Search part no or description");
 
             // No Clear/Search buttons by design (auto-search + clear-on-empty,
             // see the search-box note above). Advance past the search row.
@@ -414,14 +417,11 @@ namespace PDMLite
             // the Active File section below.
             var hintLink = new Label
             {
-                Text = "★ Saved · Recent · Favorites",   // kept short to fit the narrow pane (was clipping)
-                Font = new Font("Segoe UI", 3.2f * _scale),
+                Text = "★ Saved · Recent · Favorites",
+                Font = new Font("Segoe UI", 2.9f * _scale),   // small subtext below the box
                 ForeColor = cBrand,
                 Location = new Point(x, y),
-                AutoSize = false,
-                AutoEllipsis = true,                       // never hard-clip at any DPI
-                Width = w,
-                Height = S(14),
+                AutoSize = true,                              // sizes to its text — never clipped/hidden
                 Cursor = Cursors.Hand
             };
             hintLink.Click += (s, e) => OpenQuickAccess();
@@ -1652,6 +1652,24 @@ namespace PDMLite
 
             }
             finally { SuspendThumbLoads(false); }
+        }
+
+        // Grey placeholder INSIDE a single-line TextBox (no PlaceholderText on
+        // .NET 4.8) — EM_SETCUEBANNER, mirroring the other BCore forms. The cue
+        // is set once the handle exists.
+        [System.Runtime.InteropServices.DllImport("user32.dll",
+            CharSet = System.Runtime.InteropServices.CharSet.Unicode)]
+        private static extern IntPtr SendMessageCue(
+            IntPtr hWnd, int msg, IntPtr wParam, string lParam);
+
+        private static void SetCueBanner(TextBox box, string text)
+        {
+            const int EM_SETCUEBANNER = 0x1501;
+            if (box.IsHandleCreated)
+                SendMessageCue(box.Handle, EM_SETCUEBANNER, (IntPtr)1, text);
+            else
+                box.HandleCreated += (s, e) =>
+                    SendMessageCue(box.Handle, EM_SETCUEBANNER, (IntPtr)1, text);
         }
 
         // Quick-access popup: Saved searches / Recent files / Favorites. Opened
