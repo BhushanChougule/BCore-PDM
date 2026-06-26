@@ -373,7 +373,7 @@ namespace PDMLite
                 // watermark across the sheet — the shop wanted it boxed and green.
                 // Mostly opaque so it reads as a stamp; the template's box is blank,
                 // so it doesn't hide drawing content.
-                XBrush brush = new XSolidBrush(XColor.FromArgb(235, 0, 150, 60));
+                XBrush brush = new XSolidBrush(XColor.FromArgb(235, 34, 197, 94));
                 const string text = "RELEASED";
 
                 foreach (PdfPage page in pdf.Pages)
@@ -386,7 +386,7 @@ namespace PDMLite
                     // every sheet size, so it scales A → E. Tune these four if the
                     // template's box ever moves.
                     double bx = w * 0.14;
-                    double by = h * 0.78;
+                    double by = h * 0.85;
                     double bw = w * 0.23;
                     double bh = h * 0.05;
 
