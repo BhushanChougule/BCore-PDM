@@ -204,7 +204,10 @@ namespace PDMLite
 
         private static string Display(string path)
         {
-            try { return Path.GetFileNameWithoutExtension(path); }
+            // Keep the extension so a part and its drawing (same basename, e.g.
+            // TEST 1.sldprt vs TEST 1.slddrw) are distinguishable in the list
+            // instead of rendering as two identical-looking rows.
+            try { return Path.GetFileName(path); }
             catch { return path; }
         }
 
