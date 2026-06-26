@@ -376,7 +376,7 @@ namespace PDMLite
             // button. S(2) margins each side inside searchCard.
             _searchBox = new TextBox
             {
-                Font = fLabel,
+                Font = new Font("Segoe UI", 3.8f * _scale),  // matches the section-header size
                 Width = w - S(4),
                 Height = S(22),
                 Location = new Point(S(2), S(2)),
@@ -403,21 +403,29 @@ namespace PDMLite
                 }
             };
             searchCard.Controls.Add(_searchBox);
+            // Search guidance lives INSIDE the box now (grey placeholder), freeing
+            // the line below to be just the small Quick Access link.
+            SetCueBanner(_searchBox, "Search part no or description");
 
             // No Clear/Search buttons by design (auto-search + clear-on-empty,
             // see the search-box note above). Advance past the search row.
             y += S(28);
 
-            this.Controls.Add(new Label
+            // Clickable hint that doubles as the entry point to the quick-access
+            // popup (Saved searches / Recent / Favorites). Kept a popup because
+            // this pane's layout is fixed-position — an inline list would overlap
+            // the Active File section below.
+            var hintLink = new Label
             {
-                Text = "Search by part number or description",
-                Font = new Font("Segoe UI", 3.2f * _scale),
-                ForeColor = cTextLight,
+                Text = "★ Saved · Recent · Favorites ★",
+                Font = new Font("Segoe UI", 3.8f * _scale),   // matches the search box size for a balanced look
+                ForeColor = cBrand,
                 Location = new Point(x, y),
-                AutoSize = false,
-                Width = w,
-                Height = S(14)
-            });
+                AutoSize = true,                              // sizes to its text — never clipped/hidden
+                Cursor = Cursors.Hand
+            };
+            hintLink.Click += (s, e) => OpenQuickAccess();
+            this.Controls.Add(hintLink);
             y += S(16);
 
             _resultsPanel = new Panel
@@ -882,6 +890,11 @@ namespace PDMLite
                 _resultsPanel.Height = S(28);
                 return;
             }
+
+            // Remember the query (history), but only a SUCCESSFUL one — we're past
+            // the no-results return, so this term actually found files. The store
+            // collapses the typing chain ("ste"→"steel") and caps the list.
+            try { UserPrefs.AddRecentSearch(term); } catch { }
 
             // Build ONE card per matching configuration. Config name = Part No by
             // convention, so a multi-config part yields a card per config, each
@@ -1646,6 +1659,106 @@ namespace PDMLite
             finally { SuspendThumbLoads(false); }
         }
 
+        // Grey placeholder INSIDE a single-line TextBox (no PlaceholderText on
+        // .NET 4.8) — EM_SETCUEBANNER, mirroring the other BCore forms. The cue
+        // is set once the handle exists.
+        // EntryPoint pinned: P/Invoke uses the METHOD name as the export name by
+        // default, so the custom name needs the real user32 export (SendMessageW).
+        [System.Runtime.InteropServices.DllImport("user32.dll",
+            EntryPoint = "SendMessageW",
+            CharSet = System.Runtime.InteropServices.CharSet.Unicode)]
+        private static extern IntPtr SendMessageCue(
+            IntPtr hWnd, int msg, IntPtr wParam, string lParam);
+
+        private static void SetCueBanner(TextBox box, string text)
+        {
+            const int EM_SETCUEBANNER = 0x1501;
+            if (box.IsHandleCreated)
+                SendMessageCue(box.Handle, EM_SETCUEBANNER, (IntPtr)1, text);
+            else
+                box.HandleCreated += (s, e) =>
+                    SendMessageCue(box.Handle, EM_SETCUEBANNER, (IntPtr)1, text);
+        }
+
+        // Quick-access popup: Saved searches / Recent files / Favorites. Opened
+        // from the search hint link. Acts AFTER the modal closes (deferred, like
+        // the Advanced Search / dashboard popups): a saved search re-runs the
+        // quick search; a recent/favorite file opens.
+        private void OpenQuickAccess()
+        {
+            try
+            {
+                // Stop the armed debounce before the modal: ShowDialog pumps the
+                // message loop, so a queued tick would re-enter RunSearch and rebuild
+                // the result cards behind the popup (and behind the nested Where Used
+                // modal reached via WhereUsedPath). Same guard as CardWhereUsed /
+                // ShowLargePreview.
+                _searchTimer.Stop();
+                string term = (_searchBox.Text ?? "").Trim();
+                using (var f = new QuickAccessPopup(term))
+                {
+                    if (f.ShowDialog(this) != DialogResult.OK) return;
+                    if (!string.IsNullOrEmpty(f.FileToOpen))
+                        OpenFile(f.FileToOpen);
+                    else if (!string.IsNullOrEmpty(f.WhereUsedPath))
+                        OpenWhereUsedForPath(f.WhereUsedPath);
+                    else if (!string.IsNullOrEmpty(f.TermToRun))
+                    {
+                        _searchBox.Text = f.TermToRun;
+                        _searchTimer.Stop();   // setting Text armed the debounce —
+                        RunSearch();           // run once, now, instead
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show("Quick access could not open:\n" + ex.Message,
+                    "BCore PDM", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            }
+        }
+
+        // Trace where-used for a path chosen via the Quick Access right-click menu
+        // (deferred — run AFTER the popup modal closes, like OpenFile). A drawing
+        // is never a component, so resolve it to the model it documents first;
+        // mirrors CardWhereUsed.
+        private void OpenWhereUsedForPath(string filePath)
+        {
+            if (string.IsNullOrEmpty(filePath)) return;
+            string path = filePath, partNo = "";
+            if (filePath.EndsWith(".slddrw", StringComparison.OrdinalIgnoreCase))
+            {
+                VaultFile model = null;
+                try { model = DatabaseManager.GetModelForDrawing(filePath); }
+                catch { }
+                if (model == null || string.IsNullOrEmpty(model.FilePath))
+                {
+                    MessageBox.Show(
+                        "No part/assembly is linked to this drawing, so Where Used " +
+                        "has nothing to trace.",
+                        "BCore PDM", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                    return;
+                }
+                path   = model.FilePath;
+                partNo = model.PartNumber;
+            }
+            try
+            {
+                string toOpen = null;
+                using (var v = new WhereUsedForm(path, Path.GetFileName(path),
+                    partNo, null))
+                {
+                    v.ShowDialog(this);
+                    toOpen = v.FileToOpen;
+                }
+                if (!string.IsNullOrEmpty(toOpen)) OpenFile(toOpen);
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show("Could not open Where Used:\n" + ex.Message,
+                    "BCore PDM", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            }
+        }
+
         private void OpenFile(string filePath)
         {
             // If a thumbnail preview read is on the stack (its COM call pumped the
@@ -1669,6 +1782,10 @@ namespace PDMLite
                     "BCore PDM", MessageBoxButtons.OK, MessageBoxIcon.Warning);
                 return;
             }
+
+            // Recents are recorded by RecentFiles.Add in Refresh when the opened
+            // doc becomes active (the shared store Quick Access + Advanced Search
+            // both read) — no separate per-open record needed here.
 
             try
             {
