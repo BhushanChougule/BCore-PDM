@@ -417,7 +417,7 @@ namespace PDMLite
             // the Active File section below.
             var hintLink = new Label
             {
-                Text = "★ Saved · Recent · Favorites",
+                Text = "★ Saved · Recent · Favorites ★",
                 Font = new Font("Segoe UI", 3.8f * _scale),   // matches the search box size for a balanced look
                 ForeColor = cBrand,
                 Location = new Point(x, y),
