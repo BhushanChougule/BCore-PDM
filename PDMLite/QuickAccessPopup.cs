@@ -103,7 +103,10 @@ namespace PDMLite
             Controls.Add(btnSaveCur);
             y += S(34);
 
-            int listH = S(74);
+            // Sized so the four lists + their buttons + Close fill the form with
+            // only a small bottom margin (no dead space below Close); each list
+            // gets the same height so the four boxes stay equal.
+            int listH = S(80);
 
             // ── Saved searches ─────────────────────────────────────────
             y = AddHeader("SAVED SEARCHES", x, y);
