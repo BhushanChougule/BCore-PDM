@@ -1657,7 +1657,10 @@ namespace PDMLite
         // Grey placeholder INSIDE a single-line TextBox (no PlaceholderText on
         // .NET 4.8) — EM_SETCUEBANNER, mirroring the other BCore forms. The cue
         // is set once the handle exists.
+        // EntryPoint pinned: P/Invoke uses the METHOD name as the export name by
+        // default, so the custom name needs the real user32 export (SendMessageW).
         [System.Runtime.InteropServices.DllImport("user32.dll",
+            EntryPoint = "SendMessageW",
             CharSet = System.Runtime.InteropServices.CharSet.Unicode)]
         private static extern IntPtr SendMessageCue(
             IntPtr hWnd, int msg, IntPtr wParam, string lParam);
