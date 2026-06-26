@@ -349,8 +349,9 @@ namespace PDMLite
             catch { } // missing PdfSharp.dll, or any PdfSharp error → skip stamp
         }
 
-        // Stamp a diagonal, very transparent "RELEASED" watermark on every page
-        // of the given PDF, aligned with the sheet's corner-to-corner diagonal.
+        // Stamp a solid GREEN "RELEASED" mark inside the drawing's designated stamp
+        // box (lower-left of the title block) on every page — horizontal, boxed and
+        // readable (the shop's choice over the old faint diagonal watermark).
         //
         // The PDF is read into memory and stamped there so PdfSharp never holds a
         // file handle on the path we then overwrite. SOLIDWORKS keeps the
@@ -367,44 +368,43 @@ namespace PDMLite
             using (PdfDocument pdf = PdfReader.Open(inMs,
                 PdfDocumentOpenMode.Modify))
             {
-                // Very transparent gray (alpha 11/255 ≈ 4.5%) — reads as a subtle
-                // watermark without hiding the drawing beneath. PdfSharp emits the
-                // alpha as a PDF ExtGState, so true transparency works.
-                XBrush brush = new XSolidBrush(XColor.FromArgb(11, 120, 120, 120));
+                // Solid GREEN "RELEASED" stamp placed in the drawing's designated
+                // stamp box (lower-left of the title block), NOT a faint diagonal
+                // watermark across the sheet — the shop wanted it boxed and green.
+                // Mostly opaque so it reads as a stamp; the template's box is blank,
+                // so it doesn't hide drawing content.
+                XBrush brush = new XSolidBrush(XColor.FromArgb(235, 0, 150, 60));
+                const string text = "RELEASED";
 
                 foreach (PdfPage page in pdf.Pages)
                 {
                     double w = page.Width.Point;
                     double h = page.Height.Point;
 
-                    // Lay the text along the sheet's bottom-left → top-right
-                    // diagonal: |angle| = atan(height / width) (≈ 33° for a 17×11
-                    // sheet). NEGATIVE rotates it ASCENDING to the right in
-                    // PdfSharp's y-down space (positive would descend).
-                    double angleDeg =
-                        -System.Math.Atan2(h, w) * 180.0 / System.Math.PI;
-                    double diag = System.Math.Sqrt(w * w + h * h);
+                    // The stamp box as fractions of the sheet (lower-left of the
+                    // title block on the shop template) — the same relative spot on
+                    // every sheet size, so it scales A → E. Tune these four if the
+                    // template's box ever moves.
+                    double bx = w * 0.14;
+                    double by = h * 0.78;
+                    double bw = w * 0.23;
+                    double bh = h * 0.05;
 
                     using (XGraphics gfx = XGraphics.FromPdfPage(
                         page, XGraphicsPdfPageOptions.Append))
                     {
-                        // Size the text to span ~48% of the diagonal so it scales
-                        // proportionally with any sheet size (A → E).
+                        // Size the text to fit the box in BOTH width and height (the
+                        // box is wide and short, so height usually governs), then
+                        // draw it horizontally centred inside the box.
                         XFont trial = new XFont("Arial", 100, XFontStyle.Bold);
-                        XSize ts = gfx.MeasureString("RELEASED", trial);
-                        double size = ts.Width > 1
-                            ? 100.0 * (diag * 0.48) / ts.Width : 78.0;
+                        XSize ts = gfx.MeasureString(text, trial);
+                        double sizeW = ts.Width  > 1 ? 100.0 * (bw * 0.90) / ts.Width  : 24.0;
+                        double sizeH = ts.Height > 1 ? 100.0 * (bh * 0.85) / ts.Height : 24.0;
+                        double size = System.Math.Min(sizeW, sizeH);
                         XFont font = new XFont("Arial", size, XFontStyle.Bold);
 
-                        // Translate to page centre, rotate to the diagonal, then
-                        // draw the text centred on the origin.
-                        XGraphicsState state = gfx.Save();
-                        gfx.TranslateTransform(w / 2.0, h / 2.0);
-                        gfx.RotateTransform(angleDeg);
-                        XSize sz = gfx.MeasureString("RELEASED", font);
-                        gfx.DrawString("RELEASED", font, brush,
-                            new XPoint(-sz.Width / 2, sz.Height / 4));
-                        gfx.Restore(state);
+                        gfx.DrawString(text, font, brush,
+                            new XRect(bx, by, bw, bh), XStringFormats.Center);
                     }
                 }
 
