@@ -466,9 +466,9 @@ namespace PDMLite
         // convention, UNCONTROLLED — it won't track future revisions — so the
         // hardcopy is stamped to warn the reader. We stamp a THROWAWAY COPY and
         // print that; the controlled master in EXPORTS\PDF is never modified (only
-        // the physical print is uncontrolled). Distinct from the faint diagonal
-        // RELEASED watermark baked into the master: this is a VISIBLE red top-of-
-        // page warning carrying who/when printed.
+        // the physical print is uncontrolled). Distinct from the green boxed
+        // RELEASED stamp on the master: this is a VISIBLE red top-of-page warning
+        // carrying who/when printed.
 
         // Thin wrapper referencing NO PdfSharp types directly, so a missing
         // PdfSharp.dll is caught HERE (same reason as StampWatermark) instead of
