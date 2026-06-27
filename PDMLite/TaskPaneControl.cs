@@ -646,6 +646,29 @@ namespace PDMLite
             this.Controls.Add(btnWhereUsed);
             y += S(28);
 
+            // ── Change Bulletins / ECB (Masters only) ─────────────────
+            // The Engineering Change Bulletin list — create / edit / track ECBs.
+            // Masters-only (engineers raise change via Request* + the future ECR
+            // flow), so it sits with the governance actions, not the read-only
+            // browse group above.
+            Button btnEcb = new Button
+            {
+                Text = "Change Bulletins",
+                Font = fBtn,
+                Width = w,
+                Height = S(24),
+                Location = new Point(x, y),
+                BackColor = cBrand,
+                ForeColor = Color.White,
+                FlatStyle = FlatStyle.Flat,
+                Cursor = Cursors.Hand,
+                Visible = isMaster
+            };
+            btnEcb.FlatAppearance.BorderSize = 0;
+            btnEcb.Click += (s, e) => OpenChangeBulletins();
+            this.Controls.Add(btnEcb);
+            if (isMaster) y += S(28);
+
             // ── Send Test Email (all users) ───────────────────────────
             Button btnTestEmail = new Button
             {
@@ -815,6 +838,21 @@ namespace PDMLite
             catch (Exception ex)
             {
                 MessageBox.Show("Could not open Where Used:\n" + ex.Message,
+                    "BCore PDM", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            }
+        }
+
+        // ── Open the Engineering Change Bulletins list (Masters) ──────
+        private void OpenChangeBulletins()
+        {
+            try
+            {
+                using (var f = new EcbListForm(_scale))
+                    f.ShowDialog(this);
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show("Could not open Change Bulletins:\n" + ex.Message,
                     "BCore PDM", MessageBoxButtons.OK, MessageBoxIcon.Warning);
             }
         }

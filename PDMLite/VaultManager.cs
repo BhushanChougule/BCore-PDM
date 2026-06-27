@@ -2084,6 +2084,16 @@ namespace PDMLite
                     "BCore PDM — Released");
             }
 
+            // ── ECB hook (interactive part/assembly release only) ─────────
+            // Offer to package this release into an Engineering Change Bulletin,
+            // seeded from the captured reason + the affected top-level products.
+            // Tiny, fully guarded + non-fatal — never blocks a release: a chained
+            // drawing→model release is suppressPrompts on the model, so only the
+            // user-facing release of a part/assembly asks, and at most once.
+            if (!suppressPrompts && !chainedRelease && !isDrawing)
+                try { OfferEcbForRelease(filePath, partNo, rev, reason); }
+                catch { }
+
             // A Released file is pure output — there is no point reopening it
             // read-only afterwards (it only wastes load time and memory and
             // makes the user wait). So we CLOSE the released file instead of
@@ -3299,6 +3309,78 @@ namespace PDMLite
             {
                 return "Affected top-level products: (could not determine)";
             }
+        }
+
+        // ── ECB hook (post-release offer) ─────────────────────────────────
+        // After a successful interactive part/assembly release, offer to package
+        // the change into an Engineering Change Bulletin (PR9). Seeds the ECB from
+        // the captured reason-for-change + the released file as the first affected
+        // item (FromRev blank — it's the new release, ToRev = the released rev) +
+        // the affected top-level products as further items. Fully non-fatal: any
+        // failure (no where-used data, vault unavailable, user declines) just
+        // skips it — a release is never blocked by the ECB offer.
+        private static void OfferEcbForRelease(string filePath, string partNo,
+            string rev, string reason)
+        {
+            try
+            {
+                var ask = MessageBox.Show(
+                    "Package this release into an Engineering Change Bulletin (ECB)?\n\n"
+                    + "An ECB records the engineering change — the reason, the "
+                    + "affected items and their revisions — in one auditable "
+                    + "document.",
+                    "BCore PDM — Engineering Change Bulletin",
+                    MessageBoxButtons.YesNo, MessageBoxIcon.Question);
+                if (ask != DialogResult.Yes) return;
+
+                var seed = new Ecb
+                {
+                    Title = (string.IsNullOrEmpty(partNo)
+                        ? Path.GetFileNameWithoutExtension(filePath ?? "")
+                        : partNo) + " REV " + (rev ?? ""),
+                    Reason = reason ?? "",
+                    State = "Open",
+                    Items = new List<EcbAffectedItem>()
+                };
+
+                // The released file itself is the primary affected item.
+                if (!string.IsNullOrEmpty(filePath))
+                    seed.Items.Add(new EcbAffectedItem
+                    {
+                        FilePath = filePath,
+                        PartNo = partNo ?? "",
+                        FromRev = "",
+                        ToRev = rev ?? ""
+                    });
+
+                // The affected top-level products (best-effort; a failed walk just
+                // yields fewer items). Deduped against the primary item by path.
+                try
+                {
+                    bool walkOk;
+                    var tops = GetWhereUsedTopLevel(filePath, null, out walkOk);
+                    if (walkOk && tops != null)
+                        foreach (var t in tops)
+                        {
+                            if (string.IsNullOrEmpty(t.Path)) continue;
+                            if (seed.Items.Any(i => string.Equals(i.FilePath, t.Path,
+                                    StringComparison.OrdinalIgnoreCase)))
+                                continue;
+                            seed.Items.Add(new EcbAffectedItem
+                            {
+                                FilePath = t.Path,
+                                PartNo = t.PartNo ?? "",
+                                FromRev = t.Revision ?? "",
+                                ToRev = ""
+                            });
+                        }
+                }
+                catch { }
+
+                using (var f = new EcbForm(seed))
+                    f.ShowDialog();
+            }
+            catch { } // never block a completed release over the ECB offer
         }
 
         // TOP-LEVEL where-used: only the ROOT assemblies that ULTIMATELY contain
