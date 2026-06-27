@@ -4625,6 +4625,10 @@ namespace PDMLite
             if (note == null) return;
 
             DatabaseManager.AddRevisionRequest(filePath, user, note);
+            // ALSO raise a parallel, trackable ECR record (the formal change-
+            // request front; the lightweight RevisionRequest still drives the
+            // approval queue). Non-fatal — never blocks the request.
+            CreateParallelEcr(EcrManager.TypeRevision, filePath, partNo, user, note);
             EmailManager.NotifyRequestSubmitted("Revision", fileName, partNo, rev, user, note);
             AuditLogger.Log("RequestRevision", user, fileName, partNo, rev, note);
             MessageBox.Show(
@@ -4646,6 +4650,7 @@ namespace PDMLite
             if (note == null) return;
 
             DatabaseManager.AddUnlockRequest(filePath, user, note);
+            CreateParallelEcr(EcrManager.TypeUnlock, filePath, "", user, note);
             EmailManager.NotifyRequestSubmitted("Unlock", fileName, "", "", user, note);
             AuditLogger.Log("RequestUnlock", user, fileName, "", "", note);
             MessageBox.Show(
@@ -4668,6 +4673,7 @@ namespace PDMLite
             if (note == null) return;
 
             DatabaseManager.AddReleaseRequest(filePath, user, note);
+            CreateParallelEcr(EcrManager.TypeRelease, filePath, partNo, user, note);
             EmailManager.NotifyRequestSubmitted("Release", fileName, partNo, rev, user, note);
             AuditLogger.Log("RequestRelease", user, fileName, partNo, rev, note);
             MessageBox.Show(
@@ -4676,6 +4682,107 @@ namespace PDMLite
                 "\n\nThe Master will be notified.",
                 "BCore PDM — Request Submitted",
                 MessageBoxButtons.OK, MessageBoxIcon.Information);
+        }
+
+        // ── ENGINEERING CHANGE REQUEST (ECR) ─────────────────────────────
+        // Formalised change request: distinct from (and complementary to) the
+        // lightweight RevisionRequest. RaiseEcr lets an engineer file a standalone
+        // ECR (any change type, not tied to a save/release gate); the three
+        // Request* methods also auto-create a parallel ECR so the existing
+        // approval queue and the formal change history stay in lock-step.
+
+        // Auto-create a parallel ECR alongside a RevisionRequest. NON-FATAL — an
+        // ECR-store hiccup never blocks the request the engineer just submitted.
+        private static void CreateParallelEcr(string type, string filePath,
+            string partNo, string requester, string note)
+        {
+            try
+            {
+                string desc = string.IsNullOrWhiteSpace(note)
+                    ? (type + " request") : note;
+                EcrManager.CreateEcr(type, desc, filePath, partNo, requester);
+            }
+            catch { }
+        }
+
+        // Engineer raises a standalone ECR for the active document. Auto-fills the
+        // affected file + part number from the doc, prompts via EcrForm, then
+        // persists + emails the Masters + audits. NON-FATAL throughout.
+        public static void RaiseEcr(ModelDoc2 doc)
+        {
+            if (doc == null)
+            {
+                MessageBox.Show("Please open a SOLIDWORKS file first.",
+                    "BCore PDM", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                return;
+            }
+            string user = PDMLiteAddin.CurrentUser;
+            string filePath = "";
+            string fileName = "";
+            string partNo = "";
+            try
+            {
+                filePath = doc.GetPathName() ?? "";
+                fileName = string.IsNullOrEmpty(filePath) ? "" : Path.GetFileName(filePath);
+                partNo = PropertyValidator.GetProperty(doc, "PartNo") ?? "";
+            }
+            catch { }
+
+            using (var form = new EcrForm(fileName, partNo, ""))
+            {
+                if (form.ShowDialog() != DialogResult.OK) return;
+
+                EcrManager.Ecr ecr = null;
+                try
+                {
+                    ecr = EcrManager.CreateEcr(form.EcrType, form.Description,
+                        filePath, partNo, user);
+                }
+                catch { }
+
+                if (ecr == null)
+                {
+                    MessageBox.Show(
+                        "Could not save the change request (store unavailable).",
+                        "BCore PDM", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                    return;
+                }
+
+                try
+                {
+                    EmailManager.NotifyRequestSubmitted("Change Request (" + ecr.Number + ")",
+                        fileName, partNo, "", user, form.Description);
+                }
+                catch { }
+                try
+                {
+                    AuditLogger.Log("EcrSubmitted", user, fileName, partNo, "",
+                        ecr.Number + " — " + form.Description);
+                }
+                catch { }
+
+                MessageBox.Show(
+                    "Change request submitted!\n\n" +
+                    "ECR     : " + ecr.Number +
+                    "\nType    : " + ecr.Type +
+                    "\nFile    : " + (string.IsNullOrEmpty(fileName) ? "(unsaved)" : fileName) +
+                    (string.IsNullOrEmpty(partNo) ? "" : "\nPart No : " + partNo) +
+                    "\n\nThe Master will be notified to review it.",
+                    "BCore PDM — ECR Submitted",
+                    MessageBoxButtons.OK, MessageBoxIcon.Information);
+            }
+        }
+
+        // Open the ECR list: the Master review hub (Accept/Reject/Convert-to-ECO)
+        // or, for an engineer, their own ECRs read-only.
+        public static void ViewEcrs()
+        {
+            string user = PDMLiteAddin.CurrentUser;
+            bool isMaster;
+            try { isMaster = DatabaseManager.GetUserRole(user) == "Master"; }
+            catch { isMaster = false; }
+            using (var form = new EcrListForm(isMaster, user))
+                form.ShowDialog();
         }
 
         // First directory containing the named drawing file, or null.

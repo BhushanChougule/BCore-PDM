@@ -92,6 +92,13 @@
     <Compile Include="DrawingScopeDialog.cs">
       <SubType>Form</SubType>
     </Compile>
+    <Compile Include="EcrForm.cs">
+      <SubType>Form</SubType>
+    </Compile>
+    <Compile Include="EcrListForm.cs">
+      <SubType>Form</SubType>
+    </Compile>
+    <Compile Include="EcrManager.cs" />
     <Compile Include="EmailManager.cs" />
     <Compile Include="ExportManager.cs" />
     <Compile Include="PendingRequestsForm.cs">

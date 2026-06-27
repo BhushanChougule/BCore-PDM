@@ -646,6 +646,28 @@ namespace PDMLite
             this.Controls.Add(btnWhereUsed);
             y += S(28);
 
+            // ── Change Requests / ECR (all users) ─────────────────────
+            // Engineers raise a formal Engineering Change Request (ECR) for the
+            // active file; Masters review the queue (Accept / Reject / Convert to
+            // ECO). One button drives both flows via DoAction("ecr") → ViewEcrs
+            // (role-aware); the list's "New ECR…" raises one for the active doc.
+            Button btnEcr = new Button
+            {
+                Text = "Change Requests (ECR)",
+                Font = fBtn,
+                Width = w,
+                Height = S(24),
+                Location = new Point(x, y),
+                BackColor = cPurple,
+                ForeColor = Color.White,
+                FlatStyle = FlatStyle.Flat,
+                Cursor = Cursors.Hand
+            };
+            btnEcr.FlatAppearance.BorderSize = 0;
+            btnEcr.Click += (s, e) => DoAction("ecr");
+            this.Controls.Add(btnEcr);
+            y += S(28);
+
             // ── Send Test Email (all users) ───────────────────────────
             Button btnTestEmail = new Button
             {
@@ -2361,6 +2383,11 @@ namespace PDMLite
         private void DoActionCore(string action)
         {
             ModelDoc2 doc = PDMLiteAddin.SwApp?.ActiveDoc as ModelDoc2;
+
+            // The ECR list opens regardless of whether a file is active (the
+            // Master review hub / the engineer's "My ECRs" need no active doc).
+            if (action == "ecr") { VaultManager.ViewEcrs(); return; }
+
             if (doc == null)
             {
                 MessageBox.Show("Please open a SOLIDWORKS file first.",
