@@ -652,7 +652,18 @@ namespace PDMLite
                 {
                     folded = true;                  // a drawing folds into its model (or drops)
                     mp = f.ReferencedModel;         // the model this drawing documents
-                    if (string.IsNullOrEmpty(mp)) continue;   // orphan/legacy → drop
+                    if (string.IsNullOrEmpty(mp))
+                    {
+                        // Legacy drawing with no stored ReferencedModel — fall back to
+                        // the shared resolver (FileName + basename match), the same way
+                        // the rest of the app maps a drawing to its model, instead of
+                        // silently dropping it. A TRUE orphan (no model) returns null.
+                        VaultFile m = null;
+                        try { m = DatabaseManager.GetModelForDrawing(f.FilePath); }
+                        catch { }
+                        mp = m != null ? m.FilePath : null;
+                        if (string.IsNullOrEmpty(mp)) continue;   // true orphan → drop
+                    }
                 }
                 else { folded = true; continue; }   // unknown type → drop
                 if (string.IsNullOrEmpty(mp) || !seenModel.Add(mp))
@@ -664,7 +675,14 @@ namespace PDMLite
             else
             {
                 try { models = DatabaseManager.GetFilesByPaths(modelPaths); }
-                catch { models = new List<VaultFile>(); }
+                catch
+                {
+                    // A vault failure between the two loads must read the SAME as the
+                    // first load's failure, not the grey "no recents" message.
+                    _countLabel.ForeColor = cMaroon;
+                    _countLabel.Text = "Vault unavailable — check the N: drive.";
+                    return;
+                }
             }
             if (models.Count == 0)
             {
