@@ -1859,6 +1859,11 @@ namespace PDMLite
         {
             try
             {
+                // Stop the armed debounce before the modal: ShowDialog pumps the
+                // message loop, so a queued tick would re-enter RunSearch and rebuild
+                // the result cards behind the popup. Same guard as OpenQuickAccess /
+                // CardWhereUsed / ShowLargePreview.
+                _searchTimer.Stop();
                 using (var f = new AdvancedSearchForm())
                 {
                     if (f.ShowDialog() != DialogResult.OK) return;

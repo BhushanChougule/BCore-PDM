@@ -632,12 +632,71 @@ namespace PDMLite
                 return;
             }
 
+            // FOLD DRAWINGS INTO THEIR MODEL — a recently-opened drawing must NOT
+            // show as its own "No Part No" card; the typed search already returns
+            // parts/assemblies only, so recents must match. Resolve each recent
+            // drawing to its ReferencedModel (already carried by GetFilesByPaths),
+            // dedupe by model path PRESERVING recency order, and drop orphan/legacy
+            // drawings with no model link. Only re-load when a fold actually happened
+            // (the common all-models case stays the original ONE load).
+            var modelPaths = new List<string>();
+            var seenModel = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            bool folded = false;
+            foreach (var f in recents)
+            {
+                string fext = (Path.GetExtension(string.IsNullOrEmpty(f.FileName)
+                    ? f.FilePath : f.FileName) ?? "").ToLowerInvariant();
+                string mp;
+                if (fext == ".sldprt" || fext == ".sldasm") mp = f.FilePath;
+                else if (fext == ".slddrw")
+                {
+                    folded = true;                  // a drawing folds into its model (or drops)
+                    mp = f.ReferencedModel;         // the model this drawing documents
+                    if (string.IsNullOrEmpty(mp))
+                    {
+                        // Legacy drawing with no stored ReferencedModel — fall back to
+                        // the shared resolver (FileName + basename match), the same way
+                        // the rest of the app maps a drawing to its model, instead of
+                        // silently dropping it. A TRUE orphan (no model) returns null.
+                        VaultFile m = null;
+                        try { m = DatabaseManager.GetModelForDrawing(f.FilePath); }
+                        catch { }
+                        mp = m != null ? m.FilePath : null;
+                        if (string.IsNullOrEmpty(mp)) continue;   // true orphan → drop
+                    }
+                }
+                else { folded = true; continue; }   // unknown type → drop
+                if (string.IsNullOrEmpty(mp) || !seenModel.Add(mp))
+                { folded = true; continue; }        // model + its drawing both recent → dedupe
+                modelPaths.Add(mp);
+            }
+            List<VaultFile> models;
+            if (!folded) models = recents;          // all models, none deduped → reuse load 1
+            else
+            {
+                try { models = DatabaseManager.GetFilesByPaths(modelPaths); }
+                catch
+                {
+                    // A vault failure between the two loads must read the SAME as the
+                    // first load's failure, not the grey "no recents" message.
+                    _countLabel.ForeColor = cMaroon;
+                    _countLabel.Text = "Vault unavailable — check the N: drive.";
+                    return;
+                }
+            }
+            if (models.Count == 0)
+            {
+                _countLabel.ForeColor = cTextGray;
+                _countLabel.Text = "Type a term or pick a filter to search.";
+                return;
+            }
+
             DatabaseManager.DrawingIndex drwIndex;
             try { drwIndex = DatabaseManager.BuildDrawingIndex(); }
             catch { drwIndex = null; }
 
             var cards = new List<Card>();
-            foreach (var f in recents)
+            foreach (var f in models)
             {
                 string baseName = Path.GetFileNameWithoutExtension(
                     string.IsNullOrEmpty(f.FileName)

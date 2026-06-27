@@ -377,6 +377,7 @@ namespace PDMLite
             if (missing.Count > 0)
                 confirmSb.Append("\n\n(").Append(missing.Count)
                          .Append(" drawing(s) had no current PDF and will be skipped.)");
+            confirmSb.Append("\n\nEach hardcopy is stamped \"UNCONTROLLED WHEN PRINTED\" when possible (the controlled master is never modified).");
             if (MessageBox.Show(confirmSb.ToString(),
                     "BCore PDM — Print Drawings",
                     MessageBoxButtons.YesNo, MessageBoxIcon.Question)
@@ -396,17 +397,48 @@ namespace PDMLite
             int ok = 0;
             var failed = new List<string>();
             var printedRows = new List<AuditLogger.AuditRow>();
+            // Each hardcopy is stamped "UNCONTROLLED WHEN PRINTED" + print provenance
+            // (who/when): the controlled master in EXPORTS\PDF is NEVER modified — we
+            // stamp a throwaway COPY in a temp folder and print that. If stamping is
+            // unavailable (PdfSharp missing / error) we still print the master
+            // un-stamped rather than skip the print. The temp folder is swept by the
+            // next run (the shell print verb is async, so we can't delete in-run).
+            string printTempDir = ExportManager.NewPrintTempDir();
+            string provenance = "Printed " + DateTime.Now.ToString(
+                "MM/dd/yyyy HH:mm", System.Globalization.CultureInfo.InvariantCulture)
+                + " by " + _me;
             for (int i = 0; i < toPrint.Count; i++)
             {
-                string pdfName = Path.GetFileName(toPrint[i]);
-                if (ExportManager.PrintPdf(toPrint[i]))
+                string src = toPrint[i];
+                string pdfName = Path.GetFileName(src);
+                string toSend = src;
+                bool stamped = false;
+                if (printTempDir != null)
+                {
+                    string dest = Path.Combine(printTempDir, pdfName);
+                    if (ExportManager.StampUncontrolledCopy(src, dest, provenance))
+                    { toSend = dest; stamped = true; }
+                }
+                if (ExportManager.PrintPdf(toSend))
                 {
                     ok++;
+                    // Record the TRUE reason a copy printed un-stamped — a null temp
+                    // dir (couldn't create the %TEMP% folder) is a different cause
+                    // than StampUncontrolledCopy failing (PdfSharp missing / source
+                    // unreadable). The audit trail is the ISO controlled-distribution
+                    // record, so the parenthetical must not always blame PdfSharp.
+                    string note;
+                    if (stamped)
+                        note = "Printed to default printer — UNCONTROLLED WHEN PRINTED stamp applied";
+                    else if (printTempDir == null)
+                        note = "Printed to default printer — unstamped (temp folder unavailable)";
+                    else
+                        note = "Printed to default printer — unstamped (stamp unavailable — PdfSharp missing or source unreadable)";
                     printedRows.Add(new AuditLogger.AuditRow
                     {
                         Action = "Printed", User = _me, FileName = pdfName,
                         Revision = RevFromPdfName(pdfName),
-                        Note = "Printed to default printer"
+                        Note = note
                     });
                 }
                 else failed.Add(pdfName);

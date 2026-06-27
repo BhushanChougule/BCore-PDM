@@ -32,7 +32,9 @@ namespace PDMLite
 
             if (docType == (int)swDocumentTypes_e.swDocDRAWING)
             {
-                // Drawing → PDF (all sheets), then stamp RELEASED watermark
+                // Drawing → PDF (all sheets), then stamp the green "RELEASED" mark
+                // into the title-block stamp box (per-sheet position — see
+                // StampWatermarkCore).
                 string pdfPath = Path.Combine(pdfFolder, stamp + ".pdf");
                 bool ok = ExportDrawingPdf(doc, pdfPath);
                 if (ok) StampWatermark(pdfPath);
@@ -349,8 +351,9 @@ namespace PDMLite
             catch { } // missing PdfSharp.dll, or any PdfSharp error → skip stamp
         }
 
-        // Stamp a diagonal, very transparent "RELEASED" watermark on every page
-        // of the given PDF, aligned with the sheet's corner-to-corner diagonal.
+        // Stamp a solid GREEN "RELEASED" mark inside the drawing's designated stamp
+        // box (lower-left of the title block) on every page — horizontal, boxed and
+        // readable (the shop's choice over the old faint diagonal watermark).
         //
         // The PDF is read into memory and stamped there so PdfSharp never holds a
         // file handle on the path we then overwrite. SOLIDWORKS keeps the
@@ -367,45 +370,54 @@ namespace PDMLite
             using (PdfDocument pdf = PdfReader.Open(inMs,
                 PdfDocumentOpenMode.Modify))
             {
-                // Very transparent gray (alpha 11/255 ≈ 4.5%) — reads as a subtle
-                // watermark without hiding the drawing beneath. PdfSharp emits the
-                // alpha as a PDF ExtGState, so true transparency works.
-                XBrush brush = new XSolidBrush(XColor.FromArgb(11, 120, 120, 120));
+                // Solid GREEN "RELEASED" stamp placed in the drawing's designated
+                // title-block stamp box (position is per-sheet, set below), NOT a
+                // faint diagonal watermark across the sheet — the shop wanted it
+                // boxed and green. Mostly opaque so it reads as a stamp; the
+                // template's box is blank, so it doesn't hide drawing content.
+                XBrush brush = new XSolidBrush(XColor.FromArgb(235, 34, 197, 94));
+                const string text = "RELEASED";
+                // Stamped during the release operation, so "now" IS the release
+                // date. InvariantCulture per the house date convention.
+                string dateLine = System.DateTime.Now.ToString("MM/dd/yyyy",
+                    System.Globalization.CultureInfo.InvariantCulture);
 
+                int pageIndex = 0;
                 foreach (PdfPage page in pdf.Pages)
                 {
                     double w = page.Width.Point;
                     double h = page.Height.Point;
 
-                    // Lay the text along the sheet's bottom-left → top-right
-                    // diagonal: |angle| = atan(height / width) (≈ 33° for a 17×11
-                    // sheet). NEGATIVE rotates it ASCENDING to the right in
-                    // PdfSharp's y-down space (positive would descend).
-                    double angleDeg =
-                        -System.Math.Atan2(h, w) * 180.0 / System.Math.PI;
-                    double diag = System.Math.Sqrt(w * w + h * h);
+                    // The designated stamp box differs between the FIRST sheet and
+                    // the continuation sheets (2nd onward) — the title-block layout
+                    // isn't the same — so each uses its own box. Fractions of the
+                    // sheet, so both scale A → E. Tune per the shop template.
+                    double bx, by, bw, bh;
+                    if (pageIndex == 0)
+                    {
+                        // First sheet: the empty cell at the bottom of the sheet,
+                        // between the NOTES block and the title block.
+                        bx = w * 0.39; by = h * 0.915; bw = w * 0.145; bh = h * 0.05;
+                    }
+                    else
+                    {
+                        // Continuation sheets (2nd onward): the empty description-
+                        // value cell (left portion) under the title block.
+                        bx = w * 0.66; by = h * 0.915; bw = w * 0.14; bh = h * 0.052;
+                    }
 
                     using (XGraphics gfx = XGraphics.FromPdfPage(
                         page, XGraphicsPdfPageOptions.Append))
                     {
-                        // Size the text to span ~48% of the diagonal so it scales
-                        // proportionally with any sheet size (A → E).
-                        XFont trial = new XFont("Arial", 100, XFontStyle.Bold);
-                        XSize ts = gfx.MeasureString("RELEASED", trial);
-                        double size = ts.Width > 1
-                            ? 100.0 * (diag * 0.48) / ts.Width : 78.0;
-                        XFont font = new XFont("Arial", size, XFontStyle.Bold);
-
-                        // Translate to page centre, rotate to the diagonal, then
-                        // draw the text centred on the origin.
-                        XGraphicsState state = gfx.Save();
-                        gfx.TranslateTransform(w / 2.0, h / 2.0);
-                        gfx.RotateTransform(angleDeg);
-                        XSize sz = gfx.MeasureString("RELEASED", font);
-                        gfx.DrawString("RELEASED", font, brush,
-                            new XPoint(-sz.Width / 2, sz.Height / 4));
-                        gfx.Restore(state);
+                        // "RELEASED" in the top ~62% of the box, the release date in
+                        // the bottom ~38% — each auto-sized to fit its own row in
+                        // both width and height.
+                        double relH = bh * 0.62;
+                        FitCentredText(gfx, text, brush, new XRect(bx, by, bw, relH));
+                        FitCentredText(gfx, dateLine, brush,
+                            new XRect(bx, by + relH, bw, bh - relH));
                     }
+                    pageIndex++;
                 }
 
                 using (var outMs = new MemoryStream())
@@ -431,6 +443,139 @@ namespace PDMLite
                 }
             }
             File.WriteAllBytes(pdfPath, outBytes);
+        }
+
+        // Draw s centred and auto-sized to fit rect in BOTH width and height
+        // (Arial Bold). Shared by the RELEASED line and its date line.
+        private static void FitCentredText(XGraphics gfx, string s, XBrush brush,
+            XRect rect)
+        {
+            if (string.IsNullOrEmpty(s)) return;
+            XFont trial = new XFont("Arial", 100, XFontStyle.Bold);
+            XSize ts = gfx.MeasureString(s, trial);
+            double sizeW = ts.Width  > 1 ? 100.0 * (rect.Width  * 0.90) / ts.Width  : 10.0;
+            double sizeH = ts.Height > 1 ? 100.0 * (rect.Height * 0.85) / ts.Height : 10.0;
+            double size = System.Math.Min(sizeW, sizeH);
+            if (size < 1) size = 1;
+            XFont font = new XFont("Arial", size, XFontStyle.Bold);
+            gfx.DrawString(s, font, brush, rect, XStringFormats.Center);
+        }
+
+        // ── "UNCONTROLLED WHEN PRINTED" hardcopy stamp ──────────────────────
+        // A printed copy of a controlled released drawing is, by ISO-9001/AS9100
+        // convention, UNCONTROLLED — it won't track future revisions — so the
+        // hardcopy is stamped to warn the reader. We stamp a THROWAWAY COPY and
+        // print that; the controlled master in EXPORTS\PDF is never modified (only
+        // the physical print is uncontrolled). Distinct from the green boxed
+        // RELEASED stamp on the master: this is a VISIBLE red top-of-page warning
+        // carrying who/when printed.
+
+        // Thin wrapper referencing NO PdfSharp types directly, so a missing
+        // PdfSharp.dll is caught HERE (same reason as StampWatermark) instead of
+        // propagating. Stamps srcPdf into destPdf; returns false on any failure
+        // (PdfSharp absent / read / write) — the caller then prints the controlled
+        // master un-stamped rather than not printing at all.
+        public static bool StampUncontrolledCopy(string srcPdf, string destPdf,
+            string subLine)
+        {
+            try
+            {
+                if (string.IsNullOrEmpty(srcPdf) || string.IsNullOrEmpty(destPdf) ||
+                    !File.Exists(srcPdf)) return false;
+                StampUncontrolledCopyCore(srcPdf, destPdf, subLine);
+                return File.Exists(destPdf);
+            }
+            catch { return false; }
+        }
+
+        private static void StampUncontrolledCopyCore(string srcPdf, string destPdf,
+            string subLine)
+        {
+            byte[] srcBytes = File.ReadAllBytes(srcPdf);   // release the handle at once
+            using (var inMs = new MemoryStream(srcBytes))
+            using (PdfDocument pdf = PdfReader.Open(inMs, PdfDocumentOpenMode.Modify))
+            {
+                // Red at alpha 170/255 ≈ 67% — sits in the empty top margin, so it
+                // can be fairly opaque without hiding drawing content. A lighter
+                // value (was 64/255) printed as a near-invisible gray on a B&W
+                // printer; this prints as a clearly-visible medium gray.
+                XBrush brush = new XSolidBrush(XColor.FromArgb(170, 190, 30, 30));
+                const string banner = "UNCONTROLLED WHEN PRINTED";
+
+                foreach (PdfPage page in pdf.Pages)
+                {
+                    double w = page.Width.Point;
+                    double h = page.Height.Point;
+                    using (XGraphics gfx = XGraphics.FromPdfPage(
+                        page, XGraphicsPdfPageOptions.Append))
+                    {
+                        // Size the banner to ~32% of the page WIDTH so it scales with
+                        // any sheet size (A → E); top-centre, clear of the bottom-
+                        // right title block.
+                        XFont trial = new XFont("Arial", 100, XFontStyle.Bold);
+                        XSize ts = gfx.MeasureString(banner, trial);
+                        double size = ts.Width > 1
+                            ? 100.0 * (w * 0.32) / ts.Width : 22.0;
+                        XFont font = new XFont("Arial", size, XFontStyle.Bold);
+
+                        // In the top margin, clear of the zone-number row / top
+                        // border but not so high the printer's non-printable margin
+                        // clips it (0.02 straddled the row, 0.005 clipped — split
+                        // the difference).
+                        double top = h * 0.0125;
+                        gfx.DrawString(banner, font, brush,
+                            new XRect(0, top, w, size * 1.4), XStringFormats.TopCenter);
+
+                        // Print provenance (who/when) beneath the banner, smaller.
+                        if (!string.IsNullOrEmpty(subLine))
+                        {
+                            XFont subFont = new XFont(
+                                "Arial", size * 0.34, XFontStyle.Regular);
+                            gfx.DrawString(subLine, subFont, brush,
+                                new XRect(0, top + size * 1.25, w, size * 0.7),
+                                XStringFormats.TopCenter);
+                        }
+                    }
+                }
+
+                Directory.CreateDirectory(Path.GetDirectoryName(destPdf));
+                pdf.Save(destPdf);
+            }
+        }
+
+        // Create a fresh per-run temp folder for the stamped print copies, and
+        // best-effort sweep PRIOR run folders older than an hour. The shell "print"
+        // verb is ASYNC (the handler reads the file over the next few seconds), so we
+        // must NOT delete this run's copies in-run — the next run's sweep reclaims
+        // them, the same discipline as the prefs/vault temp sweeps. Returns the new
+        // folder, or null if it can't be created (caller then prints the controlled
+        // master directly, un-stamped).
+        public static string NewPrintTempDir()
+        {
+            try
+            {
+                string root = Path.Combine(Path.GetTempPath(), "BCorePDM", "PrintTmp");
+                Directory.CreateDirectory(root);
+                try
+                {
+                    System.DateTime cutoff = System.DateTime.UtcNow.AddHours(-1);
+                    foreach (string d in Directory.GetDirectories(root))
+                    {
+                        try
+                        {
+                            if (Directory.GetLastWriteTimeUtc(d) < cutoff)
+                                Directory.Delete(d, true);
+                        }
+                        catch { }
+                    }
+                }
+                catch { }
+                string runDir = Path.Combine(
+                    root, System.Guid.NewGuid().ToString("N"));
+                Directory.CreateDirectory(runDir);
+                return runDir;
+            }
+            catch { return null; }
         }
 
         // Universal export — SOLIDWORKS picks format from file extension.
