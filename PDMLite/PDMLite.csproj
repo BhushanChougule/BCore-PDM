@@ -92,6 +92,13 @@
     <Compile Include="DrawingScopeDialog.cs">
       <SubType>Form</SubType>
     </Compile>
+    <Compile Include="EcoManager.cs" />
+    <Compile Include="EcoForm.cs">
+      <SubType>Form</SubType>
+    </Compile>
+    <Compile Include="EcoListForm.cs">
+      <SubType>Form</SubType>
+    </Compile>
     <Compile Include="EmailManager.cs" />
     <Compile Include="ExportManager.cs" />
     <Compile Include="PendingRequestsForm.cs">
