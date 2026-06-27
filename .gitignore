@@ -1,6 +1,10 @@
 .vs/
 .vsidx/
 
+# Claude Code local state — workflow worktrees, agent transcripts, etc.
+# These are transient (auto-cleaned) and must never be committed.
+.claude/
+
 # Build artifacts — never commit. Committing obj/ corrupts MSBuild's
 # incremental-build cache on pull (the cache no longer matches the source,
 # so a Build skips recompiling changed files and the stale DLL keeps loading
