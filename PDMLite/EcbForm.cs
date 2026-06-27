@@ -6,21 +6,21 @@ using System.Windows.Forms;
 
 namespace PDMLite
 {
-    // ── Engineering Change Order — create / edit dialog ───────────────────
+    // ── Engineering Change Bulletin — create / edit dialog ───────────────────
     //
     // DPI-aware (S(v)=v*_scale), house-styled (brand title bar, flat coloured
     // buttons, fonts disposed in Dispose(bool)), matching ReasonForChangeForm /
-    // SupersededByPickerForm. Lets a Master compose or edit an ECO: Number (read-
-    // only once assigned), Title, categorised Reason (EcoManager.ReasonCodes),
+    // SupersededByPickerForm. Lets a Master compose or edit an ECB: Number (read-
+    // only once assigned), Title, categorised Reason (EcbManager.ReasonCodes),
     // Description, State, and an editable affected-items grid (File / Part No /
     // From Rev / To Rev). New items can be added via a vault search picker
     // (SupersededByPickerForm — the same search engine), removed via the Remove
     // button, and the From/To revisions are editable in-grid.
     //
-    // Two modes: NEW (ctor with an optional seed Eco, e.g. from the post-release
-    // hook) and EDIT (ctor given an existing Eco). On OK the dialog persists via
-    // EcoManager.CreateEco / UpdateEco and exposes the saved Eco via Result.
-    internal class EcoForm : Form
+    // Two modes: NEW (ctor with an optional seed Ecb, e.g. from the post-release
+    // hook) and EDIT (ctor given an existing Ecb). On OK the dialog persists via
+    // EcbManager.CreateEcb / UpdateEcb and exposes the saved Ecb via Result.
+    internal class EcbForm : Form
     {
         private readonly float _scale;
         private int S(float v) => (int)(v * _scale);
@@ -36,7 +36,7 @@ namespace PDMLite
 
         private const string ReasonSentinel = "-- Select --";
 
-        private readonly Eco _eco;          // the working copy (null-state new)
+        private readonly Ecb _ecb;          // the working copy (null-state new)
         private readonly bool _isNew;
 
         private readonly TextBox  _title;
@@ -47,14 +47,14 @@ namespace PDMLite
         private readonly DataGridView _grid;
         private readonly Font _fTitle, _fLabel, _fInput, _fHint, _fBtn, _fCell;
 
-        // The persisted ECO after OK (null if cancelled or save failed).
-        public Eco Result { get; private set; }
+        // The persisted ECB after OK (null if cancelled or save failed).
+        public Ecb Result { get; private set; }
 
-        public EcoForm(Eco eco)
+        public EcbForm(Ecb ecb)
         {
-            _isNew = eco == null || string.IsNullOrEmpty(eco.Id);
-            _eco = eco ?? new Eco();
-            if (_eco.Items == null) _eco.Items = new List<EcoAffectedItem>();
+            _isNew = ecb == null || string.IsNullOrEmpty(ecb.Id);
+            _ecb = ecb ?? new Ecb();
+            if (_ecb.Items == null) _ecb.Items = new List<EcbAffectedItem>();
 
             using (var g = CreateGraphics())
                 _scale = g.DpiX / 96f;
@@ -66,9 +66,9 @@ namespace PDMLite
             _fBtn   = new Font("Segoe UI", 3.6f * _scale, FontStyle.Bold);
             _fCell  = new Font("Segoe UI", 3.4f * _scale);
 
-            string titleText = _isNew ? "New Engineering Change Order"
-                                      : "ECO " + (_eco.Number ?? "");
-            Text            = "BCore PDM — " + (_isNew ? "New ECO" : "Edit ECO");
+            string titleText = _isNew ? "New Engineering Change Bulletin"
+                                      : "ECB " + (_ecb.Number ?? "");
+            Text            = "BCore PDM — " + (_isNew ? "New ECB" : "Edit ECB");
             StartPosition   = FormStartPosition.CenterScreen;
             FormBorderStyle = FormBorderStyle.FixedDialog;
             MaximizeBox     = false;
@@ -103,7 +103,7 @@ namespace PDMLite
             _title = new TextBox
             {
                 Font = _fInput, Location = new Point(x, y),
-                Width = fieldW, Height = S(22), Text = _eco.Title ?? ""
+                Width = fieldW, Height = S(22), Text = _ecb.Title ?? ""
             };
             Controls.Add(_title);
             y += S(30);
@@ -116,10 +116,10 @@ namespace PDMLite
                 Width = fieldW - S(74), DropDownStyle = ComboBoxStyle.DropDownList
             };
             _reason.Items.Add(ReasonSentinel);
-            foreach (var c in EcoManager.ReasonCodes) _reason.Items.Add(c);
+            foreach (var c in EcbManager.ReasonCodes) _reason.Items.Add(c);
             // Pre-select the stored reason's leading code if it matches.
             _reason.SelectedIndex = 0;
-            PreselectReason(_eco.Reason);
+            PreselectReason(_ecb.Reason);
             Controls.Add(_reason);
             y += S(30);
 
@@ -127,7 +127,7 @@ namespace PDMLite
             {
                 Font = _fInput, Location = new Point(x, y),
                 Width = fieldW, Height = S(22),
-                Text = ReasonDetailOf(_eco.Reason)
+                Text = ReasonDetailOf(_ecb.Reason)
             };
             Controls.Add(_reasonDetail);
             Controls.Add(new Label
@@ -145,7 +145,7 @@ namespace PDMLite
             {
                 Font = _fInput, Location = new Point(x, y),
                 Width = fieldW, Height = S(48), Multiline = true,
-                ScrollBars = ScrollBars.Vertical, Text = _eco.Description ?? ""
+                ScrollBars = ScrollBars.Vertical, Text = _ecb.Description ?? ""
             };
             Controls.Add(_desc);
             y += S(56);
@@ -157,8 +157,8 @@ namespace PDMLite
                 Font = _fInput, Location = new Point(x + S(74), y),
                 Width = S(180), DropDownStyle = ComboBoxStyle.DropDownList
             };
-            foreach (var st in EcoManager.States) _state.Items.Add(st);
-            string curState = string.IsNullOrEmpty(_eco.State) ? "Draft" : _eco.State;
+            foreach (var st in EcbManager.States) _state.Items.Add(st);
+            string curState = string.IsNullOrEmpty(_ecb.State) ? "Draft" : _ecb.State;
             int si = _state.Items.IndexOf(curState);
             _state.SelectedIndex = si >= 0 ? si : 0;
             Controls.Add(_state);
@@ -183,6 +183,10 @@ namespace PDMLite
             _grid.ColumnHeadersDefaultCellStyle.ForeColor = Color.White;
             _grid.ColumnHeadersHeightSizeMode =
                 DataGridViewColumnHeadersHeightSizeMode.DisableResizing;
+            // Size the header + rows from the SCALED font (the header inherits the
+            // grid's _fCell), not the WinForms default — so it never clips at DPI.
+            _grid.ColumnHeadersHeight = _fCell.Height + S(10);
+            _grid.RowTemplate.Height = _fCell.Height + S(8);
 
             var colFile = new DataGridViewTextBoxColumn
             { HeaderText = "File", ReadOnly = true, Width = S(180) };
@@ -221,7 +225,7 @@ namespace PDMLite
             btnCancel.DialogResult = DialogResult.Cancel;
             Controls.Add(btnCancel);
 
-            Button btnOk = MakeBtn(_isNew ? "Create ECO" : "Save", cGreen,
+            Button btnOk = MakeBtn(_isNew ? "Create ECB" : "Save", cGreen,
                 cW - S(8) - btnW * 2 - S(6), btnY, btnW);
             btnOk.Click += (s, e) => Commit();
             Controls.Add(btnOk);
@@ -254,7 +258,7 @@ namespace PDMLite
         private void PreselectReason(string stored)
         {
             if (string.IsNullOrEmpty(stored)) return;
-            foreach (var c in EcoManager.ReasonCodes)
+            foreach (var c in EcbManager.ReasonCodes)
             {
                 if (stored.StartsWith(c, StringComparison.OrdinalIgnoreCase))
                 {
@@ -270,7 +274,7 @@ namespace PDMLite
         private string ReasonDetailOf(string stored)
         {
             if (string.IsNullOrEmpty(stored)) return "";
-            foreach (var c in EcoManager.ReasonCodes)
+            foreach (var c in EcbManager.ReasonCodes)
             {
                 if (stored.StartsWith(c, StringComparison.OrdinalIgnoreCase))
                 {
@@ -296,7 +300,7 @@ namespace PDMLite
         private void ReloadGrid()
         {
             _grid.Rows.Clear();
-            foreach (var it in _eco.Items)
+            foreach (var it in _ecb.Items)
             {
                 int r = _grid.Rows.Add(
                     System.IO.Path.GetFileName(it.FilePath ?? ""),
@@ -310,7 +314,7 @@ namespace PDMLite
             try
             {
                 if (e.RowIndex < 0 || e.RowIndex >= _grid.Rows.Count) return;
-                var it = _grid.Rows[e.RowIndex].Tag as EcoAffectedItem;
+                var it = _grid.Rows[e.RowIndex].Tag as EcbAffectedItem;
                 if (it == null) return;
                 if (e.ColumnIndex == 2) // From Rev
                     it.FromRev = (_grid.Rows[e.RowIndex].Cells[2].Value
@@ -331,11 +335,11 @@ namespace PDMLite
                     if (picker.ShowDialog(this) != DialogResult.OK ||
                         picker.Selected == null) return;
                     var f = picker.Selected;
-                    // Skip a duplicate (same file already on the ECO).
-                    if (_eco.Items.Any(i => string.Equals(i.FilePath, f.FilePath,
+                    // Skip a duplicate (same file already on the ECB).
+                    if (_ecb.Items.Any(i => string.Equals(i.FilePath, f.FilePath,
                             StringComparison.OrdinalIgnoreCase)))
                         return;
-                    _eco.Items.Add(new EcoAffectedItem
+                    _ecb.Items.Add(new EcbAffectedItem
                     {
                         FilePath = f.FilePath ?? "",
                         PartNo = f.PartNumber ?? "",
@@ -353,9 +357,9 @@ namespace PDMLite
             try
             {
                 if (_grid.CurrentRow == null) return;
-                var it = _grid.CurrentRow.Tag as EcoAffectedItem;
+                var it = _grid.CurrentRow.Tag as EcbAffectedItem;
                 if (it == null) return;
-                _eco.Items.Remove(it);
+                _ecb.Items.Remove(it);
                 ReloadGrid();
             }
             catch { }
@@ -366,28 +370,28 @@ namespace PDMLite
             string title = (_title.Text ?? "").Trim();
             if (title.Length == 0)
             {
-                MessageBox.Show("Please enter a title for this ECO.",
-                    "BCore PDM — ECO", MessageBoxButtons.OK,
+                MessageBox.Show("Please enter a title for this ECB.",
+                    "BCore PDM — ECB", MessageBoxButtons.OK,
                     MessageBoxIcon.Information);
                 return;
             }
 
-            _eco.Title = title;
-            _eco.Reason = ComposeReason();
-            _eco.Description = (_desc.Text ?? "").Trim();
-            _eco.State = _state.SelectedItem as string ?? "Draft";
+            _ecb.Title = title;
+            _ecb.Reason = ComposeReason();
+            _ecb.Description = (_desc.Text ?? "").Trim();
+            _ecb.State = _state.SelectedItem as string ?? "Draft";
 
             try
             {
-                Result = _isNew ? EcoManager.CreateEco(_eco)
-                                : (EcoManager.UpdateEco(_eco) ? _eco : null);
+                Result = _isNew ? EcbManager.CreateEcb(_ecb)
+                                : (EcbManager.UpdateEcb(_ecb) ? _ecb : null);
             }
             catch { Result = null; }
 
             if (Result == null)
             {
-                MessageBox.Show("Could not save the ECO (vault unavailable).",
-                    "BCore PDM — ECO", MessageBoxButtons.OK,
+                MessageBox.Show("Could not save the ECB (vault unavailable).",
+                    "BCore PDM — ECB", MessageBoxButtons.OK,
                     MessageBoxIcon.Warning);
                 return;
             }

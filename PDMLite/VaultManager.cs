@@ -2084,14 +2084,14 @@ namespace PDMLite
                     "BCore PDM — Released");
             }
 
-            // ── ECO hook (interactive part/assembly release only) ─────────
-            // Offer to package this release into an Engineering Change Order,
+            // ── ECB hook (interactive part/assembly release only) ─────────
+            // Offer to package this release into an Engineering Change Bulletin,
             // seeded from the captured reason + the affected top-level products.
             // Tiny, fully guarded + non-fatal — never blocks a release: a chained
             // drawing→model release is suppressPrompts on the model, so only the
             // user-facing release of a part/assembly asks, and at most once.
             if (!suppressPrompts && !chainedRelease && !isDrawing)
-                try { OfferEcoForRelease(filePath, partNo, rev, reason); }
+                try { OfferEcbForRelease(filePath, partNo, rev, reason); }
                 catch { }
 
             // A Released file is pure output — there is no point reopening it
@@ -3311,41 +3311,41 @@ namespace PDMLite
             }
         }
 
-        // ── ECO hook (post-release offer) ─────────────────────────────────
+        // ── ECB hook (post-release offer) ─────────────────────────────────
         // After a successful interactive part/assembly release, offer to package
-        // the change into an Engineering Change Order (PR9). Seeds the ECO from
+        // the change into an Engineering Change Bulletin (PR9). Seeds the ECB from
         // the captured reason-for-change + the released file as the first affected
         // item (FromRev blank — it's the new release, ToRev = the released rev) +
         // the affected top-level products as further items. Fully non-fatal: any
         // failure (no where-used data, vault unavailable, user declines) just
-        // skips it — a release is never blocked by the ECO offer.
-        private static void OfferEcoForRelease(string filePath, string partNo,
+        // skips it — a release is never blocked by the ECB offer.
+        private static void OfferEcbForRelease(string filePath, string partNo,
             string rev, string reason)
         {
             try
             {
                 var ask = MessageBox.Show(
-                    "Package this release into an Engineering Change Order (ECO)?\n\n"
-                    + "An ECO records the engineering change — the reason, the "
+                    "Package this release into an Engineering Change Bulletin (ECB)?\n\n"
+                    + "An ECB records the engineering change — the reason, the "
                     + "affected items and their revisions — in one auditable "
                     + "document.",
-                    "BCore PDM — Engineering Change Order",
+                    "BCore PDM — Engineering Change Bulletin",
                     MessageBoxButtons.YesNo, MessageBoxIcon.Question);
                 if (ask != DialogResult.Yes) return;
 
-                var seed = new Eco
+                var seed = new Ecb
                 {
                     Title = (string.IsNullOrEmpty(partNo)
                         ? Path.GetFileNameWithoutExtension(filePath ?? "")
                         : partNo) + " REV " + (rev ?? ""),
                     Reason = reason ?? "",
                     State = "Open",
-                    Items = new List<EcoAffectedItem>()
+                    Items = new List<EcbAffectedItem>()
                 };
 
                 // The released file itself is the primary affected item.
                 if (!string.IsNullOrEmpty(filePath))
-                    seed.Items.Add(new EcoAffectedItem
+                    seed.Items.Add(new EcbAffectedItem
                     {
                         FilePath = filePath,
                         PartNo = partNo ?? "",
@@ -3366,7 +3366,7 @@ namespace PDMLite
                             if (seed.Items.Any(i => string.Equals(i.FilePath, t.Path,
                                     StringComparison.OrdinalIgnoreCase)))
                                 continue;
-                            seed.Items.Add(new EcoAffectedItem
+                            seed.Items.Add(new EcbAffectedItem
                             {
                                 FilePath = t.Path,
                                 PartNo = t.PartNo ?? "",
@@ -3377,10 +3377,10 @@ namespace PDMLite
                 }
                 catch { }
 
-                using (var f = new EcoForm(seed))
+                using (var f = new EcbForm(seed))
                     f.ShowDialog();
             }
-            catch { } // never block a completed release over the ECO offer
+            catch { } // never block a completed release over the ECB offer
         }
 
         // TOP-LEVEL where-used: only the ROOT assemblies that ULTIMATELY contain

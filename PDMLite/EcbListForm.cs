@@ -9,19 +9,19 @@ using System.Windows.Forms;
 
 namespace PDMLite
 {
-    // ── Engineering Change Orders — list view ─────────────────────────────
+    // ── Engineering Change Bulletins — list view ─────────────────────────────
     //
     // DPI-aware (S(v)=v*_scale), house-styled (brand title bar, dark-header grid,
     // flat buttons; fonts disposed in Dispose(bool)). The Master entry point to
-    // the ECO subsystem (opened from the task-pane "Change Orders" button). Lists
-    // all ECOs in a read-only-ish DataGridView with a STATE filter dropdown + a
+    // the ECB subsystem (opened from the task-pane "Change Orders" button). Lists
+    // all ECBs in a read-only-ish DataGridView with a STATE filter dropdown + a
     // global search box (Number / Title / Reason / Created By). Double-click (or
-    // "Edit…") opens the ECO in EcoForm; "New ECO…" creates one; "Export CSV"
+    // "Edit…") opens the ECB in EcbForm; "New ECB…" creates one; "Export CSV"
     // dumps the visible rows (RFC-4180 + Excel formula-injection guard).
     //
-    // The data set is small (one ECO per change, not per file), so a PLAIN
+    // The data set is small (one ECB per change, not per file), so a PLAIN
     // (non-virtual) grid is fine — unlike the whole-vault dashboard.
-    internal class EcoListForm : Form
+    internal class EcbListForm : Form
     {
         private readonly float _scale;
         private int S(float v) => (int)(v * _scale);
@@ -41,10 +41,10 @@ namespace PDMLite
         private readonly Label _count;
         private readonly Font _fTitle, _fLabel, _fInput, _fBtn, _fCell, _fHeader;
 
-        private List<Eco> _all = new List<Eco>();
-        private List<Eco> _view = new List<Eco>();
+        private List<Ecb> _all = new List<Ecb>();
+        private List<Ecb> _view = new List<Ecb>();
 
-        public EcoListForm(float scale)
+        public EcbListForm(float scale)
         {
             _scale = scale > 0 ? scale : 1f;
 
@@ -55,7 +55,7 @@ namespace PDMLite
             _fCell   = new Font("Segoe UI", 3.4f * _scale);
             _fHeader = new Font("Segoe UI", 3.4f * _scale, FontStyle.Bold);
 
-            Text            = "BCore PDM — Engineering Change Orders";
+            Text            = "BCore PDM — Engineering Change Bulletins";
             StartPosition   = FormStartPosition.CenterScreen;
             FormBorderStyle = FormBorderStyle.Sizable;
             MaximizeBox     = true;
@@ -73,7 +73,7 @@ namespace PDMLite
             };
             titleBar.Controls.Add(new Label
             {
-                Text = "Engineering Change Orders", Font = _fTitle,
+                Text = "Engineering Change Bulletins", Font = _fTitle,
                 ForeColor = Color.White, Dock = DockStyle.Fill,
                 TextAlign = ContentAlignment.MiddleCenter
             });
@@ -100,10 +100,10 @@ namespace PDMLite
             btnEdit.Click += (s, e) => EditSelected();
             bottom.Controls.Add(btnEdit);
 
-            Button btnNew = MakeBtn("New ECO…", cGreen);
+            Button btnNew = MakeBtn("New ECB…", cGreen);
             btnNew.Anchor = AnchorStyles.Left | AnchorStyles.Top;
             btnNew.Location = new Point(btnEdit.Right + S(6), S(7));
-            btnNew.Click += (s, e) => NewEco();
+            btnNew.Click += (s, e) => NewEcb();
             bottom.Controls.Add(btnNew);
 
             // ── Top control row (state filter + search) ───────────────
@@ -122,7 +122,7 @@ namespace PDMLite
                 Width = S(150), DropDownStyle = ComboBoxStyle.DropDownList
             };
             _stateFilter.Items.Add(AnyState);
-            foreach (var st in EcoManager.States) _stateFilter.Items.Add(st);
+            foreach (var st in EcbManager.States) _stateFilter.Items.Add(st);
             _stateFilter.SelectedIndex = 0;
             _stateFilter.SelectedIndexChanged += (s, e) => ApplyFilter();
             top.Controls.Add(_stateFilter);
@@ -169,10 +169,15 @@ namespace PDMLite
             _grid.ColumnHeadersDefaultCellStyle.Font = _fHeader;
             _grid.ColumnHeadersHeightSizeMode =
                 DataGridViewColumnHeadersHeightSizeMode.DisableResizing;
+            // Size the header + rows from the SCALED font, not the WinForms
+            // default height (which does NOT scale with DPI) — otherwise the bold
+            // header text clips at the bottom on high-DPI seats.
+            _grid.ColumnHeadersHeight = _fHeader.Height + S(10);
+            _grid.RowTemplate.Height = _fCell.Height + S(8);
             _grid.AlternatingRowsDefaultCellStyle.BackColor =
                 Color.FromArgb(244, 247, 250);
 
-            AddCol("ECO #", 14);
+            AddCol("ECB #", 14);
             AddCol("Title", 32);
             AddCol("State", 14);
             AddCol("Reason", 22);
@@ -216,8 +221,8 @@ namespace PDMLite
 
         private void LoadData()
         {
-            try { _all = EcoManager.GetEcos() ?? new List<Eco>(); }
-            catch { _all = new List<Eco>(); }
+            try { _all = EcbManager.GetEcbs() ?? new List<Ecb>(); }
+            catch { _all = new List<Ecb>(); }
             ApplyFilter();
         }
 
@@ -226,7 +231,7 @@ namespace PDMLite
             string state = _stateFilter.SelectedItem as string ?? AnyState;
             string term = (_search.Text ?? "").Trim().ToLowerInvariant();
 
-            IEnumerable<Eco> q = _all;
+            IEnumerable<Ecb> q = _all;
             if (!string.Equals(state, AnyState, StringComparison.Ordinal))
                 q = q.Where(e => string.Equals(e.State, state,
                     StringComparison.OrdinalIgnoreCase));
@@ -254,7 +259,7 @@ namespace PDMLite
                         CultureInfo.InvariantCulture),
                     e.CreatedBy ?? "",
                     FmtDate(e.CreatedDate));
-            _count.Text = _view.Count + " of " + _all.Count + " ECO(s)" +
+            _count.Text = _view.Count + " of " + _all.Count + " ECB(s)" +
                 "   ·   double-click a row to open";
         }
 
@@ -269,7 +274,7 @@ namespace PDMLite
             return iso;
         }
 
-        private Eco SelectedEco()
+        private Ecb SelectedEcb()
         {
             if (_grid.CurrentRow == null) return null;
             int i = _grid.CurrentRow.Index;
@@ -277,11 +282,11 @@ namespace PDMLite
             return _view[i];
         }
 
-        private void NewEco()
+        private void NewEcb()
         {
             try
             {
-                using (var f = new EcoForm(null))
+                using (var f = new EcbForm(null))
                     if (f.ShowDialog(this) == DialogResult.OK) LoadData();
             }
             catch { }
@@ -289,11 +294,11 @@ namespace PDMLite
 
         private void EditSelected()
         {
-            var eco = SelectedEco();
-            if (eco == null) return;
+            var ecb = SelectedEcb();
+            if (ecb == null) return;
             try
             {
-                using (var f = new EcoForm(eco))
+                using (var f = new EcbForm(ecb))
                     if (f.ShowDialog(this) == DialogResult.OK) LoadData();
             }
             catch { }
@@ -304,7 +309,7 @@ namespace PDMLite
             using (var sfd = new SaveFileDialog
             {
                 Filter = "CSV files (*.csv)|*.csv|All files (*.*)|*.*",
-                FileName = "ECOs_" +
+                FileName = "ECBs_" +
                     DateTime.Now.ToString("yyyyMMdd_HHmmss",
                         CultureInfo.InvariantCulture) + ".csv"
             })
@@ -314,7 +319,7 @@ namespace PDMLite
                 {
                     var sb = new StringBuilder();
                     sb.AppendLine(
-                        "ECO #,Title,State,Reason,Description,Items," +
+                        "ECB #,Title,State,Reason,Description,Items," +
                         "Created By,Created,Closed By,Closed,Affected Items");
                     foreach (var e in _view)
                     {
@@ -334,7 +339,7 @@ namespace PDMLite
                         }));
                     }
                     File.WriteAllText(sfd.FileName, sb.ToString());
-                    MessageBox.Show("Exported " + _view.Count + " ECO(s) to:\n" +
+                    MessageBox.Show("Exported " + _view.Count + " ECB(s) to:\n" +
                         sfd.FileName, "BCore PDM — Exported",
                         MessageBoxButtons.OK, MessageBoxIcon.Information);
                 }

@@ -646,14 +646,14 @@ namespace PDMLite
             this.Controls.Add(btnWhereUsed);
             y += S(28);
 
-            // ── Change Orders / ECO (Masters only) ────────────────────
-            // The Engineering Change Order list — create / edit / track ECOs.
+            // ── Change Bulletins / ECB (Masters only) ─────────────────
+            // The Engineering Change Bulletin list — create / edit / track ECBs.
             // Masters-only (engineers raise change via Request* + the future ECR
             // flow), so it sits with the governance actions, not the read-only
             // browse group above.
-            Button btnEco = new Button
+            Button btnEcb = new Button
             {
-                Text = "Change Orders",
+                Text = "Change Bulletins",
                 Font = fBtn,
                 Width = w,
                 Height = S(24),
@@ -664,9 +664,9 @@ namespace PDMLite
                 Cursor = Cursors.Hand,
                 Visible = isMaster
             };
-            btnEco.FlatAppearance.BorderSize = 0;
-            btnEco.Click += (s, e) => OpenChangeOrders();
-            this.Controls.Add(btnEco);
+            btnEcb.FlatAppearance.BorderSize = 0;
+            btnEcb.Click += (s, e) => OpenChangeBulletins();
+            this.Controls.Add(btnEcb);
             if (isMaster) y += S(28);
 
             // ── Send Test Email (all users) ───────────────────────────
@@ -842,17 +842,17 @@ namespace PDMLite
             }
         }
 
-        // ── Open the Engineering Change Orders list (Masters) ─────────
-        private void OpenChangeOrders()
+        // ── Open the Engineering Change Bulletins list (Masters) ──────
+        private void OpenChangeBulletins()
         {
             try
             {
-                using (var f = new EcoListForm(_scale))
+                using (var f = new EcbListForm(_scale))
                     f.ShowDialog(this);
             }
             catch (Exception ex)
             {
-                MessageBox.Show("Could not open Change Orders:\n" + ex.Message,
+                MessageBox.Show("Could not open Change Bulletins:\n" + ex.Message,
                     "BCore PDM", MessageBoxButtons.OK, MessageBoxIcon.Warning);
             }
         }

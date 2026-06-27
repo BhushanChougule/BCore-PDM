@@ -7,37 +7,37 @@ using System.Xml.Linq;
 
 namespace PDMLite
 {
-    // ── Engineering Change Order (ECO) subsystem — persistence layer ──────
+    // ── Engineering Change Bulletin (ECB) subsystem — persistence layer ──────
     //
-    // An ECO is the formal "engineering change" record industry PDM/PLM systems
+    // An ECB is the formal "engineering change" record industry PDM/PLM systems
     // (SOLIDWORKS PDM/Manage, Windchill, Teamcenter, Aras) put ABOVE the per-file
     // revision: it captures the WHY of a change, the affected items + their
     // before/after revisions, a workflow state, and who/when. BCore already
     // captures a per-release reason-for-change (ReasonForChangeForm) and an
-    // as-released baseline; the ECO ties those together into a single auditable
-    // change package and is the foundation for an ECR→ECO flow (PR10).
+    // as-released baseline; the ECB ties those together into a single auditable
+    // change package and is the foundation for an ECR→ECB flow (PR10).
     //
-    // PERSISTENCE: stored in its OWN file under the VAULT root (ecos.xml), NOT
+    // PERSISTENCE: stored in its OWN file under the VAULT root (ecbs.xml), NOT
     // vault.xml — so the PR is self-contained and never contends on vault.xml's
     // schema. Mirrors the atomic-write discipline of UserPrefs / DatabaseManager:
     //   - serialise to a per-process temp then File.Replace/Move into place, so a
-    //     concurrent reader on another machine never sees a TRUNCATED ecos.xml;
-    //   - an optional cross-machine lock file (ecos.lock, FileShare.None — SMB
+    //     concurrent reader on another machine never sees a TRUNCATED ecbs.xml;
+    //   - an optional cross-machine lock file (ecbs.lock, FileShare.None — SMB
     //     honours it across PCs, a named Mutex would not) serialises the
     //     read-modify-write so two machines can't last-writer-wins each other.
     //     If the lock can't be taken it proceeds WITHOUT it (degrades to
     //     last-writer-wins, never worse) rather than blocking — the non-fatal
     //     philosophy of the rest of the codebase.
-    // Every operation is NON-FATAL (swallows IO/parse errors) — an ECO hiccup must
+    // Every operation is NON-FATAL (swallows IO/parse errors) — an ECB hiccup must
     // never block a save / release / UI message loop.
-    internal static class EcoManager
+    internal static class EcbManager
     {
         // Hard-coded VAULT root, mirroring AuditLogger.LogFile (DatabaseManager's
         // VaultFolder is private, and the rest of the codebase pins these paths in
         // code as well — see VaultManager's WipFolder/ExportRoot).
         private const string VaultFolder = @"N:\PDM-SolidWorks\VAULT";
-        private static string EcosFile => Path.Combine(VaultFolder, "ecos.xml");
-        private static string LockFilePath => Path.Combine(VaultFolder, "ecos.lock");
+        private static string EcbsFile => Path.Combine(VaultFolder, "ecbs.xml");
+        private static string LockFilePath => Path.Combine(VaultFolder, "ecbs.lock");
 
         // Workflow states (ordered). Draft → Open → Approved → Implemented → Closed.
         public static readonly string[] States =
@@ -45,7 +45,7 @@ namespace PDMLite
             "Draft", "Open", "Approved", "Implemented", "Closed"
         };
 
-        // Reason codes shared with the ECO dialog (mirrors VaultManager's
+        // Reason codes shared with the ECB dialog (mirrors VaultManager's
         // ReleaseReasonCodes shape; kept here so the PR is self-contained).
         public static readonly string[] ReasonCodes =
         {
@@ -91,38 +91,38 @@ namespace PDMLite
         {
             try
             {
-                if (File.Exists(EcosFile))
+                if (File.Exists(EcbsFile))
                 {
                     // FileShare.ReadWrite so an in-progress writer on another machine
                     // never blocks the read (mirrors AuditReportForm's audit.csv read).
-                    using (var fs = new FileStream(EcosFile, FileMode.Open,
+                    using (var fs = new FileStream(EcbsFile, FileMode.Open,
                         FileAccess.Read, FileShare.ReadWrite))
                         return XDocument.Load(fs);
                 }
             }
             catch { }
-            return new XDocument(new XElement("Ecos"));
+            return new XDocument(new XElement("Ecbs"));
         }
 
         private static void Save(XDocument d)
         {
-            string tmp = EcosFile + "." +
+            string tmp = EcbsFile + "." +
                 System.Diagnostics.Process.GetCurrentProcess().Id + ".tmp";
             try
             {
                 Directory.CreateDirectory(VaultFolder);
                 // ATOMIC: temp then swap, so a concurrent reader never sees a torn
                 // file (a partial read → XmlException → empty-doc fallback → the
-                // next Save wiping every ECO). Per-process temp name so two machines
+                // next Save wiping every ECB). Per-process temp name so two machines
                 // never share one temp even if the cross-machine lock was unavailable.
                 d.Save(tmp);
-                if (File.Exists(EcosFile)) File.Replace(tmp, EcosFile, null);
-                else File.Move(tmp, EcosFile);
+                if (File.Exists(EcbsFile)) File.Replace(tmp, EcbsFile, null);
+                else File.Move(tmp, EcbsFile);
             }
             catch
             {
                 // The swap failed — File.Replace/Move (and a failed d.Save to the
-                // temp) all leave the existing ecos.xml UNCHANGED, so the old data
+                // temp) all leave the existing ecbs.xml UNCHANGED, so the old data
                 // survives. Do NOT fall back to a truncating in-place d.Save: that
                 // re-introduces the torn write this method exists to prevent.
                 try { if (File.Exists(tmp)) File.Delete(tmp); } catch { }
@@ -153,14 +153,14 @@ namespace PDMLite
         }
 
         // ── Number sequence ───────────────────────────────────────────────
-        // Per-vault running number "ECO-0001". Computed from the max existing
-        // number so a gap (deleted ECO) never re-issues a used number. Called
+        // Per-vault running number "ECB-0001". Computed from the max existing
+        // number so a gap (deleted ECB) never re-issues a used number. Called
         // inside Mutate (lock held), so two machines can't issue the same number.
-        private const string NumberPrefix = "ECO-";
+        private const string NumberPrefix = "ECB-";
         private static string NextNumber(XDocument d)
         {
             int max = 0;
-            foreach (var e in d.Root.Elements("Eco"))
+            foreach (var e in d.Root.Elements("Ecb"))
             {
                 string n = (string)e.Attribute("Number") ?? "";
                 if (n.StartsWith(NumberPrefix, StringComparison.OrdinalIgnoreCase))
@@ -178,24 +178,24 @@ namespace PDMLite
         private const string DateFmt = "yyyy-MM-dd HH:mm:ss"; // ISO so it sorts
 
         // ── Element <-> POCO round-trip ───────────────────────────────────
-        private static XElement ToElement(Eco eco)
+        private static XElement ToElement(Ecb ecb)
         {
-            var el = new XElement("Eco",
-                new XAttribute("Id", eco.Id ?? ""),
-                new XAttribute("Number", eco.Number ?? ""),
-                new XAttribute("State", eco.State ?? "Draft"),
-                new XAttribute("CreatedBy", eco.CreatedBy ?? ""),
-                new XAttribute("CreatedDate", eco.CreatedDate ?? ""),
-                new XAttribute("ClosedBy", eco.ClosedBy ?? ""),
-                new XAttribute("ClosedDate", eco.ClosedDate ?? ""),
-                new XAttribute("BaselineAssemblyPath", eco.BaselineAssemblyPath ?? ""),
-                new XAttribute("BaselineRev", eco.BaselineRev ?? ""),
-                new XElement("Title", eco.Title ?? ""),
-                new XElement("Description", eco.Description ?? ""),
-                new XElement("Reason", eco.Reason ?? ""));
+            var el = new XElement("Ecb",
+                new XAttribute("Id", ecb.Id ?? ""),
+                new XAttribute("Number", ecb.Number ?? ""),
+                new XAttribute("State", ecb.State ?? "Draft"),
+                new XAttribute("CreatedBy", ecb.CreatedBy ?? ""),
+                new XAttribute("CreatedDate", ecb.CreatedDate ?? ""),
+                new XAttribute("ClosedBy", ecb.ClosedBy ?? ""),
+                new XAttribute("ClosedDate", ecb.ClosedDate ?? ""),
+                new XAttribute("BaselineAssemblyPath", ecb.BaselineAssemblyPath ?? ""),
+                new XAttribute("BaselineRev", ecb.BaselineRev ?? ""),
+                new XElement("Title", ecb.Title ?? ""),
+                new XElement("Description", ecb.Description ?? ""),
+                new XElement("Reason", ecb.Reason ?? ""));
             var items = new XElement("Items");
-            if (eco.Items != null)
-                foreach (var it in eco.Items)
+            if (ecb.Items != null)
+                foreach (var it in ecb.Items)
                     items.Add(new XElement("Item",
                         new XAttribute("FilePath", it.FilePath ?? ""),
                         new XAttribute("PartNo", it.PartNo ?? ""),
@@ -205,9 +205,9 @@ namespace PDMLite
             return el;
         }
 
-        private static Eco FromElement(XElement el)
+        private static Ecb FromElement(XElement el)
         {
-            var eco = new Eco
+            var ecb = new Ecb
             {
                 Id = (string)el.Attribute("Id") ?? "",
                 Number = (string)el.Attribute("Number") ?? "",
@@ -221,46 +221,46 @@ namespace PDMLite
                 Title = (string)el.Element("Title") ?? "",
                 Description = (string)el.Element("Description") ?? "",
                 Reason = (string)el.Element("Reason") ?? "",
-                Items = new List<EcoAffectedItem>()
+                Items = new List<EcbAffectedItem>()
             };
             var items = el.Element("Items");
             if (items != null)
                 foreach (var it in items.Elements("Item"))
-                    eco.Items.Add(new EcoAffectedItem
+                    ecb.Items.Add(new EcbAffectedItem
                     {
                         FilePath = (string)it.Attribute("FilePath") ?? "",
                         PartNo = (string)it.Attribute("PartNo") ?? "",
                         FromRev = (string)it.Attribute("FromRev") ?? "",
                         ToRev = (string)it.Attribute("ToRev") ?? ""
                     });
-            return eco;
+            return ecb;
         }
 
         // ── Public API ────────────────────────────────────────────────────
 
-        // Persists a NEW ECO (assigns Id + Number + CreatedBy/Date if absent),
-        // returns the saved Eco (with its assigned Number/Id), or null on failure.
-        // Audit-logged "EcoCreated".
-        public static Eco CreateEco(Eco eco)
+        // Persists a NEW ECB (assigns Id + Number + CreatedBy/Date if absent),
+        // returns the saved Ecb (with its assigned Number/Id), or null on failure.
+        // Audit-logged "EcbCreated".
+        public static Ecb CreateEcb(Ecb ecb)
         {
-            if (eco == null) return null;
+            if (ecb == null) return null;
             var saved = Mutate(d =>
             {
-                if (string.IsNullOrEmpty(eco.Id))
-                    eco.Id = Guid.NewGuid().ToString("N");
-                if (string.IsNullOrEmpty(eco.Number))
-                    eco.Number = NextNumber(d);
-                if (string.IsNullOrEmpty(eco.CreatedBy))
-                    eco.CreatedBy = PDMLiteAddin.CurrentUser;
-                if (string.IsNullOrEmpty(eco.CreatedDate))
-                    eco.CreatedDate = DateTime.Now.ToString(DateFmt,
+                if (string.IsNullOrEmpty(ecb.Id))
+                    ecb.Id = Guid.NewGuid().ToString("N");
+                if (string.IsNullOrEmpty(ecb.Number))
+                    ecb.Number = NextNumber(d);
+                if (string.IsNullOrEmpty(ecb.CreatedBy))
+                    ecb.CreatedBy = PDMLiteAddin.CurrentUser;
+                if (string.IsNullOrEmpty(ecb.CreatedDate))
+                    ecb.CreatedDate = DateTime.Now.ToString(DateFmt,
                         CultureInfo.InvariantCulture);
-                if (string.IsNullOrEmpty(eco.State)) eco.State = "Draft";
-                d.Root.Add(ToElement(eco));
-                return eco;
+                if (string.IsNullOrEmpty(ecb.State)) ecb.State = "Draft";
+                d.Root.Add(ToElement(ecb));
+                return ecb;
             });
             if (saved != null)
-                AuditLogger.Log("EcoCreated", PDMLiteAddin.CurrentUser,
+                AuditLogger.Log("EcbCreated", PDMLiteAddin.CurrentUser,
                     saved.Number ?? "", "", "",
                     (saved.Title ?? "") +
                     (saved.Items != null && saved.Items.Count > 0
@@ -268,34 +268,34 @@ namespace PDMLite
             return saved;
         }
 
-        // Returns all ECOs, MOST RECENT FIRST (CreatedDate ISO sorts), optionally
+        // Returns all ECBs, MOST RECENT FIRST (CreatedDate ISO sorts), optionally
         // filtered to one state ("" / null = all). Read-only; never writes.
-        public static List<Eco> GetEcos(string stateFilter = null)
+        public static List<Ecb> GetEcbs(string stateFilter = null)
         {
             lock (_lock)
             {
                 try
                 {
-                    var list = Load().Root.Elements("Eco").Select(FromElement);
+                    var list = Load().Root.Elements("Ecb").Select(FromElement);
                     if (!string.IsNullOrEmpty(stateFilter))
                         list = list.Where(e => string.Equals(e.State, stateFilter,
                             StringComparison.OrdinalIgnoreCase));
                     return list.OrderByDescending(e => e.CreatedDate ?? "",
                         StringComparer.Ordinal).ToList();
                 }
-                catch { return new List<Eco>(); }
+                catch { return new List<Ecb>(); }
             }
         }
 
-        // Returns one ECO by Id, or null.
-        public static Eco GetEco(string id)
+        // Returns one ECB by Id, or null.
+        public static Ecb GetEcb(string id)
         {
             if (string.IsNullOrEmpty(id)) return null;
             lock (_lock)
             {
                 try
                 {
-                    var el = Load().Root.Elements("Eco").FirstOrDefault(e =>
+                    var el = Load().Root.Elements("Ecb").FirstOrDefault(e =>
                         string.Equals((string)e.Attribute("Id"), id,
                             StringComparison.OrdinalIgnoreCase));
                     return el == null ? null : FromElement(el);
@@ -304,36 +304,36 @@ namespace PDMLite
             }
         }
 
-        // Replaces an existing ECO in place (matched by Id), preserving its
-        // Number/CreatedBy/CreatedDate. Returns true on success. Audit "EcoUpdated".
-        public static bool UpdateEco(Eco eco)
+        // Replaces an existing ECB in place (matched by Id), preserving its
+        // Number/CreatedBy/CreatedDate. Returns true on success. Audit "EcbUpdated".
+        public static bool UpdateEcb(Ecb ecb)
         {
-            if (eco == null || string.IsNullOrEmpty(eco.Id)) return false;
+            if (ecb == null || string.IsNullOrEmpty(ecb.Id)) return false;
             bool ok = Mutate(d =>
             {
-                var el = d.Root.Elements("Eco").FirstOrDefault(e =>
-                    string.Equals((string)e.Attribute("Id"), eco.Id,
+                var el = d.Root.Elements("Ecb").FirstOrDefault(e =>
+                    string.Equals((string)e.Attribute("Id"), ecb.Id,
                         StringComparison.OrdinalIgnoreCase));
                 if (el == null) return false;
                 // Preserve immutable identity fields from the stored record.
-                if (string.IsNullOrEmpty(eco.Number))
-                    eco.Number = (string)el.Attribute("Number") ?? "";
-                if (string.IsNullOrEmpty(eco.CreatedBy))
-                    eco.CreatedBy = (string)el.Attribute("CreatedBy") ?? "";
-                if (string.IsNullOrEmpty(eco.CreatedDate))
-                    eco.CreatedDate = (string)el.Attribute("CreatedDate") ?? "";
-                el.ReplaceWith(ToElement(eco));
+                if (string.IsNullOrEmpty(ecb.Number))
+                    ecb.Number = (string)el.Attribute("Number") ?? "";
+                if (string.IsNullOrEmpty(ecb.CreatedBy))
+                    ecb.CreatedBy = (string)el.Attribute("CreatedBy") ?? "";
+                if (string.IsNullOrEmpty(ecb.CreatedDate))
+                    ecb.CreatedDate = (string)el.Attribute("CreatedDate") ?? "";
+                el.ReplaceWith(ToElement(ecb));
                 return true;
             });
             if (ok)
-                AuditLogger.Log("EcoUpdated", PDMLiteAddin.CurrentUser,
-                    eco.Number ?? "", "", "", eco.Title ?? "");
+                AuditLogger.Log("EcbUpdated", PDMLiteAddin.CurrentUser,
+                    ecb.Number ?? "", "", "", ecb.Title ?? "");
             return ok;
         }
 
-        // Flips an ECO's State (matched by Id). On "Closed" stamps ClosedBy/Date.
-        // Returns true on success. Audit "EcoClosed" when closing, else "EcoUpdated".
-        public static bool SetEcoState(string id, string state)
+        // Flips an ECB's State (matched by Id). On "Closed" stamps ClosedBy/Date.
+        // Returns true on success. Audit "EcbClosed" when closing, else "EcbUpdated".
+        public static bool SetEcbState(string id, string state)
         {
             if (string.IsNullOrEmpty(id) || string.IsNullOrEmpty(state)) return false;
             bool closing = string.Equals(state, "Closed",
@@ -341,7 +341,7 @@ namespace PDMLite
             string number = null;
             bool ok = Mutate(d =>
             {
-                var el = d.Root.Elements("Eco").FirstOrDefault(e =>
+                var el = d.Root.Elements("Ecb").FirstOrDefault(e =>
                     string.Equals((string)e.Attribute("Id"), id,
                         StringComparison.OrdinalIgnoreCase));
                 if (el == null) return false;
@@ -362,7 +362,7 @@ namespace PDMLite
                 return true;
             });
             if (ok)
-                AuditLogger.Log(closing ? "EcoClosed" : "EcoUpdated",
+                AuditLogger.Log(closing ? "EcbClosed" : "EcbUpdated",
                     PDMLiteAddin.CurrentUser, number ?? "", "", "",
                     "State → " + state);
             return ok;
@@ -378,13 +378,13 @@ namespace PDMLite
 
     // ── POCOs (top-level, like VaultManager.WhereUsedEntry / BatchResult) ──
 
-    // One Engineering Change Order. Id is a GUID "N" (collision-free across
+    // One Engineering Change Bulletin. Id is a GUID "N" (collision-free across
     // machines, like RevisionRequest ids); Number is the per-vault running
-    // "ECO-0001"; dates are ISO "yyyy-MM-dd HH:mm:ss" (sort chronologically).
-    public class Eco
+    // "ECB-0001"; dates are ISO "yyyy-MM-dd HH:mm:ss" (sort chronologically).
+    public class Ecb
     {
         public string Id;                    // Guid "N"
-        public string Number;                // "ECO-0001"
+        public string Number;                // "ECB-0001"
         public string Title;
         public string Description;
         public string Reason;                // categorised reason code (+ detail)
@@ -393,15 +393,15 @@ namespace PDMLite
         public string CreatedDate;           // ISO
         public string ClosedBy;
         public string ClosedDate;            // ISO
-        public List<EcoAffectedItem> Items = new List<EcoAffectedItem>();
+        public List<EcbAffectedItem> Items = new List<EcbAffectedItem>();
         // Optional link to the assembly whose as-released baseline anchors this
-        // change (so the ECO can be tied to a specific released file set).
+        // change (so the ECB can be tied to a specific released file set).
         public string BaselineAssemblyPath;
         public string BaselineRev;
     }
 
-    // One affected item on an ECO: the file and its before/after revision.
-    public class EcoAffectedItem
+    // One affected item on an ECB: the file and its before/after revision.
+    public class EcbAffectedItem
     {
         public string FilePath;
         public string PartNo;
